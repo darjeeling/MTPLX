@@ -3861,6 +3861,47 @@ def _session_bank_cold_tier_from_args(args: argparse.Namespace) -> Any | None:
     )
 
 
+def _owner_settled_eval(*values: Any) -> None:
+    """Settle model-owner work AND prove the owner is alive (#86, #295).
+
+    The AR batch pump drives ``mlx_lm``'s ``BatchGenerator``, whose prefill
+    happens inside the library; the only heartbeat this lane had was
+    ``record_batch_step``, which fires solely when a decode step produced
+    generation responses. A long shared-prefix prefill or a prefill-only pump
+    cycle therefore ticked nothing, and the #86 stream stall watchdog reads
+    "alive" as "the owner heartbeat is advancing", so a healthy width-8
+    prefill that outlasted the stall deadline read as a wedge. Deliberately
+    used only on the owner thread: ticking from a request thread would forge
+    owner liveness and blind that watchdog.
+    """
+
+    import mlx.core as mx
+
+    mx.eval(*values)
+    progress_heartbeat.tick()
+
+
+def _owner_settled_pump_step(
+    prompt_responses: Any, generation_responses: Any
+) -> None:
+    """Tick owner progress for ONE ``BatchGenerator`` step, only if it ran.
+
+    The library settles its own step values before returning, so there is
+    nothing left for us to ``mx.eval`` — the heartbeat tick is the whole
+    payload, and that makes an unconditional tick pure fabrication.
+    ``next()`` can hand back two empty lists (a transient library step, or a
+    pump whose ``_active`` map has desynchronised from the generator); ticking
+    there lets the pump spin forever while continuously resetting the #86
+    stream stall watchdog: streams starve and nothing ever aborts. A prompt
+    response (a settled prefill chunk) or a generation response (a settled
+    decode step) is the only proof a step actually completed.
+    """
+
+    if not prompt_responses and not generation_responses:
+        return
+    progress_heartbeat.tick()
+
+
 class _BatchedARJob:
     """One OpenAI request admitted into the live AR batch lane."""
 
@@ -4245,11 +4286,11 @@ class _BatchedARGenerationService:
                     cache=cache,
                     return_hidden=False,
                 )
-            mx.eval(logits, [entry.state for entry in cache])
+            _owner_settled_eval(logits, [entry.state for entry in cache])
             prefill_s = time.perf_counter() - prefill_started
             snapshot_started = time.perf_counter()
             snapshot = snapshot_cache(cache)
-            mx.eval(snapshot.states, snapshot.meta_states)
+            _owner_settled_eval(snapshot.states, snapshot.meta_states)
             snapshot_s = time.perf_counter() - snapshot_started
         except Exception as exc:
             for job in candidates:
@@ -4662,7 +4703,6 @@ class _BatchedARGenerationService:
                 job.future.set_exception(exc)
 
     def _pump(self) -> None:
-        import mlx.core as mx
         from mlx_lm.generate import BatchGenerator
 
         config = _scheduler_config_from_args(self.state.args)
@@ -4791,7 +4831,7 @@ class _BatchedARGenerationService:
                             self._active.pop(uid, None)
                         self._commit_finished_row(job, response)
                         self._complete_job(job, finish_reason=str(finish_reason))
-                mx.eval([])
+                _owner_settled_pump_step(prompt_responses, generation_responses)
         except BaseException as exc:
             self._fail_all(exc)
             raise
