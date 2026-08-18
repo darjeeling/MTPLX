@@ -118,9 +118,10 @@ def _eval(*values: Any) -> None:
     """Settle owner-thread work AND prove the model owner is alive (#86, #295).
 
     Mirrors :func:`mtplx.generation._eval`. The #86 stream stall watchdog
-    reads "alive" as "the owner progress heartbeat is advancing", so a batch
-    pump that settles evals for minutes without ticking is indistinguishable
-    from a wedge, and its streams would be failed at the stall deadline.
+    and the smart-fan activity probe both read "alive" as "the owner progress
+    heartbeat is advancing", so a batch pump that settles evals for minutes
+    without ticking is indistinguishable from a wedge: its streams would be
+    failed at the stall deadline and its fan leases dropped mid-flight.
     ``mlx.core`` is imported lazily to keep this module's import cost
     unchanged.
     """

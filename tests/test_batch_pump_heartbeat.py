@@ -1,6 +1,6 @@
 """Every long-lived model-owner pump must tick the progress heartbeat.
 
-The #86 stream stall watchdog reads "alive" as "the owner heartbeat is
+The smart-fan activity probe (#201) now reads "busy" as "the owner heartbeat is
 advancing", so any owner-thread pump that can run for minutes without ticking is
 indistinguishable from a wedge. ``mtplx/generation.py`` already routes every
 settled eval through a ticking ``_eval``; the batch lanes did not:
@@ -13,9 +13,10 @@ settled eval through a ticking ``_eval``; the batch lanes did not:
   cycle raw, and its only heartbeat path (``record_batch_step``) fires solely
   when a decode step produced generation responses — never during prefill.
 
-A healthy width-8 cohort prefill therefore read as frozen, and one that
-outlasted ``MTPLX_STREAM_STALL_DEADLINE_S`` had its streams failed as stalled.
-These tests pin the tick at the source: where the pumps settle their evals.
+A healthy width-8 cohort prefill therefore read as frozen, and past
+``FOREGROUND_STALL_DEADLINE_S`` the stale-lease reconciler would drop the fan
+leases out from under live work — a direct R2 violation. These tests pin the
+tick at the source: where the pumps settle their evals.
 """
 
 from __future__ import annotations
@@ -110,14 +111,54 @@ def test_ar_batch_service_has_no_untracked_settled_eval():
     assert _raw_eval_lines(_class_tree(openai_mod, "_BatchedARGenerationService")) == []
 
 
+class _StubState:
+    """Minimal stand-in exposing exactly what the fan activity probe reads."""
+
+    def __init__(self, *, stall_probe):
+        self._fan_stall_probe = stall_probe
+        self.model_scheduler = None
+        self.last_request_started_at = 0.0
+        self.last_request_at = 0.0
+
+    def has_foreground(self) -> bool:
+        return True
+
+
+def test_a_long_batch_cohort_that_settles_evals_keeps_its_fan_boost():
+    """R2 with the REAL probe and the REAL tick path — no fakes.
+
+    Wall time far past the deadline is not a stall as long as the pump settles
+    evals. Before the pumps ticked, this cohort read as wedged and lost its
+    leases.
+    """
+
+    now = [0.0]
+    probe = openai_mod._OwnerStallProbe(deadline_s=100.0, clock=lambda: now[0])
+    state = _StubState(stall_probe=probe)
+    fan_probe = openai_mod.ServerState._smart_fan_activity_probe
+
+    assert fan_probe(state) is True
+
+    # A genuinely wedged owner: no eval settles for well past the deadline.
+    now[0] = 500.0
+    assert fan_probe(state) is False
+
+    # A healthy cohort: 8 minutes of pump cycles, each settling one eval.
+    for _ in range(8):
+        a3b_mod._eval(mx.array([1]))
+        now[0] += 60.0
+        assert fan_probe(state) is True, "long batch work must keep its fan boost"
+
+
 # --- Forged progress: an empty pump step is not progress -------------------
 #
 # ``BatchGenerator.next()`` can return two empty response lists: a transient
 # library step, or a pump whose ``_active`` map has desynchronised from the
-# generator. Ticking the owner heartbeat there forges liveness: the pump can
-# spin forever while continuously resetting the #86 stream stall watchdog.
-# Streams get nothing and nothing ever aborts. Only a settled prompt or
-# generation response proves a step ran.
+# generator. Ticking the owner heartbeat there forges liveness — the pump can
+# spin forever while continuously resetting BOTH the #86 stream stall watchdog
+# and the #201 fan activity probe. Streams get nothing, nothing ever aborts,
+# and the fan leases stay pinned: exactly the failure this branch exists to
+# contain. Only a settled prompt or generation response proves a step ran.
 
 
 class _FakeResponse:
@@ -164,3 +205,19 @@ def test_the_pump_never_ticks_outside_the_proven_step_gate():
     }
     assert "_owner_settled_eval" not in called
     assert "_owner_settled_pump_step" in called
+
+
+def test_a_pump_spinning_on_empty_steps_is_eventually_detected_as_stalled():
+    """The regression, end to end on the real probe: a pump that produces no
+    responses must age into a stall rather than pinning the fans forever."""
+
+    now = [0.0]
+    probe = openai_mod._OwnerStallProbe(deadline_s=100.0, clock=lambda: now[0])
+    state = _StubState(stall_probe=probe)
+    fan_probe = openai_mod.ServerState._smart_fan_activity_probe
+
+    assert fan_probe(state) is True
+    for _ in range(8):
+        openai_mod._owner_settled_pump_step([], [])
+        now[0] += 60.0
+    assert fan_probe(state) is False, "an empty-spinning pump must read stalled"

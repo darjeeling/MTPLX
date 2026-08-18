@@ -421,6 +421,21 @@ STREAM_STALL_DEADLINE_S = _resolve_stream_stall_deadline_s(
 )
 
 
+# Smart-fan counterpart of the stream deadline (#201, PR #295). The stale-lease
+# reconciler only drops leaked fan leases while the activity probe reports the
+# engine idle, and a WEDGED foreground request used to read as busy forever:
+# on 2026-08-18 twenty leases pinned both fans at max for ~15 h behind a single
+# parked request whose client was already dead. This deadline is what lets the
+# probe call that stall "not busy" so the existing restore path can run. Kept
+# below the stream deadline because reporting idle only stops *claiming* the
+# fans. It never cancels a request, so it is safe to be eager here. Total time
+# to fan restore is this plus MTPLX_SMART_FAN_STALE_LEASE_S. 0 disables (the
+# probe then keeps the presence-only behaviour).
+FOREGROUND_STALL_DEADLINE_S = float(
+    os.environ.get("MTPLX_FOREGROUND_STALL_DEADLINE_S") or 180.0
+)
+
+
 def set_stream_stall_deadline_s(value: float | None) -> float:
     """Apply ``--stream-stall-deadline-s`` for this process (issue #448).
 
@@ -3700,6 +3715,12 @@ class ServerState:
         self.args.fan_mode = self.fan_mode
         from mtplx.thermal import SmartFanController
 
+        # Read side of the owner progress heartbeat for the fan activity probe
+        # (#201). Separate instance from the per-stream watchdogs so its
+        # baseline is never stolen by a concurrent stream poll.
+        self._fan_stall_probe = _OwnerStallProbe(
+            deadline_s=FOREGROUND_STALL_DEADLINE_S
+        )
         self.smart_fans = SmartFanController(
             log=lambda line: LOGGER.info("%s", line),
             activity_probe=self._smart_fan_activity_probe,
@@ -3763,8 +3784,21 @@ class ServerState:
         queues and the executing item of either lane (foreground + idle
         postcommit), and a short recency window so back-to-back agent turns
         never look idle between requests.
+
+        A registered foreground request is only busy while the owner thread is
+        actually ADVANCING. A wedged request stays registered forever, and
+        treating presence as progress is what let a single parked request pin
+        both fans at max for ~15 h (2026-08-18). The owner progress heartbeat
+        ticks many times per second under any healthy prefill or decode, so a
+        reading frozen past FOREGROUND_STALL_DEADLINE_S means parked, not slow.
+        Reporting idle here does not cancel anything. It only stops claiming
+        the fans, letting the SmartFanController stale-lease reconciler (#201)
+        run its normal restore.
         """
         if self.has_foreground():
+            stall_probe = getattr(self, "_fan_stall_probe", None)
+            if stall_probe is not None and stall_probe.observe() is not None:
+                return False
             return True
         scheduler = getattr(self, "model_scheduler", None)
         if scheduler is not None and hasattr(scheduler, "any_pending_or_active"):
@@ -3779,8 +3813,21 @@ class ServerState:
 
     def begin_foreground(self) -> None:
         with self.foreground_lock:
+            was_idle = self.foreground_active == 0
             self.foreground_active += 1
             self.last_request_started_at = time.time()
+            # Rearm the fan activity probe on the idle -> active edge only.
+            # The probe is a single long-lived instance that is READ only
+            # while foreground work exists, so after a quiet window its
+            # frozen-since baseline is hours old and the next request would
+            # be classified wedged on its FIRST poll, collapsing the
+            # documented FOREGROUND_STALL_DEADLINE_S + stale-lease budget.
+            # Never rearm for additional concurrent requests: a steady
+            # arrival stream would otherwise hide a genuinely wedged owner.
+            if was_idle:
+                probe = getattr(self, "_fan_stall_probe", None)
+                if probe is not None:
+                    probe.rearm()
 
     def end_foreground(self) -> None:
         with self.foreground_lock:
@@ -3868,11 +3915,11 @@ def _owner_settled_eval(*values: Any) -> None:
     happens inside the library; the only heartbeat this lane had was
     ``record_batch_step``, which fires solely when a decode step produced
     generation responses. A long shared-prefix prefill or a prefill-only pump
-    cycle therefore ticked nothing, and the #86 stream stall watchdog reads
-    "alive" as "the owner heartbeat is advancing", so a healthy width-8
-    prefill that outlasted the stall deadline read as a wedge. Deliberately
-    used only on the owner thread: ticking from a request thread would forge
-    owner liveness and blind that watchdog.
+    cycle therefore ticked nothing, and both the #86 stream stall watchdog
+    and the smart-fan activity probe read "alive" as "the owner heartbeat is
+    advancing", so a healthy width-8 prefill that outlasted their deadlines
+    read as a wedge. Deliberately used only on the owner thread: ticking from
+    a request thread would forge owner liveness and blind both readers.
     """
 
     import mlx.core as mx
@@ -3891,10 +3938,11 @@ def _owner_settled_pump_step(
     payload, and that makes an unconditional tick pure fabrication.
     ``next()`` can hand back two empty lists (a transient library step, or a
     pump whose ``_active`` map has desynchronised from the generator); ticking
-    there lets the pump spin forever while continuously resetting the #86
-    stream stall watchdog: streams starve and nothing ever aborts. A prompt
-    response (a settled prefill chunk) or a generation response (a settled
-    decode step) is the only proof a step actually completed.
+    there lets the pump spin forever while continuously resetting both the
+    #86 stream stall watchdog and the fan activity probe: streams starve,
+    nothing ever aborts, and the fan leases stay pinned. A prompt response (a
+    settled prefill chunk) or a generation response (a settled decode step) is
+    the only proof a step actually completed.
     """
 
     if not prompt_responses and not generation_responses:
@@ -19726,6 +19774,14 @@ class _OwnerStallProbe:
         self._clock = clock
         self._last_value = progress()
         self._frozen_since_s = clock()
+
+    def rearm(self, now_s: float | None = None) -> None:
+        """Restart the frozen-since window from the current heartbeat.
+
+        Used when a probe that nobody was reading becomes live again, so an
+        idle gap is not charged against the newly arrived work."""
+        self._last_value = self._progress()
+        self._frozen_since_s = self._clock() if now_s is None else now_s
 
     def observe(self, now_s: float | None = None) -> float | None:
         """Return how long the owner has been frozen once past the deadline."""

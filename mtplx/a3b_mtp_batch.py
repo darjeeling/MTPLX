@@ -95,7 +95,8 @@ def _eval(*values) -> None:
     prefill + verify/commit driver as ONE scheduler work item, so without a
     tick per settled eval a healthy width-8 cohort looks frozen to every
     reader of the owner progress heartbeat: the #86 stream stall watchdog
-    would fail its streams once the prefill outlasted the stall deadline.
+    would fail its streams once the prefill outlasted the stall deadline, and
+    the smart-fan activity probe would give up its fan leases mid-flight.
     """
 
     mx.eval(*values)
