@@ -458,10 +458,12 @@ public struct ModelDownloader: Sendable {
         return root.appendingPathComponent(safeName, isDirectory: true)
     }
 
-    /// Return the CLI model reference for a direct child of the configured
-    /// MTPLX cache. Paths outside that cache are user-managed local models
-    /// and must never receive the app's destructive removal affordance.
-    public func cachedModelReference(forInstalledPath path: String) -> String? {
+    /// The cache entry (folder name) behind an installed path, or nil when
+    /// the path is not a plain direct child of the configured MTPLX cache.
+    /// Paths outside that cache are user-managed local models, and a
+    /// symlinked entry points at storage the app does not own; neither may
+    /// receive the app's destructive removal affordance.
+    public func cachedEntryName(forInstalledPath path: String) -> String? {
         let root = (modelCacheRoot ?? Self.defaultCacheRoot(env: processEnvironment))
             .standardizedFileURL
         let candidate = URL(fileURLWithPath: path).standardizedFileURL
@@ -472,7 +474,14 @@ public struct ModelDownloader: Sendable {
            attributes[.type] as? FileAttributeType == .typeSymbolicLink {
             return nil
         }
-        return safeName.replacingOccurrences(of: "--", with: "/")
+        return safeName
+    }
+
+    /// The Hugging Face style reference (`org/name`) of a cache entry, for
+    /// matching against selections and pack-update records. The CLI is
+    /// handed the entry name itself, never this form.
+    public func cachedModelReference(forInstalledPath path: String) -> String? {
+        cachedEntryName(forInstalledPath: path)?.replacingOccurrences(of: "--", with: "/")
     }
 
     public static func defaultCacheRoot(env: [String: String]) -> URL {
@@ -576,24 +585,34 @@ public struct ModelDownloader: Sendable {
         return try JSONDecoder().decode(ModelUpdateCheckPayload.self, from: stdout).models
     }
 
-    static func removalArguments(repo: String, cacheRoot: URL?) -> [String] {
-        var arguments = ["remove", repo, "--missing-ok", "--json"]
-        if let cacheRoot {
-            arguments += ["--cache-dir", cacheRoot.path]
-        }
-        return arguments
+    /// `--yes` because the app already confirmed with the user: `mtplx
+    /// remove` refuses a non-interactive delete without it (a GUI app's
+    /// stdin is never a terminal) and would otherwise sit on its prompt
+    /// until the watchdog kills it. `--cache-dir` is always explicit so the
+    /// CLI deletes inside the root the entry was fenced against, never a
+    /// root it infers from its own environment. The entry's folder name is
+    /// the reference: the CLI takes it verbatim, so the folder removed is
+    /// the folder the user pointed at.
+    static func removalArguments(directoryName: String, cacheRoot: URL) -> [String] {
+        [
+            "remove", directoryName, "--yes", "--missing-ok", "--json",
+            "--cache-dir", cacheRoot.path,
+        ]
     }
 
     /// Delete one direct child of the MTPLX model cache through the public
-    /// CLI contract. The caller owns confirmation and selected-model guards.
+    /// CLI contract. The caller owns confirmation and the selected- and
+    /// serving-model guards.
     public func removeCachedModel(
-        repo: String,
+        directoryName: String,
         timeoutSeconds: TimeInterval = 120
     ) async throws -> CachedModelRemovalResult {
         let executable = try resolveMtplxExecutable { _ in }
+        let cacheRoot = (modelCacheRoot ?? Self.defaultCacheRoot(env: processEnvironment))
+            .standardizedFileURL
         let process = Process()
         process.executableURL = executable
-        process.arguments = Self.removalArguments(repo: repo, cacheRoot: modelCacheRoot)
+        process.arguments = Self.removalArguments(directoryName: directoryName, cacheRoot: cacheRoot)
         var env = processEnvironment
         env["PATH"] = MTPLXCommandBuilder.expandedPATH(environment: processEnvironment)
         process.environment = MTPLXCommandBuilder.pythonBytecodeSafeEnvironment(
@@ -601,6 +620,9 @@ public struct ModelDownloader: Sendable {
         )
         let outPipe = Pipe()
         let errPipe = Pipe()
+        // Never hand the CLI a terminal: a delete must not be able to wait
+        // on a prompt the user cannot see.
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = outPipe
         process.standardError = errPipe
         try process.run()
@@ -631,8 +653,9 @@ public struct ModelDownloader: Sendable {
                 ]
             )
         }
+        let result: CachedModelRemovalResult
         do {
-            return try JSONDecoder().decode(CachedModelRemovalResult.self, from: stdout)
+            result = try JSONDecoder().decode(CachedModelRemovalResult.self, from: stdout)
         } catch {
             throw NSError(
                 domain: "ModelDownloader",
@@ -642,6 +665,20 @@ public struct ModelDownloader: Sendable {
                 ]
             )
         }
+        // Contract check, not a guard: the CLI reports the folder it acted
+        // on, and that must be the entry named above. Anything else is a
+        // contract drift that has to be loud, not a state to recover from.
+        guard URL(fileURLWithPath: result.path).lastPathComponent == directoryName else {
+            throw NSError(
+                domain: "ModelDownloader",
+                code: 3,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "MTPLX reported acting on \(result.path) instead of \(directoryName)"
+                ]
+            )
+        }
+        return result
     }
 
     private func resolveMtplxExecutable(
