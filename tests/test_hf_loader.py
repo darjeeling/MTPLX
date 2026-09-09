@@ -26,6 +26,7 @@ from mtplx.hf_loader import (
     pull_model,
     remove_cached_model,
     repo_id_from_model_ref,
+    resolve_cached_model_target,
     resolve_model_path,
     safe_model_name,
     validate_mtplx_model_files,
@@ -1249,6 +1250,45 @@ def test_remove_cached_model_unlinks_symlink_without_deleting_target(tmp_path: P
     assert not link.exists()
     assert not link.is_symlink()
     assert (external / "weights.safetensors").read_bytes() == b"weights"
+
+
+def test_remove_exact_cache_entry_name_beats_public_alias(tmp_path: Path):
+    from mtplx.artifacts import _KNOWN_PUBLIC_MODEL_ALIASES
+
+    alias, canonical_repo = next(
+        (key, value) for key, value in _KNOWN_PUBLIC_MODEL_ALIASES.items() if "/" not in key
+    )
+    hand_named = tmp_path / alias
+    hand_named.mkdir()
+    (hand_named / "config.json").write_text("{}", encoding="utf-8")
+    canonical = tmp_path / safe_model_name(canonical_repo)
+    canonical.mkdir()
+    (canonical / "config.json").write_text("{}", encoding="utf-8")
+
+    repo_id, target = resolve_cached_model_target(alias, cache_dir=tmp_path)
+    assert target == hand_named
+    assert repo_id == alias
+
+    removed = remove_cached_model(alias, cache_dir=tmp_path)
+
+    assert removed["path"] == str(hand_named)
+    assert not hand_named.exists()
+    assert (canonical / "config.json").exists()
+
+
+def test_remove_alias_still_resolves_when_no_entry_spells_it(tmp_path: Path):
+    from mtplx.artifacts import _KNOWN_PUBLIC_MODEL_ALIASES
+
+    alias, canonical_repo = next(
+        (key, value) for key, value in _KNOWN_PUBLIC_MODEL_ALIASES.items() if "/" not in key
+    )
+    canonical = tmp_path / safe_model_name(canonical_repo)
+    canonical.mkdir()
+
+    repo_id, target = resolve_cached_model_target(alias, cache_dir=tmp_path)
+
+    assert repo_id == canonical_repo
+    assert target == canonical
 
 
 def test_remove_cached_model_refuses_non_directory_cache_entry(tmp_path: Path):
