@@ -8,6 +8,24 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Added
 
+- **`forge build` converts Qwen3.8-Flash-Next sources** (PR #508, Bradford
+  Matthews, issue #390). Forge handed every Flash-Next fine-tune to the
+  pinned mlx-lm, which does not know the `qwen4_exp` architecture, and
+  stopped with `Model type qwen4_exp not supported`. A BF16 source of that
+  family now takes its own path. The 51B n-gram table is quantized one
+  shard at a time straight into `ngram-table.safetensors` and is never held
+  in memory. The trunk is converted with MTPLX's own model code under the
+  Optimized Speed recipe, one tensor at a time, because saving a whole
+  shard in one step ran long enough for macOS to stop the GPU work.
+  `module_overrides` still apply on top. The draft head is written in the
+  layout the runtime loads. New recipe keys: `ngram.bits` and
+  `ngram.group_size` (default 4 and 32, the layout the runtime expects),
+  `qwen4_mtp_bits` (default: the same as the trunk) and `qwen4_qsa_8bit`.
+  A build of this family is checked on the two rows its verify step
+  measures, plain decoding and depth 3, instead of failing on `required
+  depths: D1, D2`. The contributor built
+  `orcarouter/Qwen3.8-Flash-Next-Uncensored` end to end on an M5 Max with
+  128 GB.
 - **Remove a downloaded model from the app** (PR #377, Philip John
   Basile). The model picker has a Remove action with a confirmation. It
   runs `mtplx remove` for exactly the entry shown, only inside the primary
