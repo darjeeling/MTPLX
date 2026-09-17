@@ -59,6 +59,83 @@ def pi_request_policy_extension_path(path: str | Path | None = None) -> Path:
     return pi_models_json_path(path).parent / "extensions" / PI_REQUEST_POLICY_EXTENSION_NAME
 
 
+def build_pi_settings_extension_source() -> str:
+    """Independent of the user-owned request bridge; never overwrite customization."""
+    return r'''// MTPLX-managed settings mirror. Remove this marker to take ownership.
+export default function (pi: any) {
+  let timer: any;
+  let syncInFlight: any;
+  let clientThinking: any;
+  let sessionKey: any;
+
+  const readSettings = async (ctx: any) => {
+    const model = ctx.model;
+    if (model?.provider !== "mtplx") {
+      ctx.ui.setStatus("mtplx-controls", undefined);
+      return;
+    }
+    try {
+      const key = String(ctx.sessionManager.getSessionId()) + ":" + model.id;
+      if (sessionKey !== key) {
+        sessionKey = key;
+        clientThinking = undefined;
+      }
+      const registry = ctx.modelRegistry;
+      const auth = registry.getApiKeyAndHeaders
+        ? await registry.getApiKeyAndHeaders(model)
+        : { ok: true, apiKey: await registry.getApiKey(model) };
+      if (!auth.ok) throw new Error(auth.error);
+      const headers: any = {};
+      for (const [name, value] of Object.entries({ ...model.headers, ...auth.headers })) {
+        if (typeof value === "string") headers[name] = value;
+      }
+      if (auth.apiKey) headers.Authorization = "Bearer " + auth.apiKey;
+      // Pi installs a global HTTP dispatcher whose idle connection reuse can
+      // delay these small polls. Keep control-plane reads off pooled sockets.
+      headers.Connection = "close";
+      const base = String(auth.baseUrl || model.baseUrl).replace(/[/]+$/, "");
+      const response = await fetch(base + "/mtplx/settings", {
+        headers, signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) throw new Error("settings HTTP " + response.status);
+      const settings = await response.json();
+      if (settings.managed_client_controls === "app") {
+        const effort = settings.enable_thinking === false ? "off" : settings.reasoning_effort;
+        if (!["off", "low", "medium", "high", "xhigh"].includes(effort)) {
+          throw new Error("unsupported MTPLX reasoning effort: " + effort);
+        }
+        clientThinking ??= pi.getThinkingLevel();
+        if (pi.getThinkingLevel() !== effort) pi.setThinkingLevel(effort);
+        ctx.ui.setStatus("mtplx-controls", "MTPLX controls reasoning: " + effort);
+      } else {
+        if (clientThinking !== undefined) pi.setThinkingLevel(clientThinking);
+        clientThinking = undefined;
+        ctx.ui.setStatus("mtplx-controls", undefined);
+      }
+    } catch (error) {
+      ctx.ui.setStatus("mtplx-controls", "MTPLX settings sync failed: " + String(error));
+    }
+  };
+  const syncThinking = (ctx: any) => {
+    syncInFlight ??= readSettings(ctx).finally(() => { syncInFlight = undefined; });
+    return syncInFlight;
+  };
+  const startSync = async (_event: any, ctx: any) => {
+    if (timer) clearInterval(timer);
+    await syncThinking(ctx);
+    timer = setInterval(() => { if (ctx.isIdle()) void syncThinking(ctx); }, 3000);
+    timer.unref?.();
+  };
+  pi.on("session_start", startSync);
+  pi.on("session_switch", startSync);
+  pi.on("model_select", startSync);
+  pi.on("before_agent_start", async (_event: any, ctx: any) => { await syncThinking(ctx); });
+  pi.on("session_shutdown", () => { if (timer) clearInterval(timer); });
+
+}
+'''
+
+
 def build_pi_request_policy_extension_source(
     model_id: str,
     *,
@@ -84,72 +161,6 @@ const mtplxUncapped = {uncapped_literal};
 const mtplxPiInjectedDefaultMaxTokens = {int(injected_max_tokens)};
 
 export default function (pi: any) {{
-  let timer: any;
-  let syncing = false;
-  let clientThinking: any;
-  let sessionKey: any;
-
-  const syncThinking = async (ctx: any) => {{
-    const model = ctx.model;
-    if (model?.provider !== "mtplx" || model.id !== mtplxModelID) {{
-      ctx.ui.setStatus("mtplx-controls", undefined);
-      return;
-    }}
-    if (syncing) return;
-    syncing = true;
-    try {{
-      const key = String(ctx.sessionManager.getSessionId()) + ":" + model.id;
-      if (sessionKey !== key) {{
-        sessionKey = key;
-        clientThinking = undefined;
-      }}
-      const registry = ctx.modelRegistry;
-      const auth = registry.getApiKeyAndHeaders
-        ? await registry.getApiKeyAndHeaders(model)
-        : {{ ok: true, apiKey: await registry.getApiKey(model) }};
-      if (!auth.ok) throw new Error(auth.error);
-      const headers: any = {{}};
-      for (const [name, value] of Object.entries({{ ...model.headers, ...auth.headers }})) {{
-        if (typeof value === "string") headers[name] = value;
-      }}
-      if (auth.apiKey) headers.Authorization = "Bearer " + auth.apiKey;
-      const base = String(auth.baseUrl || model.baseUrl).replace(/\\/+$/, "");
-      const response = await fetch(base + "/mtplx/settings", {{
-        headers, signal: AbortSignal.timeout(1500),
-      }});
-      if (!response.ok) throw new Error("settings HTTP " + response.status);
-      const settings = await response.json();
-      if (settings.managed_client_controls === "app") {{
-        const effort = settings.enable_thinking === false ? "off" : settings.reasoning_effort;
-        if (!["off", "low", "medium", "high", "xhigh"].includes(effort)) {{
-          throw new Error("unsupported MTPLX reasoning effort: " + effort);
-        }}
-        clientThinking ??= pi.getThinkingLevel();
-        if (pi.getThinkingLevel() !== effort) pi.setThinkingLevel(effort);
-        ctx.ui.setStatus("mtplx-controls", "MTPLX controls reasoning: " + effort);
-      }} else {{
-        if (clientThinking !== undefined) pi.setThinkingLevel(clientThinking);
-        clientThinking = undefined;
-        ctx.ui.setStatus("mtplx-controls", undefined);
-      }}
-    }} catch (error) {{
-      ctx.ui.setStatus("mtplx-controls", "MTPLX settings sync failed: " + String(error));
-    }} finally {{
-      syncing = false;
-    }}
-  }};
-  const startSync = async (_event: any, ctx: any) => {{
-    if (timer) clearInterval(timer);
-    await syncThinking(ctx);
-    timer = setInterval(() => {{ if (ctx.isIdle()) void syncThinking(ctx); }}, 3000);
-    timer.unref?.();
-  }};
-  pi.on("session_start", startSync);
-  pi.on("session_switch", startSync);
-  pi.on("model_select", startSync);
-  pi.on("before_agent_start", async (_event: any, ctx: any) => {{ await syncThinking(ctx); }});
-  pi.on("session_shutdown", () => {{ if (timer) clearInterval(timer); }});
-
   pi.on("before_provider_headers", (event: any, ctx: any) => {{
     const headers = event?.headers;
     if (!headers || typeof headers !== "object") return;
@@ -200,6 +211,15 @@ def write_pi_request_policy_extension(
     source = build_pi_request_policy_extension_source(
         model_id, uncapped=uncapped, injected_max_tokens=injected_max_tokens,
     )
+    return _write_pi_managed_extension(extension_path, source)
+
+
+def write_pi_settings_extension(path: str | Path | None = None) -> Path:
+    extension_path = pi_models_json_path(path).parent / "extensions" / "mtplx-settings-sync.ts"
+    return _write_pi_managed_extension(extension_path, build_pi_settings_extension_source())
+
+
+def _write_pi_managed_extension(extension_path: Path, source: str) -> Path:
     if extension_path.exists():
         try:
             current = extension_path.read_text(encoding="utf-8")
@@ -547,6 +567,7 @@ def write_pi_models_config(
         injected_max_tokens=int(provider_config["models"][0]["maxTokens"]),
         path=config_path,
     )
+    settings_extension_path = write_pi_settings_extension(config_path)
     return {
         "config_path": str(config_path),
         "backup_path": str(backup_path) if backup_path is not None else None,
@@ -560,6 +581,7 @@ def write_pi_models_config(
         "max_tokens": None if max_tokens is None else int(max_tokens),
         "no_hidden_max_tokens": max_tokens is None,
         "request_policy_extension_path": str(request_policy_extension_path),
+        "settings_extension_path": str(settings_extension_path),
         "uncapped_request_policy": max_tokens is None,
         "written": written,
     }

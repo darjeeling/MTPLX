@@ -323,9 +323,13 @@ public struct PiIntegration: Sendable {
         let extensionURL = configURL.deletingLastPathComponent()
             .appendingPathComponent("extensions", isDirectory: true)
             .appendingPathComponent(Self.requestPolicyExtensionName)
-        let extensionDidChange = try Self.installRequestPolicyExtensionFile(
+        let extensionDidChange = try Self.installManagedExtensionFile(
             at: extensionURL,
-            modelID: modelID
+            source: Self.requestPolicyExtensionSource(modelID: modelID)
+        )
+        let mirrorDidChange = try Self.installManagedExtensionFile(
+            at: extensionURL.deletingLastPathComponent().appendingPathComponent("mtplx-settings-sync.ts"),
+            source: Self.settingsExtensionSource()
         )
 
         let existingData = try? Data(contentsOf: configURL)
@@ -336,7 +340,7 @@ public struct PiIntegration: Sendable {
                 baseURL: baseURL,
                 modelReference: modelReference,
                 launchCommand: Self.launchCommand(for: configuration.model),
-                didChange: extensionDidChange,
+                didChange: extensionDidChange || mirrorDidChange,
                 backupPath: nil
             )
         }
@@ -366,30 +370,21 @@ public struct PiIntegration: Sendable {
     /// Pi's generated 16,384 output ceiling for the configured model while
     /// leaving explicit user caps alone. Regenerated with the current model
     /// id on every sync — a stale model pin here silently disarms both hooks.
-    static func requestPolicyExtensionSource(modelID: String) -> String {
+    static func settingsExtensionSource() -> String {
         """
-        // MTPLX-managed Pi extension. MTPLX keeps this file up to
-        // date on every sync. To take ownership (or disable it), edit it and delete
-        // this marker line: MTPLX never touches the file again once the marker and
-        // the mtplx identifiers below are gone from it.
-        const mtplxModelID = "\(modelID)";
-        const mtplxUncapped = true;
-        const mtplxPiInjectedDefaultMaxTokens = 16384;
-
+        // MTPLX-managed settings mirror. Remove this marker to take ownership.
         export default function (pi: any) {
           let timer: any;
-          let syncing = false;
+          let syncInFlight: any;
           let clientThinking: any;
           let sessionKey: any;
 
-          const syncThinking = async (ctx: any) => {
+          const readSettings = async (ctx: any) => {
             const model = ctx.model;
-            if (model?.provider !== "mtplx" || model.id !== mtplxModelID) {
+            if (model?.provider !== "mtplx") {
               ctx.ui.setStatus("mtplx-controls", undefined);
               return;
             }
-            if (syncing) return;
-            syncing = true;
             try {
               const key = String(ctx.sessionManager.getSessionId()) + ":" + model.id;
               if (sessionKey !== key) {
@@ -406,9 +401,12 @@ public struct PiIntegration: Sendable {
                 if (typeof value === "string") headers[name] = value;
               }
               if (auth.apiKey) headers.Authorization = "Bearer " + auth.apiKey;
-              const base = String(auth.baseUrl || model.baseUrl).replace(/\\/+$/, "");
+              // Pi installs a global HTTP dispatcher whose idle connection reuse can
+              // delay these small polls. Keep control-plane reads off pooled sockets.
+              headers.Connection = "close";
+              const base = String(auth.baseUrl || model.baseUrl).replace(/[/]+$/, "");
               const response = await fetch(base + "/mtplx/settings", {
-                headers, signal: AbortSignal.timeout(1500),
+                headers, signal: AbortSignal.timeout(5000),
               });
               if (!response.ok) throw new Error("settings HTTP " + response.status);
               const settings = await response.json();
@@ -427,9 +425,11 @@ public struct PiIntegration: Sendable {
               }
             } catch (error) {
               ctx.ui.setStatus("mtplx-controls", "MTPLX settings sync failed: " + String(error));
-            } finally {
-              syncing = false;
             }
+          };
+          const syncThinking = (ctx: any) => {
+            syncInFlight ??= readSettings(ctx).finally(() => { syncInFlight = undefined; });
+            return syncInFlight;
           };
           const startSync = async (_event: any, ctx: any) => {
             if (timer) clearInterval(timer);
@@ -443,6 +443,22 @@ public struct PiIntegration: Sendable {
           pi.on("before_agent_start", async (_event: any, ctx: any) => { await syncThinking(ctx); });
           pi.on("session_shutdown", () => { if (timer) clearInterval(timer); });
 
+        }
+
+        """
+    }
+
+    static func requestPolicyExtensionSource(modelID: String) -> String {
+        """
+        // MTPLX-managed Pi extension. MTPLX keeps this file up to
+        // date on every sync. To take ownership (or disable it), edit it and delete
+        // this marker line: MTPLX never touches the file again once the marker and
+        // the mtplx identifiers below are gone from it.
+        const mtplxModelID = "\(modelID)";
+        const mtplxUncapped = true;
+        const mtplxPiInjectedDefaultMaxTokens = 16384;
+
+        export default function (pi: any) {
           pi.on("before_provider_headers", (event: any, ctx: any) => {
             const headers = event?.headers;
             if (!headers || typeof headers !== "object") return;
@@ -483,11 +499,11 @@ public struct PiIntegration: Sendable {
     /// `models.json`. Content-compared before writing so repeat launches
     /// (and the Python `mtplx start pi` writer, which installs the identical
     /// bytes) never churn the file.
-    private static func installRequestPolicyExtensionFile(
+    private static func installManagedExtensionFile(
         at url: URL,
-        modelID: String
+        source: String
     ) throws -> Bool {
-        let data = Data(requestPolicyExtensionSource(modelID: modelID).utf8)
+        let data = Data(source.utf8)
         if let existing = try? Data(contentsOf: url) {
             if existing == data {
                 return false

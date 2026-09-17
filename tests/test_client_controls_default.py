@@ -97,12 +97,12 @@ def test_pi_mirror_tracks_app_and_restores_client_choice(tmp_path):
     import shutil
     import subprocess
     import pytest
-    from mtplx.pi import build_pi_request_policy_extension_source
+    from mtplx.pi import build_pi_settings_extension_source
 
     if not shutil.which("node"):
         pytest.skip("node required to execute the real Pi extension")
     module = tmp_path / "mirror.mjs"
-    module.write_text(build_pi_request_policy_extension_source("mtplx-test", uncapped=True).replace(": any", ""))
+    module.write_text(build_pi_settings_extension_source().replace(": any", ""))
     script = tmp_path / "test.mjs"
     script.write_text('''
 import register from MODULE;
@@ -115,7 +115,8 @@ const ctx = {model: {provider: "mtplx", id: "mtplx-test", baseUrl: "http://local
   ui: {setStatus: (_name, value) => status = value},
   sessionManager: {getSessionId: () => "session"},
   modelRegistry: {getApiKeyAndHeaders: async () => ({ok: true})}, isIdle: () => true};
-globalThis.fetch = async url => {
+globalThis.fetch = async (url, options) => {
+  assert.equal(options.headers.Connection, "close");
   assert.equal(url, "http://localhost:8000/v1/mtplx/settings");
   return {ok: true, json: async () => settings};
 };
@@ -151,3 +152,19 @@ handlers.session_shutdown();
 '''.replace('MODULE', json.dumps(str(module))))
     result = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_settings_mirror_installs_without_replacing_custom_request_bridge(tmp_path):
+    from mtplx.pi import write_pi_models_config
+
+    custom = tmp_path / "extensions" / "mtplx-request-policy.ts"
+    custom.parent.mkdir()
+    custom.write_text("export default function myCustomBridge(pi) {}\n")
+    result = write_pi_models_config(
+        base_url="http://localhost:8000/v1", model_id="mtplx-test", path=tmp_path / "models.json"
+    )
+    assert custom.read_text() == "export default function myCustomBridge(pi) {}\n"
+    from pathlib import Path
+    mirror = Path(result["settings_extension_path"])
+    assert mirror != custom
+    assert 'pi.setThinkingLevel(effort)' in mirror.read_text()

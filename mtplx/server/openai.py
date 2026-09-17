@@ -15565,11 +15565,11 @@ def _client_thinking_controls_allowed(
     *,
     state: Any = None,
 ) -> bool:
-    """Thinking controls (enable_thinking / reasoning_effort) are user intent,
-    not sampler policy: managed MTPLX surfaces honor them so the client-side
-    effort picker governs the request, while their sampler params stay
-    server-owned. Anonymous clients keep the _client_controls_allowed
-    contract unchanged."""
+    """An explicit connected-app policy owns both thinking and sampling.
+
+    Without that opt-in, preserve the existing client effort pickers. Native
+    MTPLX chat and anonymous API callers retain their own thinking controls.
+    """
     connected = _connected_app_controls_allowed(headers, metadata, state)
     if connected is not None:
         return connected

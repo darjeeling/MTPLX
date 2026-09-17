@@ -32,4 +32,18 @@ final class ClientControlOwnershipTests: XCTestCase {
             XCTAssertEqual(try JSONDecoder().decode(MutableSettings.self, from: data).managedClientControls, policy)
         }
     }
+    func testSettingsMirrorDoesNotReplaceACustomRequestBridge() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let extensions = root.appendingPathComponent("extensions")
+        try FileManager.default.createDirectory(at: extensions, withIntermediateDirectories: true)
+        let custom = extensions.appendingPathComponent(PiIntegration.requestPolicyExtensionName)
+        let text = "export default function customBridge(pi) {}"
+        try text.write(to: custom, atomically: true, encoding: .utf8)
+        _ = try PiIntegration(configURL: root.appendingPathComponent("models.json"))
+            .sync(configuration: MTPLXAppConfiguration())
+        XCTAssertEqual(try String(contentsOf: custom, encoding: .utf8), text)
+        let mirror = try String(contentsOf: extensions.appendingPathComponent("mtplx-settings-sync.ts"), encoding: .utf8)
+        XCTAssertTrue(mirror.contains("pi.setThinkingLevel(effort)"))
+    }
+
 }
