@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "Aranacak bir veya daha fazla model klasörü seçin.";
 "Choose the folder for downloads and Forge output." = "İndirmeler ve Forge çıktısı için klasörü seçin.";
 "Local MTPLX model in a configured library." = "Yapılandırılmış bir kitaplıktaki yerel MTPLX modeli.";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "Bağlı uygulamalarda MTPLX ayarlarını kullan";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Açık: bağlı uygulamalar MTPLX akıl yürütme ve örnekleme ayarlarını izler. Kapalı: kendi ayarları geçerlidir. Normal API istekleri kendi ayarlarını korur.";

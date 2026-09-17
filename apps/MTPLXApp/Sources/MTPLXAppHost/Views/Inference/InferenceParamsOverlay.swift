@@ -126,6 +126,8 @@ struct InferenceParamsOverlay: View, Equatable {
     // Mirrors the wire field `MutableSettings.reasoning`.
     @State private var reasoningMode: String = "auto"
     @State private var reasoningEffort: String = "auto"
+    @State private var controlClientSettings = true
+    @State private var clientControlError: String?
     @State private var fanMode: String = MTPLXFanMode.smart.rawValue
 
     // Prefill draft — live-mutable per request. Commits on slider
@@ -155,6 +157,8 @@ struct InferenceParamsOverlay: View, Equatable {
         let depth: Int
         let reasoningMode: String
         let reasoningEffort: String
+        let controlClientSettings: Bool
+        let clientControlError: String?
         let fanMode: String
         let prefillChunk: Int
         let contextWindow: Int
@@ -222,6 +226,8 @@ struct InferenceParamsOverlay: View, Equatable {
             depth: depth,
             reasoningMode: reasoningMode,
             reasoningEffort: reasoningEffort,
+            controlClientSettings: controlClientSettings,
+            clientControlError: clientControlError,
             fanMode: fanMode,
             prefillChunk: prefillChunk,
             contextWindow: contextWindow,
@@ -279,6 +285,7 @@ struct InferenceParamsOverlay: View, Equatable {
             // hover-scrollbar automatically; we don't paint a fake one.
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
+                    connectedAppsSection
                     performanceModeRow
                     sectionDivider(precedesRow: 2)
                     samplingSection
@@ -343,6 +350,39 @@ struct InferenceParamsOverlay: View, Equatable {
         .padding(.bottom, 8)
         .opacity(headerVisible ? 1 : 0)
         .offset(y: headerVisible ? 0 : -6)
+    }
+
+    @ViewBuilder
+    private var connectedAppsSection: some View {
+        InferenceSection(visible: rowsVisibleCount > 0) {
+            Toggle(tr("Use MTPLX settings for connected apps"), isOn: Binding(
+                get: { controlClientSettings },
+                set: { newValue in
+                    let previous = controlClientSettings
+                    controlClientSettings = newValue
+                    Task {
+                        do {
+                            try await backend.updateLiveSettings(MutableSettings(
+                                managedClientControls: newValue ? "app" : "client"
+                            ))
+                            clientControlError = nil
+                        } catch {
+                            controlClientSettings = previous
+                            clientControlError = error.localizedDescription
+                        }
+                    }
+                }
+            ))
+                .toggleStyle(.switch)
+                .font(.caption)
+            Text(tr("On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings."))
+                .font(.caption2)
+                .foregroundStyle(Brand.typeTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let clientControlError {
+                Text(clientControlError).font(.caption2).foregroundStyle(Brand.warning)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1449,6 +1489,8 @@ struct InferenceParamsOverlay: View, Equatable {
         // 0…1000 range) snaps to the slider's max instead of falling
         // off-screen with an invisible thumb.
         let settings = compatibleSettings
+        controlClientSettings = (settings?.managedClientControls).map { $0 == "app" }
+            ?? snapshot.configuration.controlClientSettings
         temperature = clampTemperature(settings?.temperature ?? samplingDefaults?.temperature ?? 0.6)
         topP = clampTopP(settings?.topP ?? samplingDefaults?.topP ?? 0.95)
         topK = clampTopK(settings?.topK ?? samplingDefaults?.topK ?? 20)

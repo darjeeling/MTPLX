@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "اختر مجلدًا واحدًا أو أكثر من مجلدات النماذج للبحث فيها.";
 "Choose the folder for downloads and Forge output." = "اختر مجلد التنزيلات ومخرجات Forge.";
 "Local MTPLX model in a configured library." = "نموذج MTPLX محلي في مكتبة مُهيأة.";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "استخدام إعدادات MTPLX للتطبيقات المتصلة";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "عند التفعيل: تتبع التطبيقات المتصلة إعدادات التفكير وأخذ العينات في MTPLX. عند الإيقاف: تُطبّق إعداداتها الخاصة. تحتفظ طلبات API العادية بإعداداتها الخاصة.";

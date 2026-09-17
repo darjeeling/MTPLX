@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "Pilih satu atau beberapa folder model untuk dicari.";
 "Choose the folder for downloads and Forge output." = "Pilih folder untuk unduhan dan keluaran Forge.";
 "Local MTPLX model in a configured library." = "Model MTPLX lokal di pustaka yang dikonfigurasi.";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "Gunakan pengaturan MTPLX untuk aplikasi terhubung";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Aktif: aplikasi terhubung mengikuti pengaturan penalaran dan sampling MTPLX. Nonaktif: pengaturan masing-masing berlaku. Permintaan API biasa tetap menggunakan pengaturannya sendiri.";

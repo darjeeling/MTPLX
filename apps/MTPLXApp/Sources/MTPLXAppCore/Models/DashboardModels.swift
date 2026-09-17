@@ -331,6 +331,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
     public var reasoningParser: String?
     public var reasoning: String?
     public var reasoningEffort: String?
+    public var managedClientControls: String?
     public var prefillChunkTokens: Int?
     /// `none` or a policy name (`expected_value`). Live-mutable like
     /// `depth`; the daemon builds its depth policy per request.
@@ -363,6 +364,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         reasoningParser: String? = nil,
         reasoning: String? = nil,
         reasoningEffort: String? = nil,
+        managedClientControls: String? = nil,
         prefillChunkTokens: Int? = nil,
         adaptivePolicy: String? = nil,
         adaptiveDepthSupported: Bool? = nil
@@ -390,6 +392,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         self.reasoningParser = reasoningParser
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
+        self.managedClientControls = managedClientControls
         self.prefillChunkTokens = prefillChunkTokens
         self.adaptivePolicy = adaptivePolicy
         self.adaptiveDepthSupported = adaptiveDepthSupported
@@ -419,6 +422,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         case reasoningParser = "reasoning_parser"
         case reasoning
         case reasoningEffort = "reasoning_effort"
+        case managedClientControls = "managed_client_controls"
         case prefillChunkTokens = "prefill_chunk_tokens"
         case adaptivePolicy = "adaptive_policy"
         case adaptiveDepthSupported = "adaptive_depth_supported"

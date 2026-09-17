@@ -15516,10 +15516,36 @@ def _reject_non_finite_sampler_controls(request: BaseModel) -> None:
             )
 
 
+def _managed_client_controls(state: Any = None) -> str:
+    """Explicit app policy; an ordinary CLI server keeps its existing contract."""
+    return str(
+        getattr(getattr(state, "args", None), "managed_client_controls", None)
+        or os.environ.get("MTPLX_MANAGED_CLIENT_CONTROLS", "auto")
+    ).strip().lower()
+
+
+def _connected_app_controls_allowed(
+    headers: Mapping[str, str], metadata: Mapping[str, Any], state: Any
+) -> bool | None:
+    # Native chat is itself an MTPLX control surface. This switch governs
+    # connected clients, never anonymous API callers or per-chat app controls.
+    if _app_managed_client_hint(headers, metadata) not in {
+        "pi", "opencode", "hermes", "openwebui",
+    }:
+        return None
+    policy = _managed_client_controls(state)
+    return {"app": False, "client": True}.get(policy)
+
+
 def _client_controls_allowed(
     headers: Mapping[str, str],
     metadata: Mapping[str, Any],
+    *,
+    state: Any = None,
 ) -> bool:
+    connected = _connected_app_controls_allowed(headers, metadata, state)
+    if connected is not None:
+        return connected
     if _app_managed_client_hint(headers, metadata):
         return False
     value = (
@@ -15536,15 +15562,20 @@ def _client_controls_allowed(
 def _client_thinking_controls_allowed(
     headers: Mapping[str, str],
     metadata: Mapping[str, Any],
+    *,
+    state: Any = None,
 ) -> bool:
     """Thinking controls (enable_thinking / reasoning_effort) are user intent,
     not sampler policy: managed MTPLX surfaces honor them so the client-side
     effort picker governs the request, while their sampler params stay
     server-owned. Anonymous clients keep the _client_controls_allowed
     contract unchanged."""
+    connected = _connected_app_controls_allowed(headers, metadata, state)
+    if connected is not None:
+        return connected
     if _app_managed_client_hint(headers, metadata):
         return True
-    return _client_controls_allowed(headers, metadata)
+    return _client_controls_allowed(headers, metadata, state=state)
 
 
 def _ignored_client_control_fields(request: BaseModel) -> list[str]:
@@ -16689,6 +16720,7 @@ def _attach_dashboard_progress_stats(
 # reload). The dashboard sidebar splits "mutable" from "restart required";
 # this helper enforces the same split server-side.
 DASHBOARD_MUTABLE_SETTINGS_KEYS: tuple[str, ...] = (
+    "managed_client_controls",
     "reasoning",
     "generation_mode",
     "depth",
@@ -17248,6 +17280,11 @@ def _coerce_setting(name: str, value: Any) -> Any:
                 "'poolside_v1', 'lfm2', or 'none'"
             )
         return text
+    if name == "managed_client_controls":
+        text = str(value).strip().lower()
+        if text not in {"auto", "app", "client"}:
+            raise ValueError("managed_client_controls must be auto, app, or client")
+        return text
     if name == "reasoning_effort":
         return _normalize_reasoning_effort(value)
     return value
@@ -17583,6 +17620,7 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
         "api_key_source": str(getattr(args, "api_key_source", "none") or "none"),
         "reasoning_parser": str(getattr(args, "reasoning_parser", "qwen3")),
         "reasoning_effort": str(getattr(args, "reasoning_effort", "auto") or "auto"),
+        "managed_client_controls": _managed_client_controls(state),
         "draft_temperature": (
             float(getattr(state.draft_sampler, "temperature"))
             if getattr(state, "draft_sampler", None) is not None

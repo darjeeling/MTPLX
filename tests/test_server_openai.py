@@ -14315,3 +14315,47 @@ def test_fast_path_env_status_treats_runtime_overrides_as_the_expectation(monkey
     # keys the server did not override keep the profile expectation
     assert "source" not in resolved["MTPLX_LAZY_VERIFY_LOGITS"]
     assert resolved["MTPLX_LAZY_VERIFY_LOGITS"]["expected"] == openai.FAST_PATH_ENV["MTPLX_LAZY_VERIFY_LOGITS"]
+
+
+@pytest.mark.parametrize("hint", ["pi", "opencode", None])
+def test_live_app_ownership_applies_to_actual_request_policy(monkeypatch, hint):
+    from mtplx.backends.descriptors import QWEN3_8_REASONING_CODEC
+
+    state = _fake_state()
+    state.runtime.tokenizer = StreamingTokenizer()
+    state.args.reasoning = "on"
+    state.args.enable_thinking = True
+    state.args.reasoning_effort = "xhigh"
+    state.args.temperature = 1.0
+    state.args.stats_footer = False
+    captured = {}
+    monkeypatch.setattr(openai, "_reasoning_codec_for_state", lambda _state: QWEN3_8_REASONING_CODEC)
+
+    def generate(_state, _prompt_ids, **kwargs):
+        captured.update(kwargs)
+        return _fake_generation("ok")
+
+    monkeypatch.setattr(openai, "_run_generation", generate)
+    client = TestClient(create_app(state))
+    headers = {"x-mtplx-cache-mode": "bypass"}
+    if hint:
+        headers["x-mtplx-client"] = hint
+    body = {
+        "messages": [{"role": "user", "content": "hi"}], "stream": False,
+        "reasoning_effort": "medium", "enable_thinking": True,
+        "temperature": 0.55, "top_p": 1.0,
+    }
+    for policy in ("app", "client", "app"):
+        response = client.post("/v1/mtplx/settings", json={"managed_client_controls": policy})
+        assert response.status_code == 200, response.text
+        assert response.json()["managed_client_controls"] == policy
+        response = client.post("/v1/chat/completions", headers=headers, json=body)
+        assert response.status_code == 200, response.text
+        owned = policy == "app" and hint is not None
+        obs = captured["request_observability"]
+        assert obs["request_reasoning_effort"] == ("xhigh" if owned else "medium")
+        assert captured["temperature"] == (1.0 if owned else 0.55)
+        assert obs["thinking_controls_allowed"] is not owned
+
+    assert client.post("/v1/mtplx/settings", json={"managed_client_controls": "typo"}).status_code == 400
+    assert state.args.managed_client_controls == "app"

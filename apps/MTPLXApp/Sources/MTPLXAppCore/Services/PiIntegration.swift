@@ -377,6 +377,72 @@ public struct PiIntegration: Sendable {
         const mtplxPiInjectedDefaultMaxTokens = 16384;
 
         export default function (pi: any) {
+          let timer: any;
+          let syncing = false;
+          let clientThinking: any;
+          let sessionKey: any;
+
+          const syncThinking = async (ctx: any) => {
+            const model = ctx.model;
+            if (model?.provider !== "mtplx" || model.id !== mtplxModelID) {
+              ctx.ui.setStatus("mtplx-controls", undefined);
+              return;
+            }
+            if (syncing) return;
+            syncing = true;
+            try {
+              const key = String(ctx.sessionManager.getSessionId()) + ":" + model.id;
+              if (sessionKey !== key) {
+                sessionKey = key;
+                clientThinking = undefined;
+              }
+              const registry = ctx.modelRegistry;
+              const auth = registry.getApiKeyAndHeaders
+                ? await registry.getApiKeyAndHeaders(model)
+                : { ok: true, apiKey: await registry.getApiKey(model) };
+              if (!auth.ok) throw new Error(auth.error);
+              const headers: any = {};
+              for (const [name, value] of Object.entries({ ...model.headers, ...auth.headers })) {
+                if (typeof value === "string") headers[name] = value;
+              }
+              if (auth.apiKey) headers.Authorization = "Bearer " + auth.apiKey;
+              const base = String(auth.baseUrl || model.baseUrl).replace(/\\/+$/, "");
+              const response = await fetch(base + "/mtplx/settings", {
+                headers, signal: AbortSignal.timeout(1500),
+              });
+              if (!response.ok) throw new Error("settings HTTP " + response.status);
+              const settings = await response.json();
+              if (settings.managed_client_controls === "app") {
+                const effort = settings.enable_thinking === false ? "off" : settings.reasoning_effort;
+                if (!["off", "low", "medium", "high", "xhigh"].includes(effort)) {
+                  throw new Error("unsupported MTPLX reasoning effort: " + effort);
+                }
+                clientThinking ??= pi.getThinkingLevel();
+                if (pi.getThinkingLevel() !== effort) pi.setThinkingLevel(effort);
+                ctx.ui.setStatus("mtplx-controls", "MTPLX controls reasoning: " + effort);
+              } else {
+                if (clientThinking !== undefined) pi.setThinkingLevel(clientThinking);
+                clientThinking = undefined;
+                ctx.ui.setStatus("mtplx-controls", undefined);
+              }
+            } catch (error) {
+              ctx.ui.setStatus("mtplx-controls", "MTPLX settings sync failed: " + String(error));
+            } finally {
+              syncing = false;
+            }
+          };
+          const startSync = async (_event: any, ctx: any) => {
+            if (timer) clearInterval(timer);
+            await syncThinking(ctx);
+            timer = setInterval(() => { if (ctx.isIdle()) void syncThinking(ctx); }, 3000);
+            timer.unref?.();
+          };
+          pi.on("session_start", startSync);
+          pi.on("session_switch", startSync);
+          pi.on("model_select", startSync);
+          pi.on("before_agent_start", async (_event: any, ctx: any) => { await syncThinking(ctx); });
+          pi.on("session_shutdown", () => { if (timer) clearInterval(timer); });
+
           pi.on("before_provider_headers", (event: any, ctx: any) => {
             const headers = event?.headers;
             if (!headers || typeof headers !== "object") return;

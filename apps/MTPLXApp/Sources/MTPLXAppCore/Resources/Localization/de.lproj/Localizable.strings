@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "Wähle einen oder mehrere Modellordner aus, die durchsucht werden sollen.";
 "Choose the folder for downloads and Forge output." = "Wähle den Ordner für Downloads und Forge-Ausgaben.";
 "Local MTPLX model in a configured library." = "Lokales MTPLX-Modell in einer konfigurierten Bibliothek.";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "MTPLX-Einstellungen für verbundene Apps verwenden";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Ein: Verbundene Apps übernehmen Denk- und Sampling-Einstellungen von MTPLX. Aus: Es gelten ihre eigenen Einstellungen. Normale API-Anfragen behalten ihre eigenen Einstellungen.";

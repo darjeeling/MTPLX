@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "検索するモデルフォルダを1つ以上選択してください。";
 "Choose the folder for downloads and Forge output." = "ダウンロードとForgeの出力先フォルダを選択してください。";
 "Local MTPLX model in a configured library." = "設定済みライブラリ内のローカルMTPLXモデル。";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "接続アプリでMTPLXの設定を使う";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "オン：接続アプリはMTPLXの推論とサンプリング設定に従います。オフ：各アプリの設定を使います。通常のAPIリクエストは独自の設定を維持します。";

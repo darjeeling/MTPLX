@@ -259,6 +259,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     public var presencePenalty: Double?
     public var reasoning: String?
     public var reasoningEffort: String?
+    public var controlClientSettings: Bool
     /// Family that owns the persisted sampler/reasoning values above.
     /// Missing means legacy Qwen-era settings; those are back-compatible
     /// only with Qwen families.
@@ -409,6 +410,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         presencePenalty: Double? = nil,
         reasoning: String? = nil,
         reasoningEffort: String? = nil,
+        controlClientSettings: Bool = true,
         liveSettingsModelFamily: String? = nil,
         apiKey: String? = nil,
         enableThermalPolling: Bool = false,
@@ -484,6 +486,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         self.presencePenalty = presencePenalty
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
+        self.controlClientSettings = controlClientSettings
         self.liveSettingsModelFamily = liveSettingsModelFamily
         self.apiKey = apiKey
         self.enableThermalPolling = enableThermalPolling
@@ -752,6 +755,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         case presencePenalty = "presence_penalty"
         case reasoning
         case reasoningEffort = "reasoning_effort"
+        case controlClientSettings = "control_client_settings"
         case liveSettingsModelFamily = "live_settings_model_family"
         case apiKey = "api_key"
         case enableThermalPolling = "enable_thermal_polling"
@@ -852,6 +856,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         presencePenalty = field(Double.self, .presencePenalty)
         reasoning = field(String.self, .reasoning)
         reasoningEffort = field(String.self, .reasoningEffort)
+        controlClientSettings = field(Bool.self, .controlClientSettings) ?? true
         liveSettingsModelFamily = field(String.self, .liveSettingsModelFamily)
         apiKey = field(String.self, .apiKey)
         enableThermalPolling = field(Bool.self, .enableThermalPolling) ?? defaults.enableThermalPolling

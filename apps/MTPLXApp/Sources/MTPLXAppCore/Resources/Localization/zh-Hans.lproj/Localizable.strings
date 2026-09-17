@@ -1591,3 +1591,7 @@
 "Choose one or more model folders to search." = "请选择一个或多个要搜索的模型文件夹。";
 "Choose the folder for downloads and Forge output." = "请选择用于下载和 Forge 输出的文件夹。";
 "Local MTPLX model in a configured library." = "已配置库中的本地 MTPLX 模型。";
+
+/* Connected app control ownership */
+"Use MTPLX settings for connected apps" = "连接的应用使用 MTPLX 设置";
+"On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "开启：连接的应用遵循 MTPLX 的推理和采样设置。关闭：使用各应用自己的设置。普通 API 请求保留各自的设置。";

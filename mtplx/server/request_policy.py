@@ -217,6 +217,7 @@ def _resolve_sampler(
     telemetry and identical draft-sampler resolution inputs.
     """
     srv = _srv()
+    observability["managed_client_controls"] = srv._managed_client_controls(state)
     if client_controls_allowed:
         srv._reject_non_finite_sampler_controls(request)
     sampler_temperature = request.temperature if client_controls_allowed else None
@@ -251,17 +252,19 @@ def _resolve_sampler(
     ]
     if ignored_sampler_fields:
         observability["client_sampler_fields_ignored"] = ignored_sampler_fields
-    target_sampler_override = srv._opencode_default_sampler_override(
-        messages=messages_for_generation,
-        tools_active=tools_active,
-        request_temperature=request.temperature,
-        request_top_p=request.top_p,
-        request_top_k=request.top_k,
-        request_observability=observability,
-        default_temperature=getattr(state.args, "temperature", DEFAULT_TEMPERATURE),
-        default_top_p=getattr(state.args, "top_p", DEFAULT_TOP_P),
-        default_top_k=getattr(state.args, "top_k", DEFAULT_TOP_K),
-    )
+    target_sampler_override = None
+    if srv._managed_client_controls(state) != "client":
+        target_sampler_override = srv._opencode_default_sampler_override(
+            messages=messages_for_generation,
+            tools_active=tools_active,
+            request_temperature=request.temperature,
+            request_top_p=request.top_p,
+            request_top_k=request.top_k,
+            request_observability=observability,
+            default_temperature=getattr(state.args, "temperature", DEFAULT_TEMPERATURE),
+            default_top_p=getattr(state.args, "top_p", DEFAULT_TOP_P),
+            default_top_k=getattr(state.args, "top_k", DEFAULT_TOP_K),
+        )
     # The OpenCode normalization overrides the TARGET sampler only. The
     # draft sampler is deliberately NOT injected as a request value:
     # server-injected values are launch_default ownership, not
@@ -347,7 +350,7 @@ def _resolve_completions_policy(
 ) -> RequestPolicy:
     srv = _srv()
     observability: dict[str, Any] = {}
-    client_controls_allowed = srv._client_controls_allowed(headers, metadata)
+    client_controls_allowed = srv._client_controls_allowed(headers, metadata, state=state)
     request_generation_mode = srv._request_generation_mode_for_generation(
         state,
         request,
@@ -548,9 +551,9 @@ def resolve_request_policy(
     no_tools_contract_active = bool(
         no_tools_contract_applies and not post_tool_answer_contract_active
     )
-    client_controls_allowed = srv._client_controls_allowed(headers, metadata)
+    client_controls_allowed = srv._client_controls_allowed(headers, metadata, state=state)
     thinking_controls_allowed = srv._client_thinking_controls_allowed(
-        headers, metadata
+        headers, metadata, state=state
     )
     pi_convergence_contract_active = bool(
         chat

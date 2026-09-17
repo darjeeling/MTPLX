@@ -147,3 +147,27 @@ Adaptive depth switch), and the flip is part of the session bank's cache
 identity: every banked session misses once after it and the next turn
 re-prefills from scratch (42 s for a 19k-token prompt on the 27B), so change
 it between sessions rather than in the middle of a long one.
+
+### Who controls connected-app settings
+
+The macOS app's inference panel includes **Use MTPLX settings for connected apps**.
+It is on by default for app-launched daemons:
+
+- **On:** MTPLX's live reasoning and sampling settings govern its configured Pi,
+  OpenCode, Hermes and Open WebUI connections. Pi mirrors the effective reasoning
+  level in its footer, at startup, before a new turn and while idle.
+- **Off:** those clients' explicit request settings take precedence. Server values
+  remain defaults for fields the client omits. Pi restores the reasoning choice
+  it had before following the app during that session.
+
+This switch does not override ordinary API requests. Their explicit parameters
+continue to be honored, including `temperature: 0` and `enable_thinking: false`.
+Native MTPLX chat also retains its per-chat controls. Explicit response limits
+remain client-owned in either mode.
+
+`GET /v1/mtplx/settings` reports `managed_client_controls`. An authenticated settings
+update can set it to `app` or `client` without a restart. The macOS app persists
+this selection; CLI operators can set `MTPLX_MANAGED_CLIENT_CONTROLS=app` or
+`client` for a server launch. The CLI default, `auto`, preserves the prior
+contract: managed-client sampling stays server-owned and their reasoning controls
+are honored. Request records include the policy and effective ownership fields.

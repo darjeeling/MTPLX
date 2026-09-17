@@ -412,6 +412,7 @@ public struct MTPLXCommandBuilder: Sendable {
         environment.merge(resolved.ramSessionCacheEnvironment) { _, new in new }
         environment = Self.appSubprocessEnvironment(environment: environment)
         environment["MTPLX_APP_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        environment["MTPLX_MANAGED_CLIENT_CONTROLS"] = configuration.controlClientSettings ? "app" : "client"
         if resolved.pagedKVQuantization != "off" {
             environment["MTPLX_VLLM_METAL_PAGED_KV_QUANT"] = resolved.pagedKVQuantization
         }

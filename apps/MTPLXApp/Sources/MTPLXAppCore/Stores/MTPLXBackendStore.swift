@@ -2048,6 +2048,7 @@ public final class MTPLXBackendStore: ObservableObject {
             reasoningParser: settings.reasoningParser,
             reasoning: settings.reasoning,
             reasoningEffort: settings.reasoningEffort,
+            managedClientControls: settings.managedClientControls,
             prefillChunkTokens: settings.prefillChunkTokens
         )
     }
@@ -2169,6 +2170,9 @@ public final class MTPLXBackendStore: ObservableObject {
         if let prefillChunkTokens = settings.prefillChunkTokens {
             next.prefillChunkTokens = prefillChunkTokens
         }
+        if let policy = settings.managedClientControls, ["app", "client"].contains(policy) {
+            next.controlClientSettings = policy == "app"
+        }
         configuration = next
         try persistConfiguration(next)
     }
@@ -2218,8 +2222,8 @@ public final class MTPLXBackendStore: ObservableObject {
         target: LaunchTarget? = nil
     ) -> MutableSettings? {
         guard persistedLiveSettingsCompatible(with: configuration) else { return nil }
-        var persisted = MutableSettings()
-        var hasValue = false
+        var persisted = MutableSettings(managedClientControls: configuration.controlClientSettings ? "app" : "client")
+        var hasValue = true
         if let generationMode = normalizedGenerationMode(configuration.generationMode),
            generationMode == "ar" || configuration.liveSettingsModelFamily != nil
         {
@@ -2410,6 +2414,7 @@ public final class MTPLXBackendStore: ObservableObject {
         if let reasoningParser = patch.reasoningParser { merged.reasoningParser = reasoningParser }
         if let reasoning = patch.reasoning { merged.reasoning = reasoning }
         if let reasoningEffort = patch.reasoningEffort { merged.reasoningEffort = reasoningEffort }
+        if let policy = patch.managedClientControls { merged.managedClientControls = policy }
         if let prefillChunkTokens = patch.prefillChunkTokens {
             merged.prefillChunkTokens = prefillChunkTokens
         }
@@ -4751,6 +4756,7 @@ private extension MutableSettings {
             || reasoningParser != nil
             || reasoning != nil
             || reasoningEffort != nil
+            || managedClientControls != nil
             || prefillChunkTokens != nil
     }
 }
