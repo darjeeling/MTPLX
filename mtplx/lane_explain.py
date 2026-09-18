@@ -46,6 +46,7 @@ def build_explain_report(
     server_url: str | None,
     tensor_units: dict[str, Any] | None = None,
     lane: dict[str, Any] | None = None,
+    family_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the explain block of the doctor report."""
 
@@ -56,6 +57,8 @@ def build_explain_report(
     }
     if lane is not None:
         report["lane"] = lane
+    if family_settings is not None:
+        report["family_settings"] = family_settings
     payload = health if isinstance(health, dict) else None
     if payload is not None and payload.get("ok") is False and "error" in payload:
         payload = None
@@ -140,6 +143,15 @@ def render_explain_lines(report: dict[str, Any]) -> list[str]:
                 f"tensor units: not available ({arch}); needs GPU generation 17 "
                 "and macOS 26.2, so the portable kernels serve this Mac"
             )
+    family = report.get("family_settings")
+    if isinstance(family, dict) and family.get("rows"):
+        lines.append(
+            f"model-tuned settings for {family.get('model') or 'the default model'} "
+            f"(family {family.get('family')}):"
+        )
+        for row in family["rows"]:
+            lines.append(f"  {row['key']}: {row['value']} ({row['source']})")
+            lines.append(f"      {row['receipt']}")
     lane = report.get("lane")
     if isinstance(lane, dict):
         lines.extend(_lane_lines("lane this Mac resolves for a new launch:", lane))

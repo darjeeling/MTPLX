@@ -528,6 +528,10 @@ SUSTAINED_PREFILL_ENV = {
     # (MTPLX_DENSE_KV_BYTES_PER_TOKEN) and announces its resolution in the
     # serve log.
     "MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT": "auto",
+    # The 2048 pair below is the SHARED conservative value for a family with
+    # no block of its own. A family that owns a measured chunk says so in
+    # mtplx/backends/family_settings.py and the server stamps it over these
+    # (PX.0); the launch flag --prefill-chunk-tokens is a user override only.
     # MTPLX_PREFILL_CHUNK_SIZE is retained as a legacy single-knob fallback:
     # if set to a numeric value it overrides BOTH paths. "auto" resolves to
     # the per-layout defaults below, which intentionally match in product mode.

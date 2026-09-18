@@ -271,7 +271,11 @@ OPENCODE_FAIR_BATCHING_DEFAULTS: dict[str, Any] = {
     "batching_preset": "latency",
     "decode_batch_max": None,
     "batch_wait_ms": None,
-    "prefill_chunk_tokens": 2048,
+    # Not pinned (PX.0): the prefill chunk is a model-tuned value the served
+    # family owns (mtplx/backends/family_settings.py); a launch flag here
+    # would beat the family block on every request. --prefill-chunk-tokens
+    # stays a user override.
+    "prefill_chunk_tokens": None,
     "ssd_session_cache": "on",
     "ssd_session_cache_max_size": "32GB",
     "ssd_session_cache_min_prefix_tokens": 1024,
@@ -282,7 +286,8 @@ HERMES_LATENCY_DEFAULTS: dict[str, Any] = {
     "max_active_requests": None,
     "decode_batch_max": None,
     "batch_wait_ms": None,
-    "prefill_chunk_tokens": 2048,
+    # Not pinned (PX.0): see OPENCODE_FAIR_BATCHING_DEFAULTS.
+    "prefill_chunk_tokens": None,
     "ssd_session_cache": "on",
     "ssd_session_cache_max_size": "100GB",
     "ssd_session_cache_min_prefix_tokens": 512,
@@ -2623,7 +2628,47 @@ def _doctor_explain_report(args: Any, cli_flags: set[str]) -> dict[str, Any]:
         port = int(getattr(args, "port", 8000)) if "port" in cli_flags else 8000
         base_url = f"http://{host}:{port}"
     health = _http_json(base_url + "/health", timeout=1.5)
-    return build_explain_report(health=health, server_url=base_url)
+    return build_explain_report(
+        health=health,
+        server_url=base_url,
+        family_settings=_doctor_explain_family_settings(health),
+    )
+
+
+def _doctor_explain_family_settings(health: dict[str, Any] | None) -> dict[str, Any]:
+    """The served (or default) model's model-tuned settings with their sources."""
+
+    from mtplx.backends.descriptors import model_family_from_inspection
+    from mtplx.backends.family_settings import explain_rows
+
+    model_ref: str | None = None
+    settings = health.get("settings") if isinstance(health, dict) else None
+    if isinstance(settings, dict) and settings.get("model"):
+        model_ref = str(settings["model"])
+    if not model_ref:
+        try:
+            model_ref = str(select_default_model().model)
+        except Exception:
+            model_ref = None
+    config: dict[str, Any] | None = None
+    if model_ref:
+        try:
+            candidate = Path(model_ref).expanduser() / "config.json"
+            if candidate.is_file():
+                config = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = None
+    family = "unknown"
+    try:
+        if config is not None and "qwen4_exp" in json.dumps(
+            [config.get("model_type"), (config.get("text_config") or {}).get("model_type")]
+        ):
+            family = "qwen4_exp"
+        else:
+            family = str(model_family_from_inspection(None, model_ref=model_ref))
+    except Exception:
+        family = "unknown"
+    return {"model": model_ref, "family": family, "rows": explain_rows(family, config)}
 
 
 def _render_doctor_report(args: Any, report: dict[str, Any]) -> int:

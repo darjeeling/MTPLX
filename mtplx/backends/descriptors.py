@@ -565,6 +565,32 @@ def sampler_defaults_for_model(
     return resolved.sampler_defaults
 
 
+def family_settings_for_model(
+    model_ref: str | None = None,
+    inspection: dict[str, Any] | None = None,
+    descriptor: BackendDescriptor | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """(family, its model-tuned settings block or None).
+
+    The blocks live in ``mtplx/backends/family_settings.py``: prefill chunk
+    and compiled width, score workspace, cleanup and clear cadences, KV bytes
+    per token and prewarm geometry (derived from config.json), depth-policy
+    priors, copy-lane parameters, first verify reserve, and the draft depths
+    whose verify has a compiled route. A family without a block serves the
+    shared profile values and ``mtplx doctor --explain`` says so.
+    """
+
+    from mtplx.backends.family_settings import family_settings
+
+    resolved = descriptor or descriptor_from_inspection(inspection)
+    family = model_family_from_inspection(
+        inspection,
+        model_ref=model_ref,
+        descriptor=resolved,
+    )
+    return family, family_settings(family)
+
+
 def draft_semantics_for_model(
     model_ref: str | None = None,
     inspection: dict[str, Any] | None = None,

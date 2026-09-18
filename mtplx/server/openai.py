@@ -1092,7 +1092,42 @@ def _server_runtime_env_overrides(
             # env gate above, and runtime_env_overrides are applied AFTER
             # the profile env (apply_profile_env), so this beats turbo's 1.
             overrides["MTPLX_NAX_VERIFY"] = "0"
+    # Model-tuned settings the served family owns (PX.0): prefill chunk and
+    # compiled width, score workspace, cleanup and clear cadences, copy-lane
+    # parameters, first verify reserve. The stamp carries only values that
+    # differ from the engine defaults, so a block that matches them changes
+    # nothing. An operator export wins, and the launch flag
+    # --prefill-chunk-tokens is a request-local override above all of this.
+    for key, value in _served_family_env_stamp(args).items():
+        if not str(os.environ.get(key) or "").strip():
+            overrides[key] = value
     return overrides
+
+
+def _served_model_family(args: argparse.Namespace) -> str:
+    """The served model's family key for the family settings blocks."""
+
+    if _served_model_type_is_qwen4_exp(args):
+        return "qwen4_exp"
+    try:
+        from mtplx.backends.descriptors import model_family_from_inspection
+
+        return str(
+            model_family_from_inspection(
+                None, model_ref=str(getattr(args, "model", "") or "") or None
+            )
+        )
+    except Exception:
+        return "unknown"
+
+
+def _served_family_env_stamp(args: argparse.Namespace) -> dict[str, str]:
+    try:
+        from mtplx.backends.family_settings import family_env_stamp
+
+        return dict(family_env_stamp(_served_model_family(args)))
+    except Exception:
+        return {}
 
 
 def _served_model_type_is_qwen4_exp(args: argparse.Namespace) -> bool:
