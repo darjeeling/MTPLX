@@ -1104,6 +1104,12 @@ def _qwen4_exp_model_classes() -> tuple[type, type]:
     return Model, ModelArgs
 
 
+def _prism_hadamard_qwen35_model_classes() -> tuple[type, type]:
+    from .models.prism_hadamard_qwen35 import Model, ModelArgs
+
+    return Model, ModelArgs
+
+
 # model_type -> loader of MTPLX-owned (Model, ModelArgs) classes for
 # architectures the pinned mlx-lm does not implement. A new in-tree
 # architecture (e.g. the Qwen3.8-Flash-Next backend) registers its loader
@@ -1117,6 +1123,10 @@ _INTREE_MODEL_CLASS_LOADERS: dict[str, Callable[[], tuple[type, type]]] = {
     # text_config.model_type for multimodal checkpoints, and text-only
     # re-exports carry it at top level. Same trunk, same classes.
     "qwen4_exp_text": _qwen4_exp_model_classes,
+    # Prism ML's rotated ternary packs of the Qwen3.5-family trunk (Ternary
+    # Bonsai 2 27B). A stock loader would run them without the activation
+    # transform and return wrong output, so the model_type is owned here.
+    "prism_hadamard_qwen35": _prism_hadamard_qwen35_model_classes,
 }
 
 
