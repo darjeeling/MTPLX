@@ -15,6 +15,8 @@ _CONTENT_ENV = (
     "MTPLX_REQUEST_CAPTURE_INCLUDE_RESPONSE_TEXT",
     "MTPLX_REQUEST_CAPTURE_INCLUDE_MESSAGES",
     "MTPLX_REQUEST_CAPTURE_INCLUDE_EXCEPTION_TEXT",
+    "MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT",
+    "MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT",
 )
 
 
@@ -325,3 +327,106 @@ def test_registry_forgets_pruned_requests(monkeypatch, tmp_path):
     rec = json.load(open(tmp_path / "pruned" / pruned[0]))
     assert rec["phase"] == "dispatched"
     assert "chatcmpl-0" not in request_capture._PATHS_BY_ID
+
+
+def _server_shaped_outcome(completion):
+    """The outcome dict exactly as mtplx/server/openai.py assembles it."""
+    return {
+        "scheduler_lane": "serial",
+        **request_capture.completion_token_ids(completion),
+        "completion_tokens": len(completion),
+        "finish_reason": "stop",
+        **request_capture.clip_text_head_tail("private answer"),
+    }
+
+
+def test_opted_in_token_ids_are_whole_for_replay(monkeypatch, tmp_path):
+    """A replay needs every id. An agent prompt is far past 2,048 tokens, so
+    an opt-in with no limit set keeps both sequences whole."""
+    _enable(monkeypatch, tmp_path)
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_INCLUDE_PROMPT_TOKENS", "1")
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_INCLUDE_COMPLETION_TOKENS", "1")
+    prompt = list(range(5000))
+    completion = list(range(3000))
+
+    request_capture.capture_request(
+        "chatcmpl-replay", {"prompt_len": len(prompt), "prompt_token_ids": prompt}
+    )
+    request_capture.capture_outcome(
+        "chatcmpl-replay", _server_shaped_outcome(completion)
+    )
+
+    record = _record(tmp_path)
+    assert record["prompt_token_ids"] == prompt
+    assert record["prompt_tokens_clipped"] is False
+    outcome = record["outcome"]
+    assert outcome["completion_token_ids"] == completion
+    assert outcome["completion_tokens_clipped"] is False
+    assert outcome["completion_token_count"] == 3000
+    assert "private answer" not in json.dumps(record)
+
+
+def test_env_limits_clip_once_and_keep_the_true_count(monkeypatch, tmp_path):
+    """The helper's result passes through the outcome sanitizer. The count,
+    the digest and the clipped flag must still describe the full sequence."""
+    _enable(monkeypatch, tmp_path)
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_INCLUDE_PROMPT_TOKENS", "1")
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_INCLUDE_COMPLETION_TOKENS", "1")
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT", "4")
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT", "2")
+    prompt = list(range(10))
+    completion = [7, 8, 9, 10, 11]
+
+    request_capture.capture_request("chatcmpl-limit", {"prompt_token_ids": prompt})
+    request_capture.capture_outcome(
+        "chatcmpl-limit", _server_shaped_outcome(completion)
+    )
+
+    record = _record(tmp_path)
+    assert record["prompt_token_ids"] == [0, 1, 2, 3]
+    assert record["prompt_tokens_clipped"] is True
+    assert record["prompt_token_count"] == 10
+    outcome = record["outcome"]
+    assert outcome["completion_token_ids"] == [7, 8]
+    assert outcome["completion_tokens_clipped"] is True
+    assert outcome["completion_token_count"] == 5
+    assert outcome["completion_tokens_sha256"] == (
+        request_capture.stable_json_digest(completion)
+    )
+
+
+def test_unreadable_limit_means_no_limit(monkeypatch):
+    for name in _CONTENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT", "many")
+    monkeypatch.setenv("MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT", "-3")
+
+    options = CaptureOptions.from_env()
+
+    assert options.prompt_token_limit is None
+    assert options.completion_token_limit == 0
+
+
+def test_server_shaped_outcome_is_content_free_by_default(monkeypatch, tmp_path):
+    """The three server call sites merge the helper and the text clip into one
+    outcome. With no opt-in, nothing from the answer reaches the file."""
+    _enable(monkeypatch, tmp_path)
+    request_capture.capture_request(
+        "chatcmpl-default", {"prompt_len": 3, "prompt_token_ids": [11, 12, 13]}
+    )
+    request_capture.capture_outcome(
+        "chatcmpl-default", _server_shaped_outcome([21, 22])
+    )
+
+    record = _record(tmp_path)
+    text = json.dumps(record)
+    assert "prompt_token_ids" not in text
+    assert "completion_token_ids" not in text
+    assert "private answer" not in text
+    assert record["prompt_len"] == 3
+    assert record["prompt_token_count"] == 3
+    assert record["outcome"]["completion_token_count"] == 2
+    assert record["outcome"]["completion_tokens"] == 2
+    assert record["outcome"]["finish_reason"] == "stop"
+    assert record["outcome"]["text_chars"] == len("private answer")
+

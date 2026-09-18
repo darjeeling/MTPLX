@@ -9,6 +9,14 @@ accident.
 Enable the ring with ``MTPLX_REQUEST_CAPTURE_DIR=<dir>``. The newest
 ``MTPLX_REQUEST_CAPTURE_KEEP`` files are retained, with a default of 200. Older
 files are moved into a ``pruned/`` subdirectory rather than deleted.
+
+Exact replay of a failed turn (the reason this module exists, #196/#197) needs
+the whole token sequences, so an opt-in keeps them whole:
+``MTPLX_REQUEST_CAPTURE_INCLUDE_PROMPT_TOKENS=1`` stores every prompt id and
+``MTPLX_REQUEST_CAPTURE_INCLUDE_COMPLETION_TOKENS=1`` every sampled id. A bound
+is a second, separate choice: ``MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT`` and
+``MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT``. The count and the digest always
+describe the full sequence, clipped or not.
 """
 
 from __future__ import annotations
@@ -60,6 +68,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in _TRUE
 
 
+def _env_limit(name: str) -> int | None:
+    """An optional non-negative bound; unset, empty or unreadable means none."""
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return None
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class CaptureOptions:
     """Explicit content controls. Every content-bearing option defaults off."""
@@ -70,8 +89,11 @@ class CaptureOptions:
     include_response_text: bool = False
     include_messages: bool = False
     include_exception_text: bool = False
-    prompt_token_limit: int = 2048
-    completion_token_limit: int = 2048
+    # ``None`` keeps an opted-in sequence whole. A replay of an agent turn
+    # needs every id, and real prompts run to six figures, so clipping is a
+    # separate explicit choice and never a default.
+    prompt_token_limit: int | None = None
+    completion_token_limit: int | None = None
     text_head_chars: int = 1000
     text_tail_chars: int = 1000
 
@@ -91,6 +113,10 @@ class CaptureOptions:
             include_messages=_env_flag("MTPLX_REQUEST_CAPTURE_INCLUDE_MESSAGES"),
             include_exception_text=_env_flag(
                 "MTPLX_REQUEST_CAPTURE_INCLUDE_EXCEPTION_TEXT"
+            ),
+            prompt_token_limit=_env_limit("MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT"),
+            completion_token_limit=_env_limit(
+                "MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT"
             ),
         )
 
@@ -158,11 +184,15 @@ def _coerce_token_ids(value: Any) -> list[int]:
         return []
 
 
-def _content_limit(value: Any, default: int = 2048) -> int:
+def _content_limit(value: Any) -> int | None:
+    """A non-negative bound, or ``None`` for no bound (also for a bad value:
+    an opt-in that cannot read its bound keeps the sequence whole)."""
+    if value is None:
+        return None
     try:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
-        return default
+        return None
 
 
 def _sanitize_tokens(
@@ -170,7 +200,7 @@ def _sanitize_tokens(
     *,
     kind: str,
     include: bool,
-    limit: int,
+    limit: int | None,
 ) -> dict[str, Any]:
     tokens = _coerce_token_ids(value)
     result: dict[str, Any] = {
@@ -179,8 +209,12 @@ def _sanitize_tokens(
     }
     if include:
         bounded_limit = _content_limit(limit)
-        result[f"{kind}_token_ids"] = tokens[:bounded_limit]
-        result[f"{kind}_tokens_clipped"] = len(tokens) > bounded_limit
+        if bounded_limit is None:
+            result[f"{kind}_token_ids"] = tokens
+            result[f"{kind}_tokens_clipped"] = False
+        else:
+            result[f"{kind}_token_ids"] = tokens[:bounded_limit]
+            result[f"{kind}_tokens_clipped"] = len(tokens) > bounded_limit
     return result
 
 
@@ -411,6 +445,12 @@ def completion_token_ids(
 
     The existing one-argument call remains valid. Raw token IDs are included
     only when ``include_completion_tokens`` or its environment flag is enabled.
+
+    The helper never clips. Its result is merged into the outcome that
+    :func:`capture_outcome` sanitizes, and that write is the one place a
+    ``completion_token_limit`` applies. Clipping here as well made the second
+    pass count and digest the clipped list, so a 3,000-token answer was
+    recorded as 2,048 tokens with ``completion_tokens_clipped`` false.
     """
 
     try:
@@ -419,7 +459,7 @@ def completion_token_ids(
             tokens,
             kind="completion",
             include=resolved.include_completion_tokens,
-            limit=resolved.completion_token_limit,
+            limit=None,
         )
     except Exception:
         return _sanitize_tokens(
