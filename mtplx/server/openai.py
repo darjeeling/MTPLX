@@ -1118,7 +1118,63 @@ def _server_runtime_env_overrides(
             # env gate above, and runtime_env_overrides are applied AFTER
             # the profile env (apply_profile_env), so this beats turbo's 1.
             overrides["MTPLX_NAX_VERIFY"] = "0"
+    # Model-tuned settings the served family owns (PX.0): prefill chunk and
+    # compiled width, score workspace, cleanup and clear cadences, copy-lane
+    # parameters, first verify reserve. The stamp carries only values that
+    # differ from the engine defaults, so a block that matches them changes
+    # nothing. An operator export wins, and the launch flag
+    # --prefill-chunk-tokens is a request-local override above all of this.
+    for key, value in _served_family_env_stamp(args).items():
+        if not str(os.environ.get(key) or "").strip():
+            overrides[key] = value
     return overrides
+
+
+def _served_model_family(args: argparse.Namespace) -> str:
+    """The served model's family key for the family settings blocks."""
+
+    if _served_model_type_is_qwen4_exp(args):
+        return "qwen4_exp"
+    try:
+        from mtplx.backends.descriptors import model_family_from_inspection
+
+        return str(
+            model_family_from_inspection(
+                None, model_ref=str(getattr(args, "model", "") or "") or None
+            )
+        )
+    except Exception:
+        return "unknown"
+
+
+def _served_prefill_chunk_default(args: argparse.Namespace) -> int:
+    """The chunk a request runs with when no launch flag or live setting set
+    one: the resolved env (operator export, family stamp or profile), else
+    the served family's block, else the shared 2,048."""
+
+    for key in ("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "MTPLX_PREFILL_CHUNK_SIZE"):
+        raw = str(os.environ.get(key) or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+    try:
+        from mtplx.backends.family_settings import resolved_value
+
+        family = getattr(args, "_served_model_family_cache", None) or _served_model_family(args)
+        value = resolved_value(family, "prefill_chunk_tokens")
+        if isinstance(value, int) and value > 0:
+            return value
+    except Exception:
+        pass
+    return 2048
+
+
+def _served_family_env_stamp(args: argparse.Namespace) -> dict[str, str]:
+    try:
+        from mtplx.backends.family_settings import family_env_stamp
+
+        return dict(family_env_stamp(_served_model_family(args)))
+    except Exception:
+        return {}
 
 
 def _served_model_type_is_qwen4_exp(args: argparse.Namespace) -> bool:
@@ -2432,14 +2488,14 @@ def _set_metal_memory_limit(mx: Any, name: str, value: int) -> str:
 def _metal_system_reserve_bytes(total_ram_bytes: int) -> int:
     """Unwired headroom macOS keeps outside the allocator caps.
 
-    16 GiB is right on 128 GB+ machines, but as a flat constant it
-    refused the 96 GB class by exactly the release notes' own margin
-    (issue #400: 77.3 GiB weights + 6 GiB floor margin + 16 GiB = 99.3
-    > 96, while the same pack ships healthy there with ~16 GiB left
-    unwired). Scale to RAM/8 below 128 GB, floored at 8 GiB — macOS's
-    own practical working floor — and keep 128 GB+ behavior unchanged.
+    The rule lives in ``memory_plan.system_reserve_bytes`` (pure
+    arithmetic) so the caps, the planner and the planner replay in the
+    tests read one number: RAM/8 below 128 GB, floored at 8 GiB, 16 GiB
+    from 128 GB up (issue #400).
     """
-    return int(min(16 * 1024**3, max(8 * 1024**3, total_ram_bytes // 8)))
+    from mtplx.memory_plan import system_reserve_bytes
+
+    return system_reserve_bytes(int(total_ram_bytes))
 
 
 def _resident_floor_margin_bytes(total_ram_bytes: int | None) -> int:
@@ -2535,6 +2591,7 @@ def _apply_metal_memory_caps(
             }
     mem_limit = _parse_metal_memory_size_bytes(mem_raw, default_mem)
     wired_limit = _parse_metal_memory_size_bytes(wired_raw, default_wired)
+    mem_source = "env" if mem_raw else "default"
     if resident_floor:
         if (mem_raw and mem_limit < resident_floor) or (
             wired_raw and wired_limit < resident_floor
@@ -2548,6 +2605,20 @@ def _apply_metal_memory_caps(
                 "memory_limit_bytes": int(mem_limit),
                 "wired_limit_bytes": int(wired_limit),
             }
+        if not mem_raw and total_ram is not None and total_ram > 0:
+            # A floor above the 75% rule lifts the limit to the machine's
+            # whole engine envelope, not to the bare floor: a limit that
+            # equals the weights leaves the admission line (0.97 of it)
+            # under the resident set, so the pressure guard and the
+            # fixed-M4 memory gate fire on every request (96 GB Flash-Next).
+            from mtplx.memory_plan import engine_envelope_bytes
+
+            lifted = engine_envelope_bytes(
+                total_ram, resident_floor_bytes=resident_floor
+            )
+            if lifted > mem_limit:
+                mem_limit = lifted
+                mem_source = "resident_floor"
         mem_limit = max(mem_limit, resident_floor)
         wired_limit = max(wired_limit, resident_floor)
 
@@ -2570,7 +2641,9 @@ def _apply_metal_memory_caps(
         applied["memory_limit_bytes"] = int(mem_limit)
         # "env": the operator set MTPLX_MEMORY_LIMIT_BYTES; the memory plan
         # then takes it as the engine budget both ways (#443).
-        applied["memory_limit_source"] = "env" if mem_raw else "default"
+        # "resident_floor": the family's wired floor lifted the limit to
+        # the machine envelope; the plan derives the same number itself.
+        applied["memory_limit_source"] = mem_source
     except Exception as exc:
         applied["memory_limit_error"] = str(exc)
     try:
@@ -2806,6 +2879,23 @@ def _select_backend_context_window(
             requested_value if requested_value > 0 else int(default_value),
         ),
     )
+
+
+def _machine_fit_for_default_window(fit_plan: Any) -> int:
+    """The machine fit that shapes the DEFAULT serving window (0 = no clamp).
+
+    A plan that says "model does not fit" carries the floor window as its
+    fit. Passing 0 there (the pre-2.11.4 behavior) meant "no clamp", so the
+    worse the fit, the larger the window: the 27B on a 16 or 24 GB Mac and
+    Flash-Next on 96 GB were served the full 262,144-token model maximum
+    under a MODEL DOES NOT FIT banner. The floor is the honest default; an
+    explicit --context-window still wins and --allow-swap still lifts the
+    fit (both handled by the caller).
+    """
+
+    if fit_plan is None or not bool(getattr(fit_plan, "available", False)):
+        return 0
+    return max(0, int(getattr(fit_plan, "context_window_fit", 0) or 0))
 
 
 def _validate_mtp_batch_settings(args: argparse.Namespace) -> None:
@@ -3469,13 +3559,23 @@ class ServerState:
             # phantom headroom and died at 119 GB with no 507.
             "aux_bytes_per_token": _plan_aux_from_config(_plan_model_config),
             "prefill_transient_bytes_per_token": _plan_transient_per_token,
+            # The family's wired floor (Flash-Next, Laguna): above the 75%
+            # rule it defines the envelope, so the plan, the Metal limit and
+            # the fixed-M4 memory gate read one number.
+            "resident_floor_bytes": (
+                _caps.get("minimum_resident_bytes")
+                if isinstance(_caps, dict)
+                else None
+            ),
         }
         _fit_plan = _plan_memory(**_plan_inputs)
-        _machine_fit = (
-            int(_fit_plan.context_window_fit)
-            if _fit_plan.available and _fit_plan.model_fits
-            else 0
-        )
+        _machine_fit = _machine_fit_for_default_window(_fit_plan)
+        if _fit_plan.available and not _fit_plan.model_fits and not self.allow_swap:
+            _startup_line(
+                "[5/6] Memory plan: the model does not fit this Mac, so the "
+                f"default context window is the {_machine_fit}-token floor; "
+                "--context-window or --allow-swap overrides it"
+            )
         self.context_window = _select_backend_context_window(
             self.backend_descriptor,
             model_max=int(self.model_context_window_max),
@@ -16217,6 +16317,9 @@ def _metrics_envelope(
         "mtp_history_position_base": int(stats.get("mtp_history_position_base") or 0),
         **({"fixed_m4_admission": stats["fixed_m4_admission"]}
            if stats.get("fixed_m4_admission") else {}),
+        # Demotions recorded while this request ran (kind -> count); the
+        # meanings and reasons are on /health (degradation.demotions).
+        **({"demotions": stats["demotions"]} if stats.get("demotions") else {}),
         **({"compiled_verify": stats["graphbank"]["compiled_verify"]}
            if (stats.get("graphbank") or {}).get("compiled_verify") else {}),
         **_maintenance_timing_stats(stats),
@@ -16797,6 +16900,9 @@ DASHBOARD_READ_ONLY_SETTINGS_KEYS: tuple[str, ...] = (
     # against the GET payload by identity, so object/array-valued keys ALWAYS
     # ride the POST after a snapshot refresh (2026-07-02 presence-penalty
     # flag). test_settings_get_payload_keys_are_all_classified pins this.
+    # PX.1: what the engine serves for a requested depth policy, and why.
+    "adaptive_policy_effective",
+    "adaptive_policy_reason",
     "api_key_required",
     "api_key_source",
     "architecture_id",
@@ -17195,10 +17301,20 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
     if flash_dispatches:
         nax["flash_dispatch_counters"] = flash_dispatches
 
+    # Nothing goes slow in silence: every demotion off a fast lane, with a
+    # count and the last plain-English reason (mtplx/demotions.py).
+    try:
+        from mtplx.demotions import snapshot as _demotions_snapshot
+
+        demotions: Any = _demotions_snapshot()
+    except BaseException:
+        demotions = "unknown"
+
     return {
         "compiled_verify": compiled_verify,
         "profile_env_overridden": profile_env_overridden,
         "nax": nax,
+        "demotions": demotions,
     }
 
 
@@ -17642,6 +17758,11 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
         # no restart. A family that owns its own draft policy reports
         # unsupported and the toggle stays hidden.
         "adaptive_policy": str(getattr(args, "adaptive_policy", "none") or "none"),
+        # What the engine actually serves for that request (PX.1): "none"
+        # plus a reason when the family has a compiled verifier at one depth
+        # only ("adaptive depth has no effect on this model yet").
+        "adaptive_policy_effective": _engine_depth_policy(args)["policy"],
+        "adaptive_policy_reason": _engine_depth_policy(args)["reason"],
         "adaptive_depth_supported": bool(backend.supports("native_adaptive_depth_policy")),
         "draft_control": backend.draft_semantics.to_dict(),
         "backend_id": backend.backend_id,
@@ -17687,14 +17808,15 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
             else None
         ),
         "prefill_chunk_tokens": int(
-            getattr(args, "prefill_chunk_tokens", None) or 2048
+            getattr(args, "prefill_chunk_tokens", None)
+            or _served_prefill_chunk_default(args)
         ),
         "ssd_session_cache": str(getattr(args, "ssd_session_cache", "off") or "off"),
         "ssd_session_cache_dir": str(
             getattr(args, "ssd_session_cache_dir", "~/.mtplx/session-bank")
         ),
         "ssd_session_cache_max_size": str(
-            getattr(args, "ssd_session_cache_max_size", "100GB")
+            getattr(args, "ssd_session_cache_max_size", "auto")
         ),
         "ssd_session_cache_min_prefix_tokens": int(
             getattr(args, "ssd_session_cache_min_prefix_tokens", 512) or 512
@@ -21137,6 +21259,47 @@ def _bridge_policy_observability(
     }
 
 
+def _engine_depth_policy(args: argparse.Namespace) -> dict[str, Any]:
+    """The depth policy the ENGINE serves, whatever the launcher asked for.
+
+    A saved app switch, a CLI table or a live setting can ask for an adaptive
+    depth policy on any model. On a family whose verify has a compiled route
+    for some draft depths only (Flash-Next: depth 3) every round the policy
+    stops early runs the eager verifier, so the engine resolves the request
+    to the static compiled depth and reports why (launch_lane, PX.1). The
+    rule reads the family capability ``compiled_verify_depths`` and lifts by
+    itself when more widths are compiled. Memoized per (policy, depth): the
+    family is read from config.json once, not per request.
+    """
+
+    key = (
+        str(getattr(args, "adaptive_policy", "none") or "none"),
+        int(getattr(args, "depth", 3) or 3),
+    )
+    cached = getattr(args, "_engine_depth_policy_cache", None)
+    if isinstance(cached, tuple) and cached and cached[0] == key:
+        return cached[1]
+    family = getattr(args, "_served_model_family_cache", None)
+    if not family:
+        family = _served_model_family(args)
+        try:
+            args._served_model_family_cache = family
+        except Exception:
+            pass
+    from mtplx.launch_lane import resolve_depth_policy
+
+    resolved = resolve_depth_policy(
+        family, requested_policy=key[0], requested_depth=key[1]
+    )
+    resolved["family"] = family
+    resolved["requested_policy"] = key[0]
+    try:
+        args._engine_depth_policy_cache = (key, resolved)
+    except Exception:
+        pass
+    return resolved
+
+
 def _adaptive_config(
     args: argparse.Namespace,
     *,
@@ -21145,6 +21308,14 @@ def _adaptive_config(
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return {"policy": "none"}
+    engine = _engine_depth_policy(args)
+    if engine["demoted"]:
+        return {
+            "policy": "none",
+            "requested_policy": policy,
+            "static_depth": engine["depth"],
+            "reason": engine["reason"],
+        }
     effective_max_depth = max(
         1,
         int(max_depth if max_depth is not None else getattr(args, "depth", 3)),
@@ -21208,6 +21379,9 @@ def _make_adaptive_policy(
 ) -> AdaptiveDepthPolicy | ExpectedValueDepthPolicy | None:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
+        return None
+    if _engine_depth_policy(args)["demoted"]:
+        # No policy object: every round drafts the static compiled depth.
         return None
     effective_max_depth = max(
         1,
@@ -24995,6 +25169,13 @@ def _run_generation(
         and requested_depth > 0
     ):
         effective_depth = max(1, min(int(resolved_mtp_depth), int(requested_depth)))
+    if effective_mode != "ar" and effective_depth > 0:
+        # An adaptive policy the engine resolved to static (a family with a
+        # compiled verifier at one depth only) drafts that depth, never a
+        # deeper one whose verify would run eager on every round.
+        _depth_policy = _engine_depth_policy(state.args)
+        if _depth_policy["demoted"] and _depth_policy.get("depth"):
+            effective_depth = min(effective_depth, int(_depth_policy["depth"]))
     # Include admission and pending-history waits in user-facing TTFT/wall
     # time. Decode still starts at the first produced token; throughput is
     # unaffected. Previously a 39s postcommit wait vanished from the receipt.
@@ -37167,8 +37348,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ssd-session-cache-max-size",
-        default=os.environ.get("MTPLX_SSD_SESSION_CACHE_MAX_SIZE", "100GB"),
-        help="Soft maximum SSD SessionBank cache size.",
+        # "auto" is the RAM-tiered cap (cold_tier.default_cold_tier_max_bytes:
+        # 16 GB of RAM or less gives 16 GB, up to 32 gives 24 GB, up to 64
+        # gives 32 GB, above that 100 GB). The old literal "100GB" default
+        # made that tiering unreachable from bare `mtplx serve`, so a 16 GB
+        # Mac got a 100 GB store while the app (which passes "auto") did not.
+        default=os.environ.get("MTPLX_SSD_SESSION_CACHE_MAX_SIZE", "auto"),
+        help=(
+            "Soft maximum SSD SessionBank cache size, for example 32GB. "
+            "Default auto: scaled to this Mac's RAM (16 GB to 100 GB)."
+        ),
     )
     parser.add_argument(
         "--ssd-session-cache-min-prefix-tokens",

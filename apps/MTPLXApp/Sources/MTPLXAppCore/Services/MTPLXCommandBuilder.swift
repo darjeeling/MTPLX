@@ -1233,8 +1233,7 @@ private enum SchedulingOverridePreset: String {
                 batchingPreset: "throughput",
                 maxActiveRequests: 8,
                 decodeBatchMax: 8,
-                batchWaitMs: 20,
-                prefillChunkTokens: 2048
+                batchWaitMs: 20
             )
         case .agent:
             return TargetPreset(
@@ -1242,8 +1241,7 @@ private enum SchedulingOverridePreset: String {
                 batchingPreset: "agent",
                 maxActiveRequests: 4,
                 decodeBatchMax: 4,
-                batchWaitMs: 50,
-                prefillChunkTokens: 2048
+                batchWaitMs: 50
             )
         }
     }
@@ -1366,6 +1364,10 @@ private struct TargetPreset {
     var maxActiveRequests: Int? = nil
     var decodeBatchMax: Int? = nil
     var batchWaitMs: Double? = nil
+    // Never set by a target or performance preset (PX.0): the prefill chunk
+    // is a model-tuned value the served family owns in the engine
+    // (mtplx/backends/family_settings.py), and a launch flag beats that
+    // block on every request. Only the user's own Settings value is passed.
     var prefillChunkTokens: Int? = nil
     var depth: Int? = nil
     var verifyStrategy: String? = nil
@@ -1395,6 +1397,10 @@ private struct TargetPreset {
     var reasoningEffort: String? = nil
     var acceptsSettingsReasoning: Bool = true
     var environment: [String: String] = [:]
+
+    /// Mirrors mtplx/launch_lane.py PI_SCHEDULER_MODE / PI_BATCHING_PRESET.
+    static let piSchedulerMode = "serial"
+    static let piBatchingPreset = "latency"
 
     private static let highMemoryThresholdBytes: UInt64 = 96 * 1024 * 1024 * 1024
     private static let defaultOpenCodeSessionBankMaxEntries = "6"
@@ -1805,13 +1811,18 @@ private struct TargetPreset {
             let piEnv = codingAgentRuntimeEnvironment(
                 processEnvironment: processEnvironment
             )
+            // Scheduler lane (PX.1, 2026-09-18): Pi used to launch on the
+            // ar_batch agent lane here (2 slots, 50 ms batch wait) and on
+            // serial from `mtplx start pi`: same client, two engine paths.
+            // Both are serial now, the lane the OpenCode preset measured
+            // faster for single-stream coding turns (51.4 against 36.8
+            // decode tok/s at 8K). The owner is one constant in the engine,
+            // mtplx/launch_lane.py PI_SCHEDULER_MODE, and
+            // LaunchLaneParityTests fails if this preset parts from it. An
+            // explicit Settings Performance mode still overrides it (#325).
             return TargetPreset(
-                schedulerMode: "ar_batch",
-                batchingPreset: "agent",
-                maxActiveRequests: 2,
-                decodeBatchMax: 2,
-                batchWaitMs: 50,
-                prefillChunkTokens: 2048,
+                schedulerMode: TargetPreset.piSchedulerMode,
+                batchingPreset: TargetPreset.piBatchingPreset,
                 topP: 0.95,
                 topK: 20,
                 toolPromptMode: "hybrid",
@@ -1855,7 +1866,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 depth: 3,
                 ssdSessionCache: "on",
                 temperature: 0.6,
@@ -1882,7 +1892,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "on",
                 temperature: 0.6,
                 topP: 1.0,
@@ -1908,7 +1917,6 @@ private struct TargetPreset {
                 maxActiveRequests: 4,
                 decodeBatchMax: 4,
                 batchWaitMs: 50,
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "on"
             )
         case .benchmark:
@@ -1921,7 +1929,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "off",
                 topP: 0.95,
                 topK: 20,

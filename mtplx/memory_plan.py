@@ -280,6 +280,48 @@ def usable_engine_bytes(total_ram_bytes: int) -> int:
     )
 
 
+def system_reserve_bytes(total_ram_bytes: int) -> int:
+    """Unwired headroom macOS keeps outside the allocator caps.
+
+    16 GiB is right on 128 GB+ machines, but as a flat constant it refused
+    the 96 GB class by exactly the release notes' own margin (issue #400:
+    77.3 GiB weights + 6 GiB floor margin + 16 GiB = 99.3 > 96, while the
+    same pack ships healthy there with about 16 GiB left unwired). Scale to
+    RAM/8 below 128 GB, floored at 8 GiB, and keep 128 GB+ unchanged.
+
+    Lives here (pure arithmetic) so the Metal caps, the planner and the
+    planner replay in the tests read one rule.
+    """
+    return int(min(16 * GIB, max(8 * GIB, int(total_ram_bytes) // 8)))
+
+
+def engine_envelope_bytes(
+    total_ram_bytes: int, *, resident_floor_bytes: int | None = None
+) -> int:
+    """The allocator envelope for this machine AND this model.
+
+    The 75% rule for every model whose weights sit under it. A family that
+    declares a resident floor above that rule (Flash-Next on a 96 GB Mac:
+    77.3 GiB of weights + margin against a 72 GiB envelope) is admitted by
+    the Metal caps on the ground that floor + system reserve fits the
+    machine. The same ground defines its envelope: everything outside the
+    system reserve. Before this rule the caps raised the limit to the bare
+    floor (80.3 GiB) while the planner kept budgeting 72 GiB, so the
+    catalog offered the pack, the planner printed MODEL DOES NOT FIT, and
+    the fixed-M4 gate (0.97 of a limit that equals the weights) skipped the
+    compiled verifier on nearly every request.
+
+    Never below the floor; seats whose 75% envelope already covers the
+    floor (128 GB and up for Flash-Next) are unchanged.
+    """
+    total = int(total_ram_bytes)
+    base = usable_engine_bytes(total)
+    floor = max(0, int(resident_floor_bytes or 0))
+    if floor <= base:
+        return base
+    return min(total, max(floor, total - system_reserve_bytes(total)))
+
+
 def _align_down(tokens: int) -> int:
     return (int(tokens) // CONTEXT_ALIGN_TOKENS) * CONTEXT_ALIGN_TOKENS
 
@@ -341,8 +383,10 @@ class MemoryPlan:
     bank_steady_bytes: int = BANK_FLOOR_BYTES
 
     headroom_bytes: int = 0
-    # "formula" (the 75% envelope on the planning RAM) or "metal_limit"
-    # (the Metal cap the server configured decided the engine budget).
+    # "formula" (the 75% envelope on the planning RAM), "metal_limit" (the
+    # Metal cap the server configured decided the engine budget) or
+    # "resident_floor" (the family's wired floor sits above the 75% rule, so
+    # the envelope is everything outside the system reserve).
     usable_source: str = "formula"
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -400,6 +444,7 @@ def plan_memory(
     aux_bytes_per_token: int = 0,
     prefill_transient_bytes_per_token: int = 0,
     usable_bytes_explicit: bool = False,
+    resident_floor_bytes: int | None = None,
 ) -> MemoryPlan:
     """Solve the machine's memory geometry.
 
@@ -411,6 +456,11 @@ def plan_memory(
     default formula; with ``usable_bytes_explicit`` (the operator set
     MTPLX_MEMORY_LIMIT_BYTES) that limit is the engine budget both ways,
     bounded by the machine (#443: a 96 GB seat serving a 69 GiB pack).
+    ``resident_floor_bytes`` is the wired floor a family declares (weights
+    plus working margin); when it exceeds the 75% rule the envelope is
+    everything outside the system reserve (``engine_envelope_bytes``), the
+    same number the Metal caps configure, on a real seat and on a seat
+    simulated with --memory-budget alike.
     """
     if total_ram_bytes is None or int(total_ram_bytes) <= 0:
         return _unavailable("total_ram_unknown")
@@ -439,16 +489,21 @@ def plan_memory(
         # runs a 69.2 GiB pack under an 80G limit that the 72G formula
         # refused as "does not fit".
         override = int(usable_bytes_override)
+        envelope = engine_envelope_bytes(
+            planning_ram, resident_floor_bytes=resident_floor_bytes
+        )
         if usable_bytes_explicit and planning_ram >= total_ram:
             usable = min(override, total_ram)
         else:
-            usable = min(override, usable_engine_bytes(planning_ram))
-        if usable == override and (
-            usable_bytes_explicit or override < usable_engine_bytes(planning_ram)
-        ):
+            usable = min(override, envelope)
+        if usable == override and (usable_bytes_explicit or override < envelope):
             usable_source = "metal_limit"
     else:
-        usable = usable_engine_bytes(planning_ram)
+        usable = engine_envelope_bytes(
+            planning_ram, resident_floor_bytes=resident_floor_bytes
+        )
+    if usable_source == "formula" and usable > usable_engine_bytes(planning_ram):
+        usable_source = "resident_floor"
 
     weights = int(model_weights_bytes)
     notes: list[str] = []
@@ -472,7 +527,7 @@ def plan_memory(
             f" GiB but the engine budget is {usable / GIB:.1f} GiB"
             + (
                 ""
-                if usable_source == "metal_limit"
+                if usable_source != "formula"
                 else "; MTPLX_MEMORY_LIMIT_BYTES sets the engine budget past the"
                 " default envelope (swap past the fit is then yours)"
             )
@@ -631,6 +686,11 @@ def describe_plan(plan: MemoryPlan) -> str:
         f"{ram:.0f}G Mac{budget}: engine budget "
         f"{plan.usable_bytes / GIB:.1f}G"
         + (" (Metal limit)" if plan.usable_source == "metal_limit" else "")
+        + (
+            " (RAM minus the system reserve: the weights sit above the 75% rule)"
+            if plan.usable_source == "resident_floor"
+            else ""
+        )
         + ", weights "
         f"{plan.model_weights_bytes / GIB:.1f}G, context "
         f"{plan.context_window_resolved}"

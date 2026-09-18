@@ -18,8 +18,6 @@ the capture-commit/R1b gates before any product use.
 from __future__ import annotations
 
 import os
-import platform
-from functools import lru_cache
 
 import mlx.core as mx
 
@@ -35,42 +33,16 @@ def nax_env_enabled() -> bool:
     }
 
 
-@lru_cache(maxsize=1)
-def _nax_hardware_available() -> bool:
-    """GPU family + macOS floor. Immutable for the process life — safe to memoize."""
-    arch = str(mx.device_info().get("architecture", "")).lower()
-    if not arch.startswith("applegpu_g17"):
-        return False
-    parts = platform.mac_ver()[0].split(".")
-    try:
-        major = int(parts[0]) if parts and parts[0] else 0
-    except ValueError:
-        major = 0
-    try:
-        minor = int(parts[1]) if len(parts) > 1 and parts[1] else 0
-    except ValueError:
-        minor = 0
-    return major > 26 or (major == 26 and minor >= 2)
-
-
-def nax_available() -> bool:
-    if str(os.environ.get("MTPLX_FORCE_GPU_FAMILY_FALLBACK", "")).strip().lower() in {
-        "1",
-        "true",
-        "on",
-        "yes",
-    }:
-        # QA rehearsal switch: pretend this GPU is not G17-class so an M5
-        # exercises the exact plain-SIMD code path an M1-M4 user gets. Read
-        # per call — memoizing it froze the value at first probe, so setting
-        # the switch after import (profiles, tests) silently did nothing.
-        return False
-    return _nax_hardware_available()
-
-
-# The whole function used to be lru_cached; callers cleared it to see env
-# changes. Only the hardware memo remains clearable — env is read per call.
-nax_available.cache_clear = _nax_hardware_available.cache_clear  # type: ignore[attr-defined]
+# The detector lives in ``mtplx.nax_detect`` (one rule for every lane: GPU
+# generation 17 or newer, 18 for the phone class, macOS 26.2 or newer, and
+# the MTPLX_FORCE_GPU_FAMILY_FALLBACK rehearsal switch read per call). This
+# module used to match the exact prefix ``applegpu_g17``, so a generation-18
+# GPU would have lost every lane gated here while the Flash-Next prefill
+# gate, which parsed the generation, kept its lanes.
+from mtplx.nax_detect import (  # noqa: E402
+    nax_available,
+    nax_hardware_available as _nax_hardware_available,
+)
 
 
 def _build_kernel_m16_nax_ktmpl(k_val: int, group_size: int, dtype: mx.Dtype):

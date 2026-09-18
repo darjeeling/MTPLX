@@ -34,6 +34,7 @@ from .a3b_whole_moe import validate_a3b_whole_moe_request
 from .adaptive import AdaptiveDepthPolicy, ExpectedValueDepthPolicy
 from .adaptive_dtemp import build_adaptive_dtemp_controller
 from .attention_context import attention_phase, exact_verify, model_forward_kind
+from .demotions import mark as _demotion_mark, note as _note_demotion, since as _demotions_since
 from .deepseek_v4_adaptive_width import (
     validate_installed_deepseek_v4_adaptive_width_policy,
 )
@@ -83,6 +84,7 @@ from .graphbank import (
     cache_array_tree,
     compiled_verify_mode,
     ensure_eager_window_capacity,
+    fixed_m4_lane_retired_reason as _fixed_m4_lane_retired_reason,
     paged_offsets_context_ok as _paged_offsets_context_ok,
     promote_kv_cache_offsets,
     set_paged_offsets_context_ok,
@@ -395,11 +397,23 @@ def _qwen4_fixed_m4_compiled_verify_requested(
         return False
     if receipt is not None:
         receipt.update(requested_depth=int(speculative_depth), engaged=False)
+    _retired = _fixed_m4_lane_retired_reason()
+    if _retired is not None:
+        # A kernel this GPU refused retired the lane for the process
+        # (graphbank first-dispatch guard): plain eager batched verify.
+        if receipt is not None:
+            receipt["reason"] = "dispatch_retired"
+        _note_demotion("fixed_m4_lane_skipped", _FIXED_M4_RETIRED_SKIP_REASON)
+        return False
     if int(speculative_depth) < 3:
         # This bank has only a four-row compiled forward. D1/D2 otherwise
         # pay the O(context) copy and memory twice, then run eager anyway.
         if receipt is not None:
             receipt["reason"] = "depth_below_compiled_window"
+        _note_demotion(
+            "fixed_m4_lane_skipped",
+            "draft depth below 3: only verify width 4 has a compiled route",
+        )
         return False
     fits = _qwen4_fixed_m4_lane_fits(
         rt, prompt_tokens=int(prompt_tokens), session_bank=session_bank,
@@ -587,7 +601,18 @@ def qwen4_wide_prefill_chunk_tokens(
     return wide if granted else None
 
 
+_FIXED_M4_RETIRED_SKIP_REASON = (
+    "the compiled verifier failed to dispatch on this GPU earlier in this "
+    "process and was retired; see the fixed_m4_dispatch_retired reason"
+)
+_COPY_ROUND_EAGER_REASON = (
+    "copy-block rounds on the batched lane run the eager forward (width 9 to "
+    "25 has no compiled route)"
+)
+
+
 def _announce_qwen4_fixed_m4_skip(reason: str) -> None:
+    _note_demotion("fixed_m4_lane_skipped", reason)
     try:
         print(
             "[qwen4-fixed-M4] lane skipped for this request, plain eager "
@@ -1624,7 +1649,7 @@ def _sustained_prefill_layout() -> str:
     return "contiguous_then_repage"
 
 
-_DENSE_AUTO_ANNOUNCED = False
+_DENSE_AUTO_ANNOUNCED: Any = False
 
 
 def _memory_budget_env_bytes() -> int:
@@ -1664,12 +1689,15 @@ def _dense_decode_max_context() -> int:
         os.environ.get("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT") or ""
     ).strip().lower()
     if raw == "auto":
-        # Dense KV bytes per token of context. 65536 = Qwen3.8-27B truth
-        # (16 full-attn layers x K+V x 4 kv heads x D256 x bf16); model
-        # repos with other geometry set the env alongside their config.
-        bytes_per_token = max(
-            1, _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN", 65536)
-        )
+        # Dense KV bytes per token of context: the operator's env, else the
+        # value the loader derived from the served model's config.json
+        # (runtime.load exports it; Flash-Next is 24,576), else 65536, the
+        # Qwen3.8-27B truth (16 full-attn layers x K+V x 4 kv heads x D256
+        # x bf16). Before 2.11.4 nothing set the env, so every model was
+        # budgeted with the 27B's geometry.
+        operator_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN", 0)
+        derived_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN_DERIVED", 0)
+        bytes_per_token = max(1, operator_bytes or derived_bytes or 65536)
         ram_fraction = max(
             1, min(50, _env_int("MTPLX_DENSE_DECODE_RAM_PERCENT", 15))
         )
@@ -1688,21 +1716,31 @@ def _dense_decode_max_context() -> int:
         window = _env_int("MTPLX_CONTEXT_WINDOW_TOKENS", 0)
         if window > 0:
             budget_tokens = min(budget_tokens, window)
-        resolved = max(131072, budget_tokens)
-        # Announce once: a new model that forgot to ship its
-        # MTPLX_DENSE_KV_BYTES_PER_TOKEN gets its budget computed on the
-        # 65536 Qwen3.8 default — this line is how a wrong-geometry day-0
-        # shows itself in the serve log instead of as a silent OOM or a
-        # silently conservative ceiling.
+        # The speed floor (never slower than the shipped 131072 literal)
+        # holds while its dense slab is affordable: a quarter of RAM. Every
+        # seat from 32 GB up keeps it on the 27B geometry (8 GiB slab);
+        # a 16 or 24 GB seat loses it, so an overcommitted explicit window
+        # there no longer pins an 8 GiB dense slab the machine cannot hold.
+        floor_tokens = min(131072, int(total_ram * 25 / 100) // bytes_per_token)
+        resolved = max(floor_tokens, budget_tokens)
+        # Announce once, with the source of the geometry: a model whose
+        # config.json does not describe its attention falls back to the
+        # 65536 Qwen3.8 default, and this line is how a wrong-geometry
+        # day-0 shows itself in the serve log instead of as a silent OOM or
+        # a silently conservative ceiling.
+        # Keyed by the geometry source: the server asks once before the
+        # model load (no derived geometry yet) and again after it, and the
+        # second answer is the one the process serves with.
         global _DENSE_AUTO_ANNOUNCED
-        if not _DENSE_AUTO_ANNOUNCED:
-            _DENSE_AUTO_ANNOUNCED = True
+        announce_key = (bytes_per_token, operator_bytes > 0, derived_bytes > 0)
+        if _DENSE_AUTO_ANNOUNCED != announce_key:
+            _DENSE_AUTO_ANNOUNCED = announce_key
             try:
                 print(
                     "[mtplx] dense-decode ceiling auto: "
                     f"{resolved} tokens ({ram_fraction}% RAM over "
                     f"{bytes_per_token} B/token"
-                    f"{'' if os.environ.get('MTPLX_DENSE_KV_BYTES_PER_TOKEN') else ' — MODEL DEFAULT, set MTPLX_DENSE_KV_BYTES_PER_TOKEN for non-Qwen3.8 geometry'})",
+                    f"{', operator env' if operator_bytes > 0 else ', from the model config' if derived_bytes > 0 else ' — MODEL DEFAULT, set MTPLX_DENSE_KV_BYTES_PER_TOKEN for non-Qwen3.8 geometry'})",
                     flush=True,
                 )
             except Exception:
@@ -2844,6 +2882,9 @@ class GenerationStats:
     requested_speculative_depth: int = 0
     long_context_mtp_depth_policy: dict[str, object] = field(default_factory=dict)
     fixed_m4_admission: dict[str, object] = field(default_factory=dict)
+    # Demotions recorded while this request ran (mtplx/demotions.py):
+    # kind -> count. Exact on the serial scheduler.
+    demotions: dict[str, int] = field(default_factory=dict)
     accepted_by_depth: list[int] = field(default_factory=list)
     drafted_by_depth: list[int] = field(default_factory=list)
     accept_probability_sum_by_depth: list[float] = field(default_factory=list)
@@ -8688,6 +8729,7 @@ def generate_mtpk(
         _default_stop_tokens(rt.tokenizer) if stop_token_ids is None else stop_token_ids
     )
     started_all = time.perf_counter()
+    _demotions_at_start = _demotion_mark()
     if constraint is not None:
         # The repetition trimmer retracts committed tokens, which would
         # desync the grammar matcher; constrained output is schema-shaped.
@@ -8894,6 +8936,15 @@ def generate_mtpk(
             receipt=fixed_m4_admission,
         )
     )
+    if vision_splice is not None and bool(
+        getattr(rt, "qwen4_fixed_m4_compiled_verify", False)
+    ):
+        _note_demotion(
+            "vision_request_eager_verify",
+            "image requests keep the eager verifier: the compiled verifier "
+            "carries a tensor offset and the image position tables need the "
+            "host offset",
+        )
     compiled_verify_bank = (
         CompiledVerifyBank(
             rt,
@@ -11079,6 +11130,7 @@ def generate_mtpk(
                         return_hidden=True,
                         hidden_variant=base_hidden_variant,
                     )
+                _note_demotion("copy_round_eager", _COPY_ROUND_EAGER_REASON)
                 if sampler.temperature <= 0:
                     _cb_g = [int(x) for x in mx.argmax(_cb_logits[0], axis=-1).tolist()]
                 else:
@@ -13923,6 +13975,7 @@ def generate_mtpk(
     stats = GenerationStats(
         mode="mtpk",
         fixed_m4_admission=fixed_m4_admission,
+        demotions=_demotions_since(_demotions_at_start),
         forkev=_forkev_snapshot,
         constraint_active=constraint is not None,
         constraint_completed=(

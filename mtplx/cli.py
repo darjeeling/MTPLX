@@ -828,8 +828,11 @@ def _add_ssd_session_cache_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ssd-session-cache-max-size",
-        default="100GB",
-        help="Soft maximum SSD SessionBank cache size.",
+        default="auto",
+        help=(
+            "Soft maximum SSD SessionBank cache size, for example 32GB. "
+            "Default auto: scaled to this Mac's RAM (16 GB to 100 GB)."
+        ),
     )
     parser.add_argument(
         "--ssd-session-cache-min-prefix-tokens",
@@ -878,8 +881,11 @@ def _add_adaptive_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--adaptive-decrease-after", type=_positive_int, default=1)
     parser.add_argument("--adaptive-ev-base-depth", type=_positive_int, default=2)
     parser.add_argument("--adaptive-ev-accept-priors", default="0.92,0.64,0.32")
-    parser.add_argument("--adaptive-ev-draft-cost-s", type=float, default=0.0048)
-    parser.add_argument("--adaptive-ev-extra-verify-cost-s", type=float, default=0.006)
+    # Same values as the server parser (recalibrated 2026-08-07) and the
+    # family block (mtplx/backends/family_settings.py). The older 4.8 / 6.0 ms
+    # pair lived on here and `mtplx start hermes` forwarded it explicitly.
+    parser.add_argument("--adaptive-ev-draft-cost-s", type=float, default=0.0020)
+    parser.add_argument("--adaptive-ev-extra-verify-cost-s", type=float, default=0.0015)
     parser.add_argument("--adaptive-ev-baseline-tok-s", type=float, default=40.0)
     parser.add_argument("--adaptive-ev-safety-margin", type=float, default=0.10)
     parser.add_argument("--adaptive-ev-margin-center", type=float, default=1.0)
@@ -2963,6 +2969,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_p.add_argument(
         "--summary", action="store_true", help="Print a compact check summary"
+    )
+    doctor_p.add_argument(
+        "--explain",
+        action="store_true",
+        help=(
+            "Explain what the engine picked for this Mac and why, and list "
+            "every time the running server left a fast lane (with counts and "
+            "reasons). Reads the server on --port when it was passed, else "
+            "on 8000."
+        ),
     )
     doctor_p.add_argument(
         "--bundle",

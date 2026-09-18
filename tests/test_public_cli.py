@@ -1359,10 +1359,14 @@ def test_start_opencode_dry_run_json_writes_no_hidden_cap(
     assert "--batching-preset" not in command
     assert "--decode-batch-max" not in command
     assert "--batch-wait-ms" not in command
-    assert "--prefill-chunk-tokens 2048" in command
+    # PX.0: the prefill chunk is a model-tuned value the served family owns
+    # (mtplx/backends/family_settings.py); the start tables no longer pin it.
+    assert "--prefill-chunk-tokens" not in command
     assert "--ssd-session-cache on" in command
-    assert "--ssd-session-cache-max-size 32GB" in command
-    assert "--ssd-session-cache-min-prefix-tokens 1024" in command
+    # PX.1: one resolver. The cap is "auto" (RAM-tiered) from every entry
+    # point, and the minimum banked prefix is 512 everywhere.
+    assert "--ssd-session-cache-max-size auto" in command
+    assert "--ssd-session-cache-min-prefix-tokens 512" in command
     assert "--api-key $MTPLX_API_KEY" in command
     assert "--top-k 20" in command
     assert "--max-response-tokens" not in command
@@ -2022,9 +2026,11 @@ def test_start_hermes_dry_run_json_matches_native_agent_lane(
     assert "--batching-preset latency" in command
     assert "--decode-batch-max" not in command
     assert "--batch-wait-ms" not in command
-    assert "--prefill-chunk-tokens 2048" in command
+    # PX.0: the prefill chunk is a model-tuned value the served family owns
+    # (mtplx/backends/family_settings.py); the start tables no longer pin it.
+    assert "--prefill-chunk-tokens" not in command
     assert "--ssd-session-cache on" in command
-    assert "--ssd-session-cache-max-size 100GB" in command
+    assert "--ssd-session-cache-max-size auto" in command
     assert "--ssd-session-cache-min-prefix-tokens 512" in command
     assert "--temperature 0.6" in command
     assert "--top-p 1.0" in command
@@ -2091,7 +2097,8 @@ def test_start_hermes_live_path_writes_profile_and_handoff(
     assert serve_args.preserve_thinking == "auto"
     assert serve_args.scheduler_mode == "serial"
     assert serve_args.batching_preset == "latency"
-    assert serve_args.prefill_chunk_tokens == 2048
+    # PX.0: not pinned by the start table; the served family owns the chunk.
+    assert serve_args.prefill_chunk_tokens is None
     assert serve_args.ssd_session_cache == "on"
     assert "OPENAI_API_KEY" not in serve_args.hermes_launch_command
     assert "--source mtplx-cli" in serve_args.hermes_launch_command
