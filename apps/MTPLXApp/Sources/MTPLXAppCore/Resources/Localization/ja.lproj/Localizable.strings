@@ -455,6 +455,7 @@
 "Delete orphan build" = "孤立したビルドを削除";
 "Delete this chat?" = "このチャットを削除しますか？";
 "Delete this partial build" = "この未完了のビルドを削除";
+"Deletes the downloaded files at %@." = "%@ にあるダウンロード済みファイルを削除します。";
 "Depth" = "深さ";
 "depth %lld" = "深さ%lld";
 "Depth %lld is fastest on this Mac." = "このMacでは深さ%lldが最速です。";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLXを読み込み中";
 "MTPLX is not ready yet." = "MTPLXはまだ準備ができていません。";
 "MTPLX is not running." = "MTPLXは実行されていません。";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLXはこのモデルを実行中です。先にモデルを切り替えるか、MTPLXを停止してください。";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLXは実行中ですが、/Applications/OpenCode.appにOpenCode Desktopが見つかりませんでした。";
 "MTPLX is unreachable — is it running?" = "MTPLXに接続できません — 実行中ですか？";
 "MTPLX is up, checking health." = "MTPLXは起動しています。稼働状態を確認中。";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "アイドル時に解放";
 "Remind me later" = "後で通知";
 "Remove" = "削除";
+"Remove %@?" = "%@を削除しますか？";
 "Remove attachment" = "添付ファイルを削除";
+"Remove downloaded files" = "ダウンロード済みファイルを削除";
 "Remove every leftover file from interrupted builds" = "中断されたビルドの残骸ファイルをすべて削除";
 "Remove from picker" = "ピッカーから削除";
+"Remove the %@ download" = "%@のダウンロードを削除";
 "Remove this model from MTPLX?" = "このモデルをMTPLXから削除しますか？";
 "Repair" = "修復";
 "Repair Gateway" = "ゲートウェイを修復";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "ストリーミング";
 "Sustained" = "持続";
 "Switch to All to browse community models." = "コミュニティモデルを閲覧するには「すべて」に切り替えてください。";
+"Switch to another model before removing this download." = "このダウンロードを削除する前に、別のモデルに切り替えてください。";
 "Switching models restarts the model server." = "モデルを切り替えるとモデルサーバーが再起動します。";
 "System" = "システム";
 "System memory pressure" = "システムメモリ負荷";
@@ -1400,6 +1406,7 @@
 "this model" = "このモデル";
 "This model" = "このモデル";
 "This model can't see images." = "このモデルは画像を認識できません。";
+"This model is outside the MTPLX download folder and was left untouched." = "このモデルはMTPLXのダウンロードフォルダの外にあるため、変更されていません。";
 "This model loads next time you start." = "次回開始時にこのモデルが読み込まれます。";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "このMTPLXランタイムは古すぎますが、Homebrewで管理されていません。手動でアップデートしてから「再試行」を押してください: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "これは%@から作成されました。代わりにそのリポジトリを貼り付ければ、Forgeが変換できます。";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "このリポジトリは存在しますがconfig.jsonがないため、MTPLXが読み取れません。変換済みエクスポートの場合は、代わりに元のリポジトリを貼り付けてください。";
 "This repo is private or gated. Public Hugging Face models download without a login." = "このリポジトリは非公開またはアクセス制限されています。公開Hugging Faceモデルはログインなしでダウンロードできます。";
 "This setting kills the speed boost" = "この設定は高速化効果を無効にします";
+"This should free about %@." = "約 %@ の空き容量が増えます。";
 "this target" = "このターゲット";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "これによりピッカーからモデルの登録のみが解除され、ディスク上のファイルはそのまま残ります。容量を解放したい場合はFinderからフォルダを削除してください。";
 "This will remove \"%@\" and its messages." = "これにより「%@」とそのメッセージが削除されます。";
@@ -1503,6 +1511,7 @@
 "View" = "表示";
 "View on HF" = "HFで表示";
 "Wait for startup or shutdown to finish." = "起動または終了が完了するまでお待ちください。";
+"Wait for the current model download or update to finish." = "現在のモデルのダウンロードまたはアップデートが完了するまでお待ちください。";
 "Waiting for fan data…" = "ファンデータを待機中…";
 "WAITING FOR MODEL" = "モデルを待機中";
 "Waiting for problem…" = "問題を待機中…";

@@ -455,6 +455,7 @@
 "Delete orphan build" = "Hapus build terbengkalai";
 "Delete this chat?" = "Hapus obrolan ini?";
 "Delete this partial build" = "Hapus build parsial ini";
+"Deletes the downloaded files at %@." = "Menghapus file yang diunduh di %@.";
 "Depth" = "Kedalaman";
 "depth %lld" = "kedalaman %lld";
 "Depth %lld is fastest on this Mac." = "Kedalaman %lld paling cepat di Mac ini.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX sedang memuat";
 "MTPLX is not ready yet." = "MTPLX belum siap.";
 "MTPLX is not running." = "MTPLX tidak berjalan.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX sedang menjalankan model ini. Ganti model atau hentikan MTPLX terlebih dahulu.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX sedang berjalan, tetapi OpenCode Desktop tidak ditemukan di /Applications/OpenCode.app.";
 "MTPLX is unreachable — is it running?" = "MTPLX tidak dapat dijangkau — apakah sedang berjalan?";
 "MTPLX is up, checking health." = "MTPLX aktif, memeriksa kondisi.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Lepaskan saat idle";
 "Remind me later" = "Ingatkan saya nanti";
 "Remove" = "Hapus";
+"Remove %@?" = "Hapus %@?";
 "Remove attachment" = "Hapus lampiran";
+"Remove downloaded files" = "Hapus file yang diunduh";
 "Remove every leftover file from interrupted builds" = "Hapus semua file sisa dari build yang terinterupsi";
 "Remove from picker" = "Hapus dari pemilih";
+"Remove the %@ download" = "Hapus unduhan %@";
 "Remove this model from MTPLX?" = "Hapus model ini dari MTPLX?";
 "Repair" = "Perbaiki";
 "Repair Gateway" = "Perbaiki Gateway";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "STREAMING";
 "Sustained" = "Berkelanjutan";
 "Switch to All to browse community models." = "Beralih ke Semua untuk menjelajahi model komunitas.";
+"Switch to another model before removing this download." = "Beralihlah ke model lain sebelum menghapus unduhan ini.";
 "Switching models restarts the model server." = "Beralih model akan memulai ulang server model.";
 "System" = "Sistem";
 "System memory pressure" = "Tekanan memori sistem";
@@ -1400,6 +1406,7 @@
 "this model" = "model ini";
 "This model" = "Model ini";
 "This model can't see images." = "Model ini tidak dapat melihat gambar.";
+"This model is outside the MTPLX download folder and was left untouched." = "Model ini berada di luar folder unduhan MTPLX dan tidak diubah.";
 "This model loads next time you start." = "Model ini akan dimuat saat Anda memulai berikutnya.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "Runtime MTPLX ini terlalu lama, tetapi tidak dikelola oleh Homebrew. Perbarui secara manual, lalu tekan Coba Lagi: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "Model ini dibuat dari %@. Tempel repo tersebut sebagai gantinya dan Forge dapat mengonversinya.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "Repo ini ada tetapi tidak memiliki config.json, sehingga MTPLX tidak dapat membacanya. Jika ini adalah ekspor terkonversi, tempel repo asli sebagai gantinya.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "Repo ini privat atau berpagar. Model Hugging Face publik dapat diunduh tanpa masuk.";
 "This setting kills the speed boost" = "Pengaturan ini menghilangkan peningkatan kecepatan";
+"This should free about %@." = "Ini akan mengosongkan sekitar %@.";
 "this target" = "target ini";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "Ini hanya membatalkan pendaftaran model dari pemilih — file di disk tetap utuh. Hapus folder dari Finder jika Anda ingin mengosongkan ruang.";
 "This will remove \"%@\" and its messages." = "Ini akan menghapus \"%@\" dan pesannya.";
@@ -1503,6 +1511,7 @@
 "View" = "Lihat";
 "View on HF" = "Lihat di HF";
 "Wait for startup or shutdown to finish." = "Tunggu hingga mulai atau matikan selesai.";
+"Wait for the current model download or update to finish." = "Tunggu hingga pengunduhan atau pembaruan model yang sedang berjalan selesai.";
 "Waiting for fan data…" = "Menunggu data kipas…";
 "WAITING FOR MODEL" = "MENUNGGU MODEL";
 "Waiting for problem…" = "Menunggu soal…";

@@ -134,13 +134,13 @@ public enum CachedModelRemovalError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .selectedModel:
-            return "Switch to another model before removing this download."
+            return tr("Switch to another model before removing this download.")
         case .servedByRunningDaemon:
-            return "MTPLX is running this model. Switch models or stop MTPLX first."
+            return tr("MTPLX is running this model. Switch models or stop MTPLX first.")
         case .transferInProgress:
-            return "Wait for the current model download or update to finish."
+            return tr("Wait for the current model download or update to finish.")
         case .outsideManagedCache:
-            return "This model is outside the MTPLX download cache and was left untouched."
+            return tr("This model is outside the MTPLX download folder and was left untouched.")
         }
     }
 }
@@ -637,18 +637,33 @@ public final class MTPLXBackendStore: ObservableObject {
         )
     }
 
-    /// Return a removable CLI reference only for app-managed cache entries.
-    /// User-selected folders and Forge output outside the cache are never
-    /// exposed through the destructive model-picker action.
+    /// Return a removable CLI reference only for entries of the primary
+    /// model folder, the one folder the app downloads into. User-selected
+    /// folders, Forge output elsewhere and the additional model folders
+    /// (read-only by contract) never receive the destructive picker action.
     public func cachedModelReference(forInstalledPath path: String) -> String? {
-        modelDownloader.cachedModelReference(forInstalledPath: path)
+        modelDownloader.cachedModelReference(
+            forInstalledPath: path,
+            cacheRoot: primaryModelDirectoryURL
+        )
+    }
+
+    /// The primary model folder exactly as `configuration.modelLibrary`
+    /// resolves it, without canonicalizing the additional folders as well:
+    /// the picker asks once per installed row.
+    private var primaryModelDirectoryURL: URL {
+        ModelLibrary.canonicalURL(for: configuration.primaryModelDirectory)
     }
 
     public func removeCachedModel(
         repoID: String,
         installedPath: String
     ) async throws -> CachedModelRemovalResult {
-        guard let entryName = modelDownloader.cachedEntryName(forInstalledPath: installedPath),
+        let primaryDirectory = primaryModelDirectoryURL
+        guard let entryName = modelDownloader.cachedEntryName(
+                  forInstalledPath: installedPath,
+                  cacheRoot: primaryDirectory
+              ),
               entryName.replacingOccurrences(of: "--", with: "/")
                   .caseInsensitiveCompare(repoID) == .orderedSame
         else {
@@ -677,7 +692,10 @@ public final class MTPLXBackendStore: ObservableObject {
             throw CachedModelRemovalError.servedByRunningDaemon
         }
 
-        let result = try await modelDownloader.removeCachedModel(directoryName: entryName)
+        let result = try await modelDownloader.removeCachedModel(
+            directoryName: entryName,
+            cacheRoot: primaryDirectory
+        )
         modelUpdates.removeAll {
             $0.repoID.caseInsensitiveCompare(repoID) == .orderedSame
         }

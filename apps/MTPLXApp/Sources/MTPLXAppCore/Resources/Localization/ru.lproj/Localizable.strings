@@ -453,6 +453,7 @@
 "Delete orphan build" = "Удалить брошенную сборку";
 "Delete this chat?" = "Удалить этот чат?";
 "Delete this partial build" = "Удалить эту незавершённую сборку";
+"Deletes the downloaded files at %@." = "Удаляет загруженные файлы в %@.";
 "Depth" = "Глубина";
 "depth %lld" = "глубина %lld";
 "Depth %lld is fastest on this Mac." = "Глубина %lld быстрее всего на этом Mac.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX загружается";
 "MTPLX is not ready yet." = "MTPLX ещё не готов.";
 "MTPLX is not running." = "MTPLX не запущен.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX сейчас использует эту модель. Сначала переключите модель или остановите MTPLX.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX запущен, но OpenCode Desktop не найден по пути /Applications/OpenCode.app.";
 "MTPLX is unreachable — is it running?" = "MTPLX недоступен — он запущен?";
 "MTPLX is up, checking health." = "MTPLX запущен, проверка работоспособности.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Освобождать при простое";
 "Remind me later" = "Напомнить позже";
 "Remove" = "Удалить";
+"Remove %@?" = "Удалить %@?";
 "Remove attachment" = "Удалить вложение";
+"Remove downloaded files" = "Удалить загруженные файлы";
 "Remove every leftover file from interrupted builds" = "Удалить все оставшиеся файлы от прерванных сборок";
 "Remove from picker" = "Удалить из селектора";
+"Remove the %@ download" = "Удалить загрузку %@";
 "Remove this model from MTPLX?" = "Удалить эту модель из MTPLX?";
 "Repair" = "Восстановить";
 "Repair Gateway" = "Восстановить шлюз";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "ПОТОКОВЫЙ ВЫВОД";
 "Sustained" = "Устойчивый";
 "Switch to All to browse community models." = "Переключитесь на «Все», чтобы просмотреть модели сообщества.";
+"Switch to another model before removing this download." = "Переключитесь на другую модель, прежде чем удалять эту загрузку.";
 "Switching models restarts the model server." = "Переключение моделей перезапускает сервер моделей.";
 "System" = "Система";
 "System memory pressure" = "Нагрузка на системную память";
@@ -1400,6 +1406,7 @@
 "this model" = "эта модель";
 "This model" = "Эта модель";
 "This model can't see images." = "Эта модель не видит изображения.";
+"This model is outside the MTPLX download folder and was left untouched." = "Эта модель находится вне папки загрузок MTPLX и осталась нетронутой.";
 "This model loads next time you start." = "Эта модель загрузится при следующем запуске.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "Эта среда выполнения MTPLX устарела, но она не управляется через Homebrew. Обновите её вручную, затем нажмите «Повторить»: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "Она была создана из %@. Вставьте вместо этого тот репозиторий, и Forge сможет преобразовать её.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "Этот репозиторий существует, но в нём нет config.json, поэтому MTPLX не может его прочитать. Если это преобразованный экспорт, вставьте вместо этого исходный репозиторий.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "Этот репозиторий является приватным или с ограниченным доступом. Публичные модели Hugging Face скачиваются без входа.";
 "This setting kills the speed boost" = "Этот параметр отключает прирост скорости";
+"This should free about %@." = "Это освободит примерно %@.";
 "this target" = "эта цель";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "Это действие удаляет модель только из селектора — файлы на диске остаются нетронутыми. Удалите папку из Finder, если хотите освободить место.";
 "This will remove \"%@\" and its messages." = "Это приведёт к удалению «%@» и всех связанных сообщений.";
@@ -1503,6 +1511,7 @@
 "View" = "Просмотр";
 "View on HF" = "Посмотреть на HF";
 "Wait for startup or shutdown to finish." = "Дождитесь завершения запуска или выключения.";
+"Wait for the current model download or update to finish." = "Дождитесь завершения текущей загрузки или обновления модели.";
 "Waiting for fan data…" = "Ожидание данных вентиляторов…";
 "WAITING FOR MODEL" = "ОЖИДАНИЕ МОДЕЛИ";
 "Waiting for problem…" = "Ожидание задачи…";

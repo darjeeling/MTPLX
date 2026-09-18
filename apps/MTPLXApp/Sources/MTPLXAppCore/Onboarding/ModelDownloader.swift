@@ -458,14 +458,26 @@ public struct ModelDownloader: Sendable {
         return root.appendingPathComponent(safeName, isDirectory: true)
     }
 
+    /// The root the app downloads into, resolved the same way `download`
+    /// and `checkModelUpdates` resolve it: the injected root, then the
+    /// caller's primary model folder, then the default cache. Removal is
+    /// fenced against this root only. The additional model folders are
+    /// read-only by contract and never receive the removal action.
+    func managedCacheRoot(_ cacheRoot: URL?) -> URL {
+        (modelCacheRoot ?? cacheRoot ?? Self.defaultCacheRoot(env: processEnvironment))
+            .standardizedFileURL
+    }
+
     /// The cache entry (folder name) behind an installed path, or nil when
     /// the path is not a plain direct child of the configured MTPLX cache.
     /// Paths outside that cache are user-managed local models, and a
     /// symlinked entry points at storage the app does not own; neither may
     /// receive the app's destructive removal affordance.
-    public func cachedEntryName(forInstalledPath path: String) -> String? {
-        let root = (modelCacheRoot ?? Self.defaultCacheRoot(env: processEnvironment))
-            .standardizedFileURL
+    public func cachedEntryName(
+        forInstalledPath path: String,
+        cacheRoot: URL? = nil
+    ) -> String? {
+        let root = managedCacheRoot(cacheRoot)
         let candidate = URL(fileURLWithPath: path).standardizedFileURL
         guard candidate.deletingLastPathComponent().path == root.path else { return nil }
         let safeName = candidate.lastPathComponent
@@ -480,8 +492,12 @@ public struct ModelDownloader: Sendable {
     /// The Hugging Face style reference (`org/name`) of a cache entry, for
     /// matching against selections and pack-update records. The CLI is
     /// handed the entry name itself, never this form.
-    public func cachedModelReference(forInstalledPath path: String) -> String? {
-        cachedEntryName(forInstalledPath: path)?.replacingOccurrences(of: "--", with: "/")
+    public func cachedModelReference(
+        forInstalledPath path: String,
+        cacheRoot: URL? = nil
+    ) -> String? {
+        cachedEntryName(forInstalledPath: path, cacheRoot: cacheRoot)?
+            .replacingOccurrences(of: "--", with: "/")
     }
 
     public static func defaultCacheRoot(env: [String: String]) -> URL {
@@ -557,6 +573,8 @@ public struct ModelDownloader: Sendable {
         let errPipe = Pipe()
         process.standardOutput = outPipe
         process.standardError = errPipe
+        let exited = ProcessExitSignal()
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
         let watchdog = Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
@@ -565,11 +583,10 @@ public struct ModelDownloader: Sendable {
             }
         }
         defer { watchdog.cancel() }
-        let stdout = try await Task.detached(priority: .utility) { () -> Data in
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return data
+        let stdout = await Task.detached(priority: .utility) { () -> Data in
+            outPipe.fileHandleForReading.readDataToEndOfFile()
         }.value
+        await exited.wait()
         guard process.terminationStatus == 0 else {
             let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
             let tail = String(decoding: stderr.suffix(512), as: UTF8.self)
@@ -600,16 +617,33 @@ public struct ModelDownloader: Sendable {
         ]
     }
 
+    /// Why the CLI refused. Under `--json` the CLI writes its refusal to
+    /// stdout as `{"error": ..., "detail": ...}` and leaves stderr empty
+    /// (exit 2: a ref it will not resolve, two copies under one name, a
+    /// failed delete). Without `--yes` semantics it writes a plain line to
+    /// stderr (exit 1). Read both, so the user sees the reason and not a
+    /// bare exit code.
+    static func removalRefusalReason(stdout: Data, stderrTail: String) -> String? {
+        struct Refusal: Decodable { let detail: String? }
+        if let refusal = try? JSONDecoder().decode(Refusal.self, from: stdout),
+           let detail = refusal.detail?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !detail.isEmpty
+        {
+            return detail
+        }
+        return stderrTail.isEmpty ? nil : stderrTail
+    }
+
     /// Delete one direct child of the MTPLX model cache through the public
     /// CLI contract. The caller owns confirmation and the selected- and
     /// serving-model guards.
     public func removeCachedModel(
         directoryName: String,
+        cacheRoot: URL? = nil,
         timeoutSeconds: TimeInterval = 120
     ) async throws -> CachedModelRemovalResult {
         let executable = try resolveMtplxExecutable { _ in }
-        let cacheRoot = (modelCacheRoot ?? Self.defaultCacheRoot(env: processEnvironment))
-            .standardizedFileURL
+        let cacheRoot = managedCacheRoot(cacheRoot)
         let process = Process()
         process.executableURL = executable
         process.arguments = Self.removalArguments(directoryName: directoryName, cacheRoot: cacheRoot)
@@ -625,6 +659,8 @@ public struct ModelDownloader: Sendable {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = outPipe
         process.standardError = errPipe
+        let exited = ProcessExitSignal()
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
         let watchdog = Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
@@ -634,10 +670,9 @@ public struct ModelDownloader: Sendable {
         }
         defer { watchdog.cancel() }
         let stdout = await Task.detached(priority: .utility) { () -> Data in
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return data
+            outPipe.fileHandleForReading.readDataToEndOfFile()
         }.value
+        await exited.wait()
         guard process.terminationStatus == 0 else {
             let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
             let tail = String(decoding: stderr.suffix(1024), as: UTF8.self)
@@ -647,9 +682,8 @@ public struct ModelDownloader: Sendable {
                 code: Int(process.terminationStatus),
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        tail.isEmpty
-                            ? "model removal exited \(process.terminationStatus)"
-                            : tail
+                        Self.removalRefusalReason(stdout: stdout, stderrTail: tail)
+                            ?? "model removal exited \(process.terminationStatus)"
                 ]
             )
         }
@@ -768,6 +802,45 @@ private final class DownloadProgressJSONState: @unchecked Sendable {
         if let bytes { observedBytes = bytes }
         if let total { observedTotal = total }
         lock.unlock()
+    }
+}
+
+/// One-shot exit signal for a child process.
+///
+/// `Process.waitUntilExit()` spins the calling thread's run loop. Called from
+/// a Swift concurrency pool thread, the termination wake-up can be missed:
+/// the child is gone and the wait never returns. Seen on 2026-09-18 in
+/// `ModelRemovalServiceTests`: a stand-in CLI that exited within
+/// milliseconds, and the waiter parked in `__CFRunLoopServiceMachPort` for
+/// ten minutes. For the app that is a Remove that spins forever, because the
+/// watchdog only terminates a child that is still running. The termination
+/// handler is installed before `run()`, so the exit cannot be missed, and
+/// the waiter suspends instead of holding a thread.
+final class ProcessExitSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exited = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func signal() {
+        lock.lock()
+        exited = true
+        let resumed = waiter
+        waiter = nil
+        lock.unlock()
+        resumed?.resume()
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if exited {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
+        }
     }
 }
 

@@ -455,6 +455,7 @@
 "Delete orphan build" = "अनाथ बिल्ड हटाएं";
 "Delete this chat?" = "इस चैट को हटाएं?";
 "Delete this partial build" = "इस आंशिक बिल्ड को हटाएं";
+"Deletes the downloaded files at %@." = "%@ पर डाउनलोड की गई फ़ाइलें हटा देता है।";
 "Depth" = "गहराई";
 "depth %lld" = "गहराई %lld";
 "Depth %lld is fastest on this Mac." = "इस Mac पर गहराई %lld सबसे तेज़ है।";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX लोड हो रहा है";
 "MTPLX is not ready yet." = "MTPLX अभी तैयार नहीं है।";
 "MTPLX is not running." = "MTPLX नहीं चल रहा है।";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX अभी यह मॉडल चला रहा है। पहले मॉडल बदलें या MTPLX रोकें।";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX चल रहा है, लेकिन /Applications/OpenCode.app पर OpenCode Desktop नहीं मिला।";
 "MTPLX is unreachable — is it running?" = "MTPLX तक नहीं पहुँचा जा सकता — क्या यह चल रहा है?";
 "MTPLX is up, checking health." = "MTPLX चालू है, स्वास्थ्य की जांच की जा रही है।";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "निष्क्रिय होने पर रिलीज़ करें";
 "Remind me later" = "मुझे बाद में याद दिलाएं";
 "Remove" = "हटाएं";
+"Remove %@?" = "%@ हटाएं?";
 "Remove attachment" = "अटैचमेंट हटाएं";
+"Remove downloaded files" = "डाउनलोड की गई फ़ाइलें हटाएं";
 "Remove every leftover file from interrupted builds" = "बाधित बिल्ड से बची हुई हर फ़ाइल हटाएं";
 "Remove from picker" = "पिकर से हटाएं";
+"Remove the %@ download" = "%@ का डाउनलोड हटाएं";
 "Remove this model from MTPLX?" = "इस मॉडल को MTPLX से हटाएं?";
 "Repair" = "मरम्मत करें";
 "Repair Gateway" = "गेटवे की मरम्मत करें";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "स्ट्रीमिंग";
 "Sustained" = "निरंतर";
 "Switch to All to browse community models." = "सामुदायिक मॉडल ब्राउज़ करने के लिए सभी पर स्विच करें।";
+"Switch to another model before removing this download." = "इस डाउनलोड को हटाने से पहले किसी दूसरे मॉडल पर स्विच करें।";
 "Switching models restarts the model server." = "मॉडल स्विच करने से मॉडल सर्वर पुनरारंभ होता है।";
 "System" = "सिस्टम";
 "System memory pressure" = "सिस्टम मेमोरी दबाव";
@@ -1400,6 +1406,7 @@
 "this model" = "यह मॉडल";
 "This model" = "यह मॉडल";
 "This model can't see images." = "यह मॉडल छवियाँ नहीं देख सकता।";
+"This model is outside the MTPLX download folder and was left untouched." = "यह मॉडल MTPLX के डाउनलोड फ़ोल्डर के बाहर है और इसे छुआ नहीं गया।";
 "This model loads next time you start." = "अगली बार जब आप शुरू करेंगे तो यह मॉडल लोड होगा।";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "यह MTPLX रनटाइम बहुत पुराना है, लेकिन यह Homebrew द्वारा प्रबंधित नहीं है। इसे मैन्युअल रूप से अपडेट करें, फिर पुनः प्रयास दबाएं: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "यह %@ से बनाया गया था। इसके बजाय उस रेपो को पेस्ट करें और Forge इसे कन्वर्ट कर सकता है।";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "यह रेपो मौजूद है लेकिन इसमें कोई config.json नहीं है, इसलिए MTPLX इसे पढ़ नहीं सकता। यदि यह एक परिवर्तित निर्यात है, तो इसके बजाय मूल रेपो पेस्ट करें।";
 "This repo is private or gated. Public Hugging Face models download without a login." = "यह रेपो निजी या गेटेड है। सार्वजनिक Hugging Face मॉडल बिना लॉगिन के डाउनलोड होते हैं।";
 "This setting kills the speed boost" = "यह सेटिंग गति वृद्धि को समाप्त कर देती है";
+"This should free about %@." = "इससे लगभग %@ जगह खाली होनी चाहिए।";
 "this target" = "यह टारगेट";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "यह केवल पिकर से मॉडल का पंजीकरण रद्द करता है — डिस्क पर फ़ाइलें बरकरार रहती हैं। यदि आप स्थान खाली करना चाहते हैं तो Finder से फ़ोल्डर हटाएं।";
 "This will remove \"%@\" and its messages." = "यह \"%@\" और इसके संदेशों को हटा देगा।";
@@ -1503,6 +1511,7 @@
 "View" = "देखें";
 "View on HF" = "HF पर देखें";
 "Wait for startup or shutdown to finish." = "स्टार्टअप या शटडाउन समाप्त होने की प्रतीक्षा करें।";
+"Wait for the current model download or update to finish." = "मौजूदा मॉडल डाउनलोड या अपडेट पूरा होने तक प्रतीक्षा करें।";
 "Waiting for fan data…" = "फ़ैन डेटा की प्रतीक्षा की जा रही है…";
 "WAITING FOR MODEL" = "मॉडल की प्रतीक्षा की जा रही है";
 "Waiting for problem…" = "प्रश्न की प्रतीक्षा की जा रही है…";

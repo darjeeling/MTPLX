@@ -455,6 +455,7 @@
 "Delete orphan build" = "حذف البناء اليتيم";
 "Delete this chat?" = "هل تريد حذف هذه الدردشة؟";
 "Delete this partial build" = "حذف هذا البناء الجزئي";
+"Deletes the downloaded files at %@." = "يحذف الملفات التي تم تنزيلها في %@.";
 "Depth" = "العمق";
 "depth %lld" = "العمق %lld";
 "Depth %lld is fastest on this Mac." = "العمق %lld هو الأسرع على هذا الـ Mac.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "جارٍ تحميل MTPLX";
 "MTPLX is not ready yet." = "MTPLX ليس جاهزاً بعد.";
 "MTPLX is not running." = "MTPLX لا يعمل.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "يشغّل MTPLX هذا النموذج حاليًا. بدّل النموذج أو أوقف MTPLX أولًا.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX قيد التشغيل، ولكن لم يتم العثور على OpenCode Desktop في /Applications/OpenCode.app.";
 "MTPLX is unreachable — is it running?" = "تعذر الوصول إلى MTPLX — هل هو قيد التشغيل؟";
 "MTPLX is up, checking health." = "MTPLX يعمل، جارٍ التحقق من سلامة التشغيل.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "تحرير عند الخمول";
 "Remind me later" = "تذكيري لاحقاً";
 "Remove" = "إزالة";
+"Remove %@?" = "هل تريد إزالة %@؟";
 "Remove attachment" = "إزالة المرفق";
+"Remove downloaded files" = "إزالة الملفات التي تم تنزيلها";
 "Remove every leftover file from interrupted builds" = "إزالة كل ملف متبقٍ من عمليات البناء المقاطعة";
 "Remove from picker" = "إزالة من أداة الاختيار";
+"Remove the %@ download" = "إزالة تنزيل %@";
 "Remove this model from MTPLX?" = "هل تريد إزالة هذا النموذج من MTPLX؟";
 "Repair" = "إصلاح";
 "Repair Gateway" = "إصلاح البوابة";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "جارٍ البث";
 "Sustained" = "مستدام";
 "Switch to All to browse community models." = "انتقل إلى \"الكل\" لتصفح نماذج المجتمع.";
+"Switch to another model before removing this download." = "انتقل إلى نموذج آخر قبل إزالة هذا التنزيل.";
 "Switching models restarts the model server." = "يؤدي تبديل النماذج إلى إعادة تشغيل خادم النموذج.";
 "System" = "النظام";
 "System memory pressure" = "ضغط ذاكرة النظام";
@@ -1400,6 +1406,7 @@
 "this model" = "هذا النموذج";
 "This model" = "هذا النموذج";
 "This model can't see images." = "هذا النموذج لا يمكنه رؤية الصور.";
+"This model is outside the MTPLX download folder and was left untouched." = "هذا النموذج خارج مجلد تنزيلات MTPLX ولم يتم المساس به.";
 "This model loads next time you start." = "سيتم تحميل هذا النموذج في المرة القادمة التي تبدأ فيها.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "بيئة تشغيل MTPLX هذه قديمة جداً، ولكن لا تتم إدارتها بواسطة Homebrew. قم بتحديثها يدوياً، ثم اضغط على إعادة المحاولة: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "تم إنشاء هذا من %@. الصق ذلك المستودع بدلاً من ذلك ويمكن لـ Forge تحويله.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "هذا المستودع موجود ولكن لا يحتوي على config.json، لذا لا يستطيع MTPLX قراءته. إذا كان تصديراً محولاً، فالصق المستودع الأصلي بدلاً من ذلك.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "هذا المستودع خاص أو مقيد. يتم تنزيل نماذج Hugging Face العامة دون الحاجة لتسجيل الدخول.";
 "This setting kills the speed boost" = "يعطل هذا الإعداد زيادة السرعة";
+"This should free about %@." = "من المفترض أن يوفّر هذا نحو %@.";
 "this target" = "هذا الهدف";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "يؤدي هذا إلى إلغاء تسجيل النموذج من أداة الاختيار فقط — تبقى الملفات على القرص كما هي. احذف المجلد من Finder إذا كنت ترغب في تحرير المساحة.";
 "This will remove \"%@\" and its messages." = "سيؤدي هذا إلى إزالة \"%@\" ورسائلها.";
@@ -1503,6 +1511,7 @@
 "View" = "عرض";
 "View on HF" = "عرض على HF";
 "Wait for startup or shutdown to finish." = "انتظر حتى ينتهي بدء التشغيل أو إيقاف التشغيل.";
+"Wait for the current model download or update to finish." = "انتظر حتى ينتهي تنزيل النموذج أو تحديثه الجاري.";
 "Waiting for fan data…" = "في انتظار بيانات المروحة…";
 "WAITING FOR MODEL" = "في انتظار النموذج";
 "Waiting for problem…" = "في انتظار المسألة…";

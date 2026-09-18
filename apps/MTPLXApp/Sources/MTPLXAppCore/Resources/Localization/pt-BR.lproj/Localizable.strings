@@ -453,6 +453,7 @@
 "Delete orphan build" = "Excluir build órfão";
 "Delete this chat?" = "Excluir este chat?";
 "Delete this partial build" = "Excluir este build parcial";
+"Deletes the downloaded files at %@." = "Exclui os arquivos baixados em %@.";
 "Depth" = "Profundidade";
 "depth %lld" = "profundidade %lld";
 "Depth %lld is fastest on this Mac." = "A profundidade %lld é a mais rápida neste Mac.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "O MTPLX está carregando";
 "MTPLX is not ready yet." = "O MTPLX ainda não está pronto.";
 "MTPLX is not running." = "O MTPLX não está em execução.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "O MTPLX está executando este modelo. Troque de modelo ou pare o MTPLX primeiro.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "O MTPLX está em execução, mas o OpenCode Desktop não foi encontrado em /Applications/OpenCode.app.";
 "MTPLX is unreachable — is it running?" = "O MTPLX está inacessível — ele está em execução?";
 "MTPLX is up, checking health." = "O MTPLX está ativo, verificando integridade.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Liberar quando ocioso";
 "Remind me later" = "Lembrar mais tarde";
 "Remove" = "Remover";
+"Remove %@?" = "Remover %@?";
 "Remove attachment" = "Remover anexo";
+"Remove downloaded files" = "Remover os arquivos baixados";
 "Remove every leftover file from interrupted builds" = "Remover todos os arquivos restantes de builds interrompidos";
 "Remove from picker" = "Remover do seletor";
+"Remove the %@ download" = "Remover o download de %@";
 "Remove this model from MTPLX?" = "Remover este modelo do MTPLX?";
 "Repair" = "Reparar";
 "Repair Gateway" = "Reparar Gateway";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "STREAMING";
 "Sustained" = "Sustentado";
 "Switch to All to browse community models." = "Mude para Todos para navegar pelos modelos da comunidade.";
+"Switch to another model before removing this download." = "Mude para outro modelo antes de remover este download.";
 "Switching models restarts the model server." = "Alternar de modelo reinicia o servidor do modelo.";
 "System" = "Sistema";
 "System memory pressure" = "Pressão de memória do sistema";
@@ -1400,6 +1406,7 @@
 "this model" = "este modelo";
 "This model" = "Este modelo";
 "This model can't see images." = "Este modelo não consegue ver imagens.";
+"This model is outside the MTPLX download folder and was left untouched." = "Este modelo está fora da pasta de downloads do MTPLX e não foi alterado.";
 "This model loads next time you start." = "Este modelo será carregado na próxima vez que você iniciar.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "Este runtime do MTPLX é muito antigo, mas não é gerenciado pelo Homebrew. Atualize-o manualmente e clique em Repetir: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "Este foi feito a partir de %@. Cole esse repositório e o Forge poderá convertê-lo.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "Este repositório existe, mas não possui config.json, portanto o MTPLX não consegue lê-lo. Se for uma exportação convertida, cole o repositório original.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "Este repositório é privado ou restrito. Modelos públicos do Hugging Face são baixados sem login.";
 "This setting kills the speed boost" = "Esta configuração anula o ganho de velocidade";
+"This should free about %@." = "Isso deve liberar cerca de %@.";
 "this target" = "este alvo";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "Isso apenas desregistra o modelo do seletor — os arquivos no disco permanecem intactos. Apague a pasta no Finder se desejar liberar espaço.";
 "This will remove \"%@\" and its messages." = "Isso removerá \"%@\" e suas mensagens.";
@@ -1503,6 +1511,7 @@
 "View" = "Visualizar";
 "View on HF" = "Ver no HF";
 "Wait for startup or shutdown to finish." = "Aguarde a inicialização ou o encerramento terminar.";
+"Wait for the current model download or update to finish." = "Aguarde o término do download ou da atualização do modelo em andamento.";
 "Waiting for fan data…" = "Aguardando dados das ventoinhas…";
 "WAITING FOR MODEL" = "AGUARDANDO O MODELO";
 "Waiting for problem…" = "Aguardando problema…";

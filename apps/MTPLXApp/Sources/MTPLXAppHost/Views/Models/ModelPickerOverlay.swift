@@ -143,12 +143,12 @@ struct ModelPickerOverlay: View, Equatable {
         }
         .alert(item: $removalCandidate) { candidate in
             Alert(
-                title: Text("Remove \(candidate.displayName)?"),
+                title: Text(tr("Remove %@?", candidate.displayName)),
                 message: Text(removalConfirmationMessage(candidate)),
-                primaryButton: .destructive(Text("Remove")) {
+                primaryButton: .destructive(Text(tr("Remove"))) {
                     removeCachedModel(candidate)
                 },
-                secondaryButton: .cancel()
+                secondaryButton: .cancel(Text(tr("Cancel")))
             )
         }
     }
@@ -371,14 +371,14 @@ struct ModelPickerOverlay: View, Equatable {
     }
 
     private func removalConfirmationMessage(_ candidate: ModelRemovalCandidate) -> String {
-        var lines = ["Deletes the downloaded files at \(candidate.installedPath)."]
+        var lines = [tr("Deletes the downloaded files at %@.", candidate.installedPath)]
         if candidate.approximateSizeBytes > 0 {
             let formatter = ByteCountFormatter()
             formatter.countStyle = .file
             let size = formatter.string(fromByteCount: candidate.approximateSizeBytes)
-            lines.append("This should free about \(size).")
+            lines.append(tr("This should free about %@.", size))
         }
-        lines.append("This cannot be undone.")
+        lines.append(tr("Can't be undone."))
         return lines.joined(separator: "\n\n")
     }
 
@@ -1120,8 +1120,8 @@ private struct ModelRowView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Remove downloaded files")
-                .accessibilityLabel("Remove \(displayName) download")
+                .help(tr("Remove downloaded files"))
+                .accessibilityLabel(tr("Remove the %@ download", displayName))
             }
         }
         .padding(.horizontal, 14)

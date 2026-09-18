@@ -455,6 +455,7 @@
 "Delete orphan build" = "删除孤立构建";
 "Delete this chat?" = "删除此聊天？";
 "Delete this partial build" = "删除此未完成的构建";
+"Deletes the downloaded files at %@." = "将删除位于 %@ 的已下载文件。";
 "Depth" = "深度";
 "depth %lld" = "深度 %lld";
 "Depth %lld is fastest on this Mac." = "深度 %lld 在这台 Mac 上最快。";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX 正在加载";
 "MTPLX is not ready yet." = "MTPLX 尚未就绪。";
 "MTPLX is not running." = "MTPLX 未在运行。";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX 正在运行此模型。请先切换模型或停止 MTPLX。";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX 正在运行，但未在 /Applications/OpenCode.app 找到 OpenCode Desktop。";
 "MTPLX is unreachable — is it running?" = "无法连接到 MTPLX — 它正在运行吗？";
 "MTPLX is up, checking health." = "MTPLX 已启动，正在检查运行状况。";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "空闲时释放";
 "Remind me later" = "稍后提醒我";
 "Remove" = "移除";
+"Remove %@?" = "移除 %@？";
 "Remove attachment" = "移除附件";
+"Remove downloaded files" = "移除已下载的文件";
 "Remove every leftover file from interrupted builds" = "移除中断构建留下的所有残留文件";
 "Remove from picker" = "从选择器中移除";
+"Remove the %@ download" = "移除 %@ 的下载";
 "Remove this model from MTPLX?" = "从 MTPLX 中移除此模型？";
 "Repair" = "修复";
 "Repair Gateway" = "修复网关";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "正在流式传输";
 "Sustained" = "持续";
 "Switch to All to browse community models." = "切换到“全部”以浏览社区模型。";
+"Switch to another model before removing this download." = "请先切换到其他模型，再移除此下载。";
 "Switching models restarts the model server." = "切换模型会重启模型服务器。";
 "System" = "系统";
 "System memory pressure" = "系统内存压力";
@@ -1400,6 +1406,7 @@
 "this model" = "此模型";
 "This model" = "此模型";
 "This model can't see images." = "此模型无法查看图片。";
+"This model is outside the MTPLX download folder and was left untouched." = "此模型位于 MTPLX 下载文件夹之外，未作任何更改。";
 "This model loads next time you start." = "此模型将在下次启动时加载。";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "此 MTPLX 运行时过旧，但它不受 Homebrew 管理。请手动更新，然后按“重试”：%@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "此模型基于 %@ 构建。请改为粘贴该仓库，Forge 可以对其进行转换。";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "此仓库存在但缺少 config.json，因此 MTPLX 无法读取。如果是转换后的导出文件，请改为粘贴原始仓库。";
 "This repo is private or gated. Public Hugging Face models download without a login." = "此仓库为私有或受控。公共 Hugging Face 模型无需登录即可下载。";
 "This setting kills the speed boost" = "此设置会使加速失效";
+"This should free about %@." = "这将释放约 %@ 的空间。";
 "this target" = "此目标";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "这仅从选择器中注销该模型 — 磁盘上的文件保持不变。若要释放空间，请在 Finder 中删除该文件夹。";
 "This will remove \"%@\" and its messages." = "这将移除“%@”及其消息。";
@@ -1503,6 +1511,7 @@
 "View" = "查看";
 "View on HF" = "在 HF 上查看";
 "Wait for startup or shutdown to finish." = "等待启动或关闭完成。";
+"Wait for the current model download or update to finish." = "请等待当前的模型下载或更新完成。";
 "Waiting for fan data…" = "正在等待风扇数据…";
 "WAITING FOR MODEL" = "正在等待模型";
 "Waiting for problem…" = "正在等待题目…";

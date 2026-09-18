@@ -455,6 +455,7 @@
 "Delete orphan build" = "Sahipsiz derlemeyi sil";
 "Delete this chat?" = "Bu sohbet silinsin mi?";
 "Delete this partial build" = "Bu yarım derlemeyi sil";
+"Deletes the downloaded files at %@." = "%@ konumundaki indirilen dosyaları siler.";
 "Depth" = "Derinlik";
 "depth %lld" = "derinlik %lld";
 "Depth %lld is fastest on this Mac." = "Bu Mac'te en hızlısı derinlik %lld.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX yükleniyor";
 "MTPLX is not ready yet." = "MTPLX henüz hazır değil.";
 "MTPLX is not running." = "MTPLX çalışmıyor.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX şu anda bu modeli çalıştırıyor. Önce modeli değiştirin veya MTPLX'i durdurun.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX çalışıyor ama OpenCode Desktop /Applications/OpenCode.app konumunda bulunamadı.";
 "MTPLX is unreachable — is it running?" = "MTPLX'e ulaşılamıyor, çalışıyor mu?";
 "MTPLX is up, checking health." = "MTPLX ayakta, sağlık kontrolü yapılıyor.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Boştayken serbest bırak";
 "Remind me later" = "Daha sonra hatırlat";
 "Remove" = "Kaldır";
+"Remove %@?" = "%@ kaldırılsın mı?";
 "Remove attachment" = "Eki kaldır";
+"Remove downloaded files" = "İndirilen dosyaları kaldır";
 "Remove every leftover file from interrupted builds" = "Yarıda kalan derlemelerden artan tüm dosyaları kaldır";
 "Remove from picker" = "Seçiciden kaldır";
+"Remove the %@ download" = "%@ indirmesini kaldır";
 "Remove this model from MTPLX?" = "Bu model MTPLX'ten kaldırılsın mı?";
 "Repair" = "Onar";
 "Repair Gateway" = "Gateway'i onar";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "AKTARILIYOR";
 "Sustained" = "Sürekli";
 "Switch to All to browse community models." = "Topluluk modellerine göz atmak için Tümü'ne geçin.";
+"Switch to another model before removing this download." = "Bu indirmeyi kaldırmadan önce başka bir modele geçin.";
 "Switching models restarts the model server." = "Model değiştirmek model sunucusunu yeniden başlatır.";
 "System" = "Sistem";
 "System memory pressure" = "Sistem bellek baskısı";
@@ -1400,6 +1406,7 @@
 "this model" = "bu model";
 "This model" = "Bu model";
 "This model can't see images." = "Bu model görselleri göremez.";
+"This model is outside the MTPLX download folder and was left untouched." = "Bu model MTPLX indirme klasörünün dışında ve ona dokunulmadı.";
 "This model loads next time you start." = "Bu model bir sonraki başlatmada yüklenir.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "Bu MTPLX çalışma ortamı çok eski ama Homebrew tarafından yönetilmiyor. Elle güncelleyin, sonra Yeniden dene düğmesine basın: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "Bu, %@ deposundan üretilmiş. Bunun yerine o depoyu yapıştırın, Forge onu dönüştürebilir.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "Bu depo var ama config.json dosyası yok, bu yüzden MTPLX okuyamıyor. Dönüştürülmüş bir dışa aktarımsa bunun yerine özgün depoyu yapıştırın.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "Bu depo özel ya da erişimi kısıtlı. Herkese açık Hugging Face modelleri oturum açmadan indirilir.";
 "This setting kills the speed boost" = "Bu ayar hız kazancını yok eder";
+"This should free about %@." = "Bu işlem yaklaşık %@ yer açar.";
 "this target" = "bu hedef";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "Bu işlem modeli yalnızca seçiciden kaldırır, diskteki dosyalar olduğu gibi kalır. Alanı boşaltmak isterseniz klasörü Finder'dan silin.";
 "This will remove \"%@\" and its messages." = "Bu işlem \"%@\" ögesini ve mesajlarını kaldırır.";
@@ -1503,6 +1511,7 @@
 "View" = "Görüntüle";
 "View on HF" = "HF'de görüntüle";
 "Wait for startup or shutdown to finish." = "Başlatmanın ya da kapatmanın bitmesini bekleyin.";
+"Wait for the current model download or update to finish." = "Devam eden model indirmesinin veya güncellemesinin bitmesini bekleyin.";
 "Waiting for fan data…" = "Fan verileri bekleniyor…";
 "WAITING FOR MODEL" = "MODEL BEKLENİYOR";
 "Waiting for problem…" = "Problem bekleniyor…";

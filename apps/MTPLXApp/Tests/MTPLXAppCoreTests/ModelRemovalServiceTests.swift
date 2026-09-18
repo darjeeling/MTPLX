@@ -161,6 +161,189 @@ final class ModelRemovalServiceTests: XCTestCase {
         }
     }
 
+    /// What the real CLI does under `--json`: the refusal is a JSON object on
+    /// stdout, the exit status is 2 and stderr is empty. Verified against
+    /// `mtplx remove <name> --yes --missing-ok --json --cache-dir <root>` with
+    /// a second copy of the entry in an additional model folder.
+    func testRemovalSurfacesTheJSONRefusalTheCLIWritesToStdout() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtplx-remove-json-refusal-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("mtplx")
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' '{"detail": "multiple installed copies match owner/pack: /a/owner--pack, /b/owner--pack", "error": "remove failed", "model": "owner--pack"}'
+        exit 2
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let downloader = ModelDownloader(
+            processEnvironment: ["HOME": root.path],
+            modelCacheRoot: root.appendingPathComponent("cache", isDirectory: true),
+            executableOverride: executable
+        )
+
+        do {
+            _ = try await downloader.removeCachedModel(directoryName: "owner--pack")
+            XCTFail("expected the CLI refusal to surface")
+        } catch let error as NSError {
+            XCTAssertEqual(error.code, 2)
+            XCTAssertTrue(
+                error.localizedDescription.contains("multiple installed copies"),
+                error.localizedDescription
+            )
+        }
+    }
+
+    func testRemovalRefusalReasonPrefersTheJSONDetailThenStderr() {
+        XCTAssertEqual(
+            ModelDownloader.removalRefusalReason(
+                stdout: Data(#"{"error":"remove failed","detail":"  not a directory  "}"#.utf8),
+                stderrTail: "ignored"
+            ),
+            "not a directory"
+        )
+        XCTAssertEqual(
+            ModelDownloader.removalRefusalReason(stdout: Data(), stderrTail: "mtplx remove: refused"),
+            "mtplx remove: refused"
+        )
+        XCTAssertEqual(
+            ModelDownloader.removalRefusalReason(
+                stdout: Data(#"{"error":"remove failed","detail":""}"#.utf8),
+                stderrTail: "fallback"
+            ),
+            "fallback"
+        )
+        XCTAssertNil(ModelDownloader.removalRefusalReason(stdout: Data("Traceback".utf8), stderrTail: ""))
+    }
+
+    /// The app downloads into the primary model folder from Settings, so
+    /// that is the folder removal is fenced against. The default cache is
+    /// only the fallback, and an injected root still wins.
+    func testCachedEntryNameFollowsTheCallersPrimaryFolder() {
+        let downloader = ModelDownloader(processEnvironment: ["HOME": "/Users/test"])
+        let primary = URL(fileURLWithPath: "/Volumes/Library/models", isDirectory: true)
+
+        XCTAssertEqual(
+            downloader.cachedEntryName(
+                forInstalledPath: "/Volumes/Library/models/owner--pack",
+                cacheRoot: primary
+            ),
+            "owner--pack"
+        )
+        XCTAssertNil(
+            downloader.cachedEntryName(
+                forInstalledPath: "/Users/test/.mtplx/models/owner--pack",
+                cacheRoot: primary
+            ),
+            "the default cache is not the managed folder once another primary is set"
+        )
+        XCTAssertEqual(
+            downloader.cachedEntryName(forInstalledPath: "/Users/test/.mtplx/models/owner--pack"),
+            "owner--pack"
+        )
+
+        let pinned = ModelDownloader(
+            processEnvironment: ["HOME": "/Users/test"],
+            modelCacheRoot: URL(fileURLWithPath: "/models", isDirectory: true)
+        )
+        XCTAssertNil(
+            pinned.cachedEntryName(
+                forInstalledPath: "/Volumes/Library/models/owner--pack",
+                cacheRoot: primary
+            )
+        )
+    }
+
+    @MainActor
+    func testBackendRemovesFromTheConfiguredPrimaryFolder() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtplx-primary-remove-\(UUID().uuidString)", isDirectory: true)
+        let primaryRaw = root.appendingPathComponent("library", isDirectory: true)
+        try FileManager.default.createDirectory(at: primaryRaw, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The picker's installed paths come from the canonical library root.
+        let primary = ModelLibrary.canonicalURL(for: primaryRaw.path)
+        let installed = primary.appendingPathComponent("owner--pack", isDirectory: true)
+        let executable = try makeFakeCLI(
+            in: root,
+            printing: #"{"repo_id":"owner/pack","path":"\#(installed.path)","removed":true,"size_bytes_removed":7}"#
+        )
+        let argumentsLog = root.appendingPathComponent("arguments.log")
+        var configuration = MTPLXAppConfiguration()
+        configuration.primaryModelDirectory = primaryRaw.path
+        let store = MTPLXBackendStore(
+            configuration: configuration,
+            settingsStore: isolatedSettingsStore(in: root),
+            modelDownloader: ModelDownloader(
+                processEnvironment: ["HOME": root.path, "MTPLX_ARGUMENTS_LOG": argumentsLog.path],
+                executableOverride: executable
+            )
+        )
+
+        XCTAssertEqual(store.cachedModelReference(forInstalledPath: installed.path), "owner/pack")
+        XCTAssertNil(
+            store.cachedModelReference(
+                forInstalledPath: root.appendingPathComponent(".mtplx/models/owner--pack").path
+            ),
+            "the default cache under HOME is not the managed folder here"
+        )
+
+        let result = try await store.removeCachedModel(
+            repoID: "owner/pack",
+            installedPath: installed.path
+        )
+
+        XCTAssertTrue(result.removed)
+        XCTAssertEqual(
+            try String(contentsOf: argumentsLog, encoding: .utf8),
+            "remove owner--pack --yes --missing-ok --json --cache-dir \(primary.path)"
+        )
+    }
+
+    /// `Process.waitUntilExit()` on a concurrency pool thread missed the exit
+    /// of a child that finished within milliseconds, and the wait never
+    /// returned. A short-lived child, many times over, is the shape that
+    /// lost the race.
+    func testRemovalReturnsEveryTimeForAChildThatExitsImmediately() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtplx-remove-exit-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appendingPathComponent("cache", isDirectory: true)
+        let executable = try makeFakeCLI(
+            in: root,
+            printing: #"{"repo_id":"owner/pack","path":"\#(cacheRoot.path)/owner--pack","removed":true,"size_bytes_removed":1}"#
+        )
+        let downloader = ModelDownloader(
+            processEnvironment: ["HOME": root.path],
+            modelCacheRoot: cacheRoot,
+            executableOverride: executable
+        )
+
+        for _ in 0..<40 {
+            let result = try await downloader.removeCachedModel(
+                directoryName: "owner--pack",
+                timeoutSeconds: 20
+            )
+            XCTAssertTrue(result.removed)
+        }
+    }
+
+    func testProcessExitSignalResumesWhicheverSideComesFirst() async {
+        let early = ProcessExitSignal()
+        early.signal()
+        await early.wait()
+
+        let late = ProcessExitSignal()
+        let waiter = Task { await late.wait() }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        late.signal()
+        await waiter.value
+        late.signal()  // a second exit report is harmless
+    }
+
     @MainActor
     func testBackendRefusesToRemoveSelectedModel() async throws {
         let root = FileManager.default.temporaryDirectory

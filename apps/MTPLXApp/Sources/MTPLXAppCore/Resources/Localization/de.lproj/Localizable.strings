@@ -455,6 +455,7 @@
 "Delete orphan build" = "Verwaisten Build löschen";
 "Delete this chat?" = "Diesen Chat löschen?";
 "Delete this partial build" = "Diesen unvollständigen Build löschen";
+"Deletes the downloaded files at %@." = "Löscht die heruntergeladenen Dateien unter %@.";
 "Depth" = "Tiefe";
 "depth %lld" = "Tiefe %lld";
 "Depth %lld is fastest on this Mac." = "Tiefe %lld ist auf diesem Mac am schnellsten.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX lädt";
 "MTPLX is not ready yet." = "MTPLX ist noch nicht bereit.";
 "MTPLX is not running." = "MTPLX läuft nicht.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX führt dieses Modell gerade aus. Wechsle zuerst das Modell oder stoppe MTPLX.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX läuft, aber OpenCode Desktop wurde unter /Applications/OpenCode.app nicht gefunden.";
 "MTPLX is unreachable — is it running?" = "MTPLX ist nicht erreichbar — läuft es?";
 "MTPLX is up, checking health." = "MTPLX ist aktiv, Status wird geprüft.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Bei Inaktivität freigeben";
 "Remind me later" = "Später erinnern";
 "Remove" = "Entfernen";
+"Remove %@?" = "%@ entfernen?";
 "Remove attachment" = "Anhang entfernen";
+"Remove downloaded files" = "Heruntergeladene Dateien entfernen";
 "Remove every leftover file from interrupted builds" = "Alle verbleibenden Dateien unterbrochener Builds entfernen";
 "Remove from picker" = "Aus Auswahlliste entfernen";
+"Remove the %@ download" = "Download von %@ entfernen";
 "Remove this model from MTPLX?" = "Dieses Modell aus MTPLX entfernen?";
 "Repair" = "Reparieren";
 "Repair Gateway" = "Gateway reparieren";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "STREAMING";
 "Sustained" = "Dauerhaft";
 "Switch to All to browse community models." = "Zu „Alle“ wechseln, um Community-Modelle zu durchsuchen.";
+"Switch to another model before removing this download." = "Wechsle zu einem anderen Modell, bevor du diesen Download entfernst.";
 "Switching models restarts the model server." = "Das Wechseln von Modellen startet den Modellserver neu.";
 "System" = "System";
 "System memory pressure" = "Systemspeicherdruck";
@@ -1400,6 +1406,7 @@
 "this model" = "dieses Modell";
 "This model" = "Dieses Modell";
 "This model can't see images." = "Dieses Modell kann keine Bilder sehen.";
+"This model is outside the MTPLX download folder and was left untouched." = "Dieses Modell liegt außerhalb des MTPLX-Download-Ordners und wurde nicht angetastet.";
 "This model loads next time you start." = "Dieses Modell wird beim nächsten Start geladen.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "Diese MTPLX-Runtime ist zu alt, wird aber nicht von Homebrew verwaltet. Aktualisiere sie manuell und klicke dann auf „Erneut versuchen“: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "Dieses Modell wurde aus %@ erstellt. Füge stattdessen dieses Repo ein, und Forge kann es konvertieren.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "Dieses Repo existiert, enthält aber keine config.json, daher kann MTPLX es nicht lesen. Wenn es ein konvertierter Export ist, füge stattdessen das Original-Repo ein.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "Dieses Repo ist privat oder zugangsbeschränkt. Öffentliche Hugging Face-Modelle lassen sich ohne Login herunterladen.";
 "This setting kills the speed boost" = "Diese Einstellung hebt den Geschwindigkeitsvorteil auf";
+"This should free about %@." = "Dadurch werden etwa %@ frei.";
 "this target" = "dieses Ziel";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "Dies hebt nur die Registrierung des Modells in der Auswahlliste auf — die Dateien auf der Festplatte bleiben erhalten. Lösche den Ordner im Finder, wenn du Speicherplatz freigeben möchtest.";
 "This will remove \"%@\" and its messages." = "Dadurch werden „%@“ und seine Nachrichten entfernt.";
@@ -1503,6 +1511,7 @@
 "View" = "Anzeigen";
 "View on HF" = "Auf HF ansehen";
 "Wait for startup or shutdown to finish." = "Warte, bis Start oder Herunterfahren abgeschlossen sind.";
+"Wait for the current model download or update to finish." = "Warte, bis der laufende Modell-Download oder das Update abgeschlossen ist.";
 "Waiting for fan data…" = "Warten auf Lüfterdaten …";
 "WAITING FOR MODEL" = "WARTEN AUF MODELL";
 "Waiting for problem…" = "Warten auf Problem …";

@@ -455,6 +455,7 @@
 "Delete orphan build" = "Delete orphan build";
 "Delete this chat?" = "Delete this chat?";
 "Delete this partial build" = "Delete this partial build";
+"Deletes the downloaded files at %@." = "Deletes the downloaded files at %@.";
 "Depth" = "Depth";
 "depth %lld" = "depth %lld";
 "Depth %lld is fastest on this Mac." = "Depth %lld is fastest on this Mac.";
@@ -836,6 +837,7 @@
 "MTPLX is loading" = "MTPLX is loading";
 "MTPLX is not ready yet." = "MTPLX is not ready yet.";
 "MTPLX is not running." = "MTPLX is not running.";
+"MTPLX is running this model. Switch models or stop MTPLX first." = "MTPLX is running this model. Switch models or stop MTPLX first.";
 "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app." = "MTPLX is running, but OpenCode Desktop was not found at /Applications/OpenCode.app.";
 "MTPLX is unreachable — is it running?" = "MTPLX is unreachable — is it running?";
 "MTPLX is up, checking health." = "MTPLX is up, checking health.";
@@ -1118,9 +1120,12 @@
 "Release when idle" = "Release when idle";
 "Remind me later" = "Remind me later";
 "Remove" = "Remove";
+"Remove %@?" = "Remove %@?";
 "Remove attachment" = "Remove attachment";
+"Remove downloaded files" = "Remove downloaded files";
 "Remove every leftover file from interrupted builds" = "Remove every leftover file from interrupted builds";
 "Remove from picker" = "Remove from picker";
+"Remove the %@ download" = "Remove the %@ download";
 "Remove this model from MTPLX?" = "Remove this model from MTPLX?";
 "Repair" = "Repair";
 "Repair Gateway" = "Repair Gateway";
@@ -1359,6 +1364,7 @@
 "STREAMING" = "STREAMING";
 "Sustained" = "Sustained";
 "Switch to All to browse community models." = "Switch to All to browse community models.";
+"Switch to another model before removing this download." = "Switch to another model before removing this download.";
 "Switching models restarts the model server." = "Switching models restarts the model server.";
 "System" = "System";
 "System memory pressure" = "System memory pressure";
@@ -1400,6 +1406,7 @@
 "this model" = "this model";
 "This model" = "This model";
 "This model can't see images." = "This model can't see images.";
+"This model is outside the MTPLX download folder and was left untouched." = "This model is outside the MTPLX download folder and was left untouched.";
 "This model loads next time you start." = "This model loads next time you start.";
 "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@" = "This MTPLX runtime is too old, but it is not managed by Homebrew. Update it manually, then press Retry: %@";
 "This one was made from %@. Paste that repo instead and Forge can convert it." = "This one was made from %@. Paste that repo instead and Forge can convert it.";
@@ -1408,6 +1415,7 @@
 "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead." = "This repo exists but has no config.json, so MTPLX can't read it. If it's a converted export, paste the original repo instead.";
 "This repo is private or gated. Public Hugging Face models download without a login." = "This repo is private or gated. Public Hugging Face models download without a login.";
 "This setting kills the speed boost" = "This setting kills the speed boost";
+"This should free about %@." = "This should free about %@.";
 "this target" = "this target";
 "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space." = "This unregisters the model from the picker only — the files on disk stay intact. Delete the folder from Finder if you want to free the space.";
 "This will remove \"%@\" and its messages." = "This will remove \"%@\" and its messages.";
@@ -1503,6 +1511,7 @@
 "View" = "View";
 "View on HF" = "View on HF";
 "Wait for startup or shutdown to finish." = "Wait for startup or shutdown to finish.";
+"Wait for the current model download or update to finish." = "Wait for the current model download or update to finish.";
 "Waiting for fan data…" = "Waiting for fan data…";
 "WAITING FOR MODEL" = "WAITING FOR MODEL";
 "Waiting for problem…" = "Waiting for problem…";
