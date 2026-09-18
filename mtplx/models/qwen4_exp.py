@@ -1585,8 +1585,10 @@ def qsa_prefill_lane_auto_supported() -> bool:
     this returns True, so it must name EVERY fast consumer of that tuple.
     Two exist:
 
-    * Metal 4 TensorOps (NAX) machines take ``qsa_prefill_flash`` (M4/M5).
-    * M3-class machines have no G17 tensor units and can never take that
+    * Metal 4 TensorOps (NAX) machines take ``qsa_prefill_flash``: GPU
+      generation 17 or newer on macOS 26.2 or newer, which today means M5.
+      An M4 reports generation 16 (``applegpu_g16s``) and is NOT one.
+    * M1 to M4 machines have no tensor units and can never take that
       kernel, but they can take the vendored Steel sparse-GQA kernel when it
       is built and probed.
 
@@ -1840,8 +1842,8 @@ def _qsa_prefill_dispatch_tier(
 ):
     """Pick the one consumer of the ``("flash_prefill", ids, valid)`` tuple.
 
-    Order is flash (M4/M5 MPP) -> direct (Steel, the M3 lane) -> gather
-    (portable) -> dense. Each predicate is called at most once and only
+    Order is flash (MPP, GPU generation 17 or newer: M5 today, not M4) ->
+    direct (Steel, the M1 to M4 lane) -> gather (portable) -> dense. Each predicate is called at most once and only
     until one answers True. Returns the attention output, or ``None`` to
     mean "no tier dispatched; rebuild the dense mask". There is no retry:
     once a tier is entered its failure propagates.
