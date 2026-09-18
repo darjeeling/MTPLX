@@ -55,6 +55,7 @@ from mlx_lm.models.base import BaseModelArgs, create_ssm_mask
 from mlx_lm.models.cache import ArraysCache, KVCache
 
 from mtplx.attention_context import vision_rope_state
+from mtplx.demotions import note as _note_demotion
 from mlx_lm.models.qwen3_5 import GatedDeltaNet as _Qwen3_5GatedDeltaNet
 from mlx_lm.models.qwen3_next import (
     Qwen3NextSparseMoeBlock as _Qwen3NextSparseMoeBlock,
@@ -1753,12 +1754,23 @@ def _qsa_prefill_compile_rows() -> int:
         return 2048
 
 
+_QSA_PREFILL_LANE_OFF_REASON = (
+    "the sparse prefill lane is off on this Mac: no tensor units (GPU "
+    "generation 17) and no Steel extension, or MTPLX_QSA_PREFILL=0, or the "
+    "Metal SDK could not compile the score kernel"
+)
+_QSA_PREFILL_DENSE_MASK_REASON = (
+    "blocks were selected but the flash, Steel and gather consumers all "
+    "declined this chunk, so the dense mask was rebuilt"
+)
+
+
 def _qsa_large_prefill_enabled(rows: int, total_tokens: int) -> bool:
     # S>1 is not sufficient: MTP target verification also uses multiple rows.
     # The request-scoped phase signal keeps speculative verify/rollback on its
     # existing exact cache path and reserves this matrix-shaped lane for the
     # prompt/SSD-restored prefill it was designed to accelerate.
-    return (
+    if not (
         current_attention_phase() == "prefill"
         and int(rows) >= _qsa_prefill_min_rows()
         # Gate on the earliest query in the chunk, not its final T.  A large
@@ -1766,11 +1778,17 @@ def _qsa_large_prefill_enabled(rows: int, total_tokens: int) -> bool:
         # would make its early rows pay the exact fixed-cost pathology this
         # guard exists to avoid.
         and int(total_tokens) - int(rows) >= _qsa_prefill_min_context()
-        # Capability/pipeline resolution is only useful for eligible prefill
-        # chunks. Never pay its imports and native readiness checks on every
-        # AR or speculative decode layer, especially on portable consumers.
-        and _qsa_prefill_enabled()
-    )
+    ):
+        return False
+    # Capability/pipeline resolution is only useful for eligible prefill
+    # chunks. Never pay its imports and native readiness checks on every
+    # AR or speculative decode layer, especially on portable consumers.
+    if _qsa_prefill_enabled():
+        return True
+    # An eligible chunk on a Mac whose sparse lane is off runs the dense
+    # path at every length: say so (demotion ledger, /health).
+    _note_demotion("qsa_prefill_lane_off", _QSA_PREFILL_LANE_OFF_REASON)
+    return False
 
 
 def _qsa_prefill_flash_attention_enabled(rows: int, total_tokens: int) -> bool:
@@ -1862,6 +1880,7 @@ def _qsa_prefill_dispatch_tier(
         _qsa_prefill_count("gather_tier")
         return out
     _qsa_prefill_count("dense_fallback")
+    _note_demotion("qsa_prefill_dense_mask", _QSA_PREFILL_DENSE_MASK_REASON)
     return None
 
 
