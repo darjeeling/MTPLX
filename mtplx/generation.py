@@ -732,6 +732,53 @@ def _record_prefill_chunk(**fields: float) -> None:
         _PREFILL_CHUNK_RECORDS.append(fields)
 
 
+def _prefill_chunk_trace_enabled() -> bool:
+    """``MTPLX_PREFILL_CHUNK_TRACE=1``: a measuring instrument, off by default."""
+
+    return _env_truthy("MTPLX_PREFILL_CHUNK_TRACE")
+
+
+def _annotate_prefill_chunk(**fields: float) -> None:
+    """Add the after-forward costs of the chunk just recorded (trace only)."""
+
+    if _PREFILL_CHUNK_RECORDS:
+        _PREFILL_CHUNK_RECORDS[-1].update(fields)
+
+
+def _prefill_chunk_memory_fields() -> dict[str, float]:
+    try:
+        return {
+            "active_gb": round(mx.get_active_memory() / 1e9, 3),
+            "cache_gb": round(mx.get_cache_memory() / 1e9, 3),
+            "peak_gb": round(mx.get_peak_memory() / 1e9, 3),
+        }
+    except Exception:
+        return {}
+
+
+def _emit_prefill_chunk_trace(label: str, **totals: float) -> None:
+    """One stderr line per chunked prefill: every chunk's split and the totals."""
+
+    try:
+        print(
+            "prefill_chunk_trace="
+            + json.dumps(
+                {
+                    "lane": label,
+                    "totals": {k: round(float(v), 4) for k, v in totals.items()},
+                    "chunks": [
+                        {k: round(float(v), 4) for k, v in record.items()}
+                        for record in _PREFILL_CHUNK_RECORDS
+                    ],
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
 def _ple_stage_seconds() -> float:
     """Cumulative host time inside the PLE n-gram stage gather, or 0.0."""
 
@@ -4255,6 +4302,75 @@ def _capture_gdn_boundary(
         pass
 
 
+def _gdn_boundary_tail_layout() -> str:
+    """``geometric`` (default) or ``dense`` (the layout through 2.11.3).
+
+    The dense layout cut the WHOLE final chunk into ``tail_interval`` pieces:
+    eight 256-row forwards behind every cold prompt at the default chunk, and
+    the entire prompt when the chunk is wider than the prompt.  Measured on
+    Flash-Next (M5 Max, 2026-09-18): a 256-row forward runs at about 750
+    tok/s against 1,720 for a 2,048-row one, so a 4K prompt spent 2.6 s of
+    its 3.7 s in that tail, and widening the chunk made prefill slower.  The
+    boundary list keeps at most MTPLX_GDN_BOUNDARY_MAX records with one per
+    power-of-two distance from the newest, so most of what the dense grid
+    captured was thinned away again.
+    """
+
+    raw = (os.environ.get("MTPLX_GDN_BOUNDARY_TAIL_LAYOUT") or "").strip().lower()
+    return "dense" if raw == "dense" else "geometric"
+
+
+def _gdn_boundary_tail_min_rung() -> int:
+    """Narrowest span the tail ladder may create behind the nearest boundary.
+
+    Measured on Flash-Next (M5 Max, 2026-09-18, 4K context): a 2,048-row
+    forward runs at 1,763 tok/s, 1,024 rows at 1,508, 512 at 1,199 and 256 at
+    842, so every rung narrower than 1,024 rows costs a cold prompt about
+    0.15 s and buys a restore point only a mid-tail edit can use.  The rung
+    nearest the prompt end (the one an agent turn restores from) is exempt.
+    """
+
+    raw = os.environ.get("MTPLX_GDN_BOUNDARY_TAIL_MIN_RUNG", "1024")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1024
+
+
+def _geometric_tail_edges(
+    start: int, end: int, tail_interval: int, min_rung: int | None = None
+) -> list[int]:
+    """Boundary positions inside the final chunk ``[start, end)``, ascending.
+
+    ``top`` is the last point of the chunk's own ``interval`` grid below
+    ``end`` (the dense layout's final boundary), so the nearest boundary to
+    the prompt end is exactly as close as the dense grid's.  Behind it the
+    edges sit at ``top - (2**k - 1) * rung``, ``rung`` being the minimum rung
+    width rounded up to the interval grid: their distances from the prompt
+    end fall one into each power-of-two bucket that
+    ``_thin_gdn_boundary_records`` keeps.  The deepest edge is dropped while
+    the span in front of it would be narrower than the one behind it, so
+    widths only shrink toward the prompt end and the wide part of the chunk
+    stays wide.
+    """
+
+    if min_rung is None:
+        min_rung = _gdn_boundary_tail_min_rung()
+    rung = -(-max(int(min_rung), tail_interval) // tail_interval) * tail_interval
+    top = start + ((end - 1 - start) // tail_interval) * tail_interval
+    if top - start < tail_interval:
+        return []
+    edges = [top]
+    reach = rung
+    while top - reach - start >= rung:
+        edges.append(top - reach)
+        reach = 2 * reach + rung
+    edges.sort()
+    while len(edges) >= 2 and edges[0] - start < edges[1] - edges[0]:
+        edges.pop(0)
+    return edges
+
+
 def _prefill_spans_with_tail_grid(
     token_count: int,
     *,
@@ -4269,10 +4385,17 @@ def _prefill_spans_with_tail_grid(
     if end - start <= tail_interval:
         return _split_spans_at(spans, mandatory_edges)
     refined = spans[:-1]
+    if _gdn_boundary_tail_layout() == "dense":
+        cursor = start
+        while cursor < end:
+            refined.append((cursor, min(end, cursor + tail_interval)))
+            cursor += tail_interval
+        return _split_spans_at(refined, mandatory_edges)
     cursor = start
-    while cursor < end:
-        refined.append((cursor, min(end, cursor + tail_interval)))
-        cursor += tail_interval
+    for edge in _geometric_tail_edges(start, end, tail_interval):
+        refined.append((cursor, edge))
+        cursor = edge
+    refined.append((cursor, end))
     return _split_spans_at(refined, mandatory_edges)
 
 
@@ -6205,7 +6328,9 @@ def _prefill_committed_mtp_history_streaming(
     # forward owns the GPU. The census measures those gathers as 8 host-late
     # stalls totalling 2,313 ms with the GPU fully idle.
     with _ple_prefill_lookahead_scope(rt, body, mtp_streaming_spans):
+        _chunk_trace = _prefill_chunk_trace_enabled()
         for start, end in mtp_streaming_spans:
+            _iter_started = time.perf_counter()
             _check_postcommit_abort(abort_check)
             chunk_array = body_array[:, start:end]
             chunk_len = end - start
@@ -6259,6 +6384,7 @@ def _prefill_committed_mtp_history_streaming(
                 ple_gather_s=_ple_stage_seconds() - gather_before,
             )
             _runtime_count(rt, "prefill_chunks")
+            _history_before = prompt_history_time
             if chunk_callback is not None:
                 try:
                     now = time.perf_counter()
@@ -6350,13 +6476,24 @@ def _prefill_committed_mtp_history_streaming(
             )
             del hidden_chunk
             del logits_chunk
-            target_forward_time += _prefill_chunk_cache_cleanup(rt)
+            _cleanup_s = _prefill_chunk_cache_cleanup(rt)
+            target_forward_time += _cleanup_s
+            _boundary_started = time.perf_counter()
             if capture_boundaries:
                 _capture_gdn_boundary(
                     gdn_boundary_sink, cursor, cache, hidden_last=boundary_hidden
                 )
+            _boundary_s = time.perf_counter() - _boundary_started
             del boundary_hidden
             _check_postcommit_abort(abort_check)
+            if _chunk_trace:
+                _annotate_prefill_chunk(
+                    mtp_history_s=prompt_history_time - _history_before,
+                    cleanup_s=_cleanup_s,
+                    boundary_s=_boundary_s,
+                    iter_s=time.perf_counter() - _iter_started,
+                    **_prefill_chunk_memory_fields(),
+                )
 
     started = time.perf_counter()
     _check_postcommit_abort(abort_check)
@@ -6370,9 +6507,20 @@ def _prefill_committed_mtp_history_streaming(
             logits_keep=1 if final_logits_only else None,
         )
     _eval(logits, hidden)
-    target_forward_time += time.perf_counter() - started
-    target_forward_time += _maybe_repage_target_prefill_cache(rt, cache)
+    _final_token_s = time.perf_counter() - started
+    target_forward_time += _final_token_s
+    _repage_s = _maybe_repage_target_prefill_cache(rt, cache)
+    target_forward_time += _repage_s
     _check_postcommit_abort(abort_check)
+    if _prefill_chunk_trace_enabled():
+        _emit_prefill_chunk_trace(
+            "committed_mtp_history_streaming",
+            prompt_tokens=len(prompt_ids),
+            target_forward_s=target_forward_time,
+            mtp_history_s=prompt_history_time,
+            final_token_s=_final_token_s,
+            repage_s=_repage_s,
+        )
     return (
         cache,
         logits[:, -1, :],

@@ -102,14 +102,14 @@ def _rows_of(x: Any) -> int:
     return rows
 
 
-def _timed(name: str, fn, row_arg: int = 0):
+def _timed(name: str, fn, row_arg: int = 0, rows_fn=None):
     import mlx.core as mx
 
     floor = _min_rows()
 
     def wrapper(*args, **kwargs):
         probe = args[row_arg] if len(args) > row_arg else None
-        rows = _rows_of(probe)
+        rows = _rows_of(probe) if rows_fn is None else rows_fn(probe)
         if rows < floor:
             return fn(*args, **kwargs)
         mx.eval(_arrays(args) + _arrays(kwargs))
@@ -220,6 +220,23 @@ def install() -> bool:
     shared = getattr(family, "_FusedGateUpMLP", None)
     if shared is not None:
         shared.__call__ = _timed("moe.shared_expert", shared.__call__, 1)
+    # Inside the QSA attention layer (reported beside it, excluded from the
+    # share total): the block indexer (project, score, select) and the
+    # block-sparse consumer kernel of the large-prefill lane.
+    indexer = getattr(family, "QSAIndexer", None)
+    if indexer is not None:
+        indexer.__call__ = _timed("moe.zz_qsa_indexer", indexer.__call__, 1)
+    try:
+        from .kernels import qsa_prefill_flash as flash
+
+        flash.qsa_prefill_flash = _timed(
+            "moe.zz_qsa_flash_kernel",
+            flash.qsa_prefill_flash,
+            0,
+            rows_fn=lambda q: int(q.shape[-2]) if getattr(q, "ndim", 0) == 4 else 0,
+        )
+    except Exception:
+        pass
     atexit.register(_report)
     _INSTALLED = True
     print("[qwen4-prefill-profile] installed (rows >= %d)" % _min_rows(), file=sys.stderr, flush=True)

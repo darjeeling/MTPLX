@@ -427,6 +427,7 @@ def _predict(**stubs):
         "_predicted_first_prefill_span",
         "_iter_prefill_chunk_spans",
         "_prefill_spans_with_tail_grid",
+        "_geometric_tail_edges",
         "_split_spans_at",
     }
     tree = ast.parse(GENERATION_TEXT)
@@ -443,6 +444,8 @@ def _predict(**stubs):
         "_prefill_chunk_size": lambda: 4096,
         "_gdn_boundary_capture_enabled": lambda: True,
         "_gdn_boundary_tail_interval": lambda: 256,
+        "_gdn_boundary_tail_layout": lambda: "geometric",
+        "_gdn_boundary_tail_min_rung": lambda: 1024,
     }
     namespace.update(stubs)
     exec(compile(module, "<generation>", "exec"), namespace)
@@ -464,11 +467,14 @@ def test_prediction_covers_a_single_chunk_prompt_whole():
 
 
 def test_prediction_declines_when_the_tail_grid_could_cut_chunk_one():
-    """A banked short prompt: the grid cuts 1023 into 256s, the plain plan
-    does not, and the two disagree -- so the lane does not guess."""
+    """A banked short prompt: the grid cuts 1023 (512 + 256 + 255 under the
+    geometric layout, 256s under the dense one), the plain plan does not, and
+    the two disagree -- so the lane does not guess."""
 
     predict = _predict()
     assert predict(list(range(1024)), session_bank=object()) is None
+    dense = _predict(_gdn_boundary_tail_layout=lambda: "dense")
+    assert dense(list(range(1024)), session_bank=object()) is None
 
 
 def test_prediction_survives_a_banked_multi_chunk_prompt():
