@@ -59,6 +59,7 @@ from .qwen4_draft_k20_prescatter import (
     read_draft as _qwen4_draft_k20_prescatter_read,
     release_draft_route as _qwen4_draft_k20_prescatter_release,
 )
+from . import qwen4_draft_device_chain as _qwen4_sampled_chain
 from .qwen4_block_verify import (
     build_verifier as _qwen4_build_block_verifier,
     is_enabled as _qwen4_block_verify_enabled,
@@ -2730,6 +2731,12 @@ class GenerationStats:
     context_copy_suspended: bool = False
     context_copy_backoff_tokens: int = 0
     context_copy_disabled_reason: str | None = None
+    # MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN: rounds drafted with one eval, rounds whose
+    # device prediction the host did not confirm (finished serially), and why
+    # the lane stood aside when it did ("installed" when it ran).
+    sampled_draft_chain_rounds: int = 0
+    sampled_draft_chain_cuts: int = 0
+    sampled_draft_chain_status: str = "off"
     # Grammar-constrained decoding (response_format). constraint_completed is
     # None when no constraint was active, False when generation ended before
     # the grammar reached a complete document (truncation is never passed off
@@ -10072,6 +10079,63 @@ def generate_mtpk(
         )
         if _draft_k20_prescatter_plan is not None:
             _draft_k20_prescatter_receipt = _draft_k20_prescatter_plan.to_dict()
+    # MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN: claimed once, from request-invariant
+    # terms only (the per-cycle ones stay in the loop, as for the greedy
+    # chain).  Every blocker is a routing answer: the stock serial reader runs.
+    _sampled_chain_plan = None
+    _sampled_chain_status = "off"
+    _sampled_chain_rounds = 0
+    _sampled_chain_cuts = 0
+    if _qwen4_sampled_chain.is_enabled():
+        _sampled_chain_blockers = [
+            _sc_name
+            for _sc_name, _sc_blocked in (
+                ("greedy_draft", draft_sampler.temperature <= 0),
+                ("greedy_target", sampler.temperature <= 0),
+                ("draft_core", draft_core != "stock"),
+                (
+                    "target_prefix_verify",
+                    a3b_target_prefix_route is not None or target_prefix_verify,
+                ),
+                ("constraint", constraint is not None),
+                ("draft_margin_threshold", draft_margin_threshold is not None),
+                (
+                    "draft_confidence",
+                    _draft_conf_needed or _draft_conf_width_threshold is not None,
+                ),
+                ("policy_metrics", bool(wants_policy_metrics)),
+                ("adaptive_policy", adaptive_policy is not None),
+                ("adaptive_width_policy", adaptive_width_policy is not None),
+                ("adaptive_dtemp", _dtemp_controller is not None),
+                ("mtp_corrector", mtp_corrector is not None),
+                ("topk_reranker", mtp_topk_reranker is not None),
+                ("adapter_ensemble", bool(adapter_ensemble_q)),
+                ("online_hidden", bool(online_hidden_enabled)),
+                (
+                    "correction_cache",
+                    bool(online_correction_cache or prompt_correction_cache),
+                ),
+                ("penalties", bool(_penalties_active)),
+                ("frspec_legacy", _frspec_legacy_ids is not None),
+                ("combined_greedy_read", bool(combine_greedy_draft_read)),
+                ("mtp_cache_policy", mtp_cache_policy != "persistent"),
+                (
+                    "mtp_history_policy",
+                    not _mtp_history_uses_committed_cache(mtp_history_policy),
+                ),
+                ("k20_prescatter_owns_read", _draft_k20_prescatter_plan is not None),
+            )
+            if _sc_blocked
+        ]
+        if _sampled_chain_blockers:
+            _sampled_chain_status = "declined:" + ",".join(_sampled_chain_blockers)
+        else:
+            _sampled_chain_plan, _sc_reason = _qwen4_sampled_chain.claim(
+                rt, draft_sampler
+            )
+            _sampled_chain_status = (
+                "installed" if _sampled_chain_plan is not None else f"declined:{_sc_reason}"
+            )
     while len(tokens) < max_tokens:
         if first_round_snapshot is None and step >= 1:
             # Top of iteration 2: the cumulative timers now hold exactly
@@ -11302,6 +11366,169 @@ def generate_mtpk(
         # knob may default on. Duplicates ~40 lines of the stock loop below —
         # keep the two in sync (and see the stock loop's own comment).
         _greedy_chain_used = False
+        # Sampled on-device draft chain (MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN): the
+        # device predicts each depth's host draw so the next depth chains
+        # without a sync; one eval per round, then the host re-derives every
+        # distribution and pick with the serial reader's own arithmetic and
+        # the uniforms it drew before the round.  A prediction the host does
+        # not confirm cuts the chain at that depth (MTP cache rolled back to
+        # the recorded offset) and the rest of the round runs serially on the
+        # already drawn uniforms, so tokens, proposals and the generator
+        # stream are those of the serial compact-row reader for every seed.
+        # See mtplx/qwen4_draft_device_chain.py.
+        _sampled_chain_next_depth = 0
+        if (
+            _sampled_chain_plan is not None
+            and not used_device_core
+            and cycle_depth > 0
+            and _cc_draft_source_token is None
+            and not _steer_active
+            and mtp_cache is not None
+        ):
+            _sc_started = time.perf_counter()
+            _sc_uniforms = [float(rng.random()) for _ in range(cycle_depth)]
+            _sc_tok = mx.array([[int(next_token)]])
+            _sc_hidden = draft_hidden
+            _sc_supports: list[tuple[mx.array, mx.array, mx.array]] = []
+            _sc_predicted: list[mx.array] = []
+            _sc_hiddens: list[mx.array] = []
+            _sc_offsets: list[int | None] = []
+            _sc_cache_offsets: list[int] = []
+            for _sc_depth in range(cycle_depth):
+                _sc_cache_offsets.append(_mtp_cache_offset(mtp_cache))
+                _sc_offset = mtp_position_offset_for_cache(mtp_cache)
+                _sc_offsets.append(_sc_offset)
+                _sc_logits, _sc_hidden_next = rt.draft_mtp(
+                    _sc_hidden,
+                    _sc_tok,
+                    mtp_cache=mtp_cache,
+                    return_hidden=True,
+                    mtp_hidden_variant=mtp_hidden_variant,
+                    mtp_depth=_sc_depth + 1,
+                    position_offset=_sc_offset,
+                )
+                _sc_support = _qwen4_sampled_chain.device_support(
+                    _sampled_chain_plan, _sc_logits
+                )
+                _sc_token = _qwen4_sampled_chain.device_predict(
+                    _sampled_chain_plan,
+                    *_sc_support,
+                    mx.array(_sc_uniforms[_sc_depth], dtype=mx.float32),
+                )
+                _sc_supports.append(_sc_support)
+                _sc_predicted.append(_sc_token)
+                _sc_tok = _sc_token.reshape(1, 1).astype(mx.int32)
+                _sc_hidden = _sc_hidden_next[:, -1:, :]
+                _sc_hiddens.append(_sc_hidden)
+            _eval(
+                *[_sc_array for _sc_s in _sc_supports for _sc_array in _sc_s],
+                *_sc_predicted,
+                _sc_hidden,
+            )
+            _sc_source = int(next_token)
+            _sc_cut = False
+            for _sc_depth in range(cycle_depth):
+                _sc_local, _sc_vals, _sc_probs = _sc_supports[_sc_depth]
+                _sc_q = _qwen4_sampled_chain.host_distribution(
+                    _sampled_chain_plan,
+                    np.asarray(_sc_local),
+                    np.asarray(_sc_vals),
+                    np.asarray(_sc_probs),
+                )
+                if _sc_q is None:
+                    # No finite positive mass: the same hard failure the
+                    # serial reader raises, never a guessed token.
+                    raise non_finite_logits_error(
+                        np.asarray(_sc_probs), "sampled draft chain"
+                    )
+                _sc_host_token = _qwen4_sampled_chain.host_pick(
+                    _sc_q, _sc_uniforms[_sc_depth]
+                )
+                draft_tokens.append(_sc_host_token)
+                draft_probs.append(_sc_q)
+                draft_hidden_for_update.append(_sc_hiddens[_sc_depth])
+                draft_hidden_update_keys.append(
+                    (_sc_depth + 1, _sc_source)
+                    if online_hidden_corrector_key == "token"
+                    else _sc_depth + 1
+                )
+                drafted += 1
+                drafted_by_depth[_sc_depth] += 1
+                _sc_event = {
+                    "depth": _sc_depth + 1,
+                    "token": int(_sc_host_token),
+                    "timing_s": {"draft": 0.0},
+                    "mtp_corrector": None,
+                    "draft_core": "sampled-chain",
+                }
+                if _sc_offsets[_sc_depth] is not None:
+                    _sc_event["position_offset"] = int(_sc_offsets[_sc_depth])
+                event["drafts"].append(_sc_event)
+                draft_hidden = _sc_hiddens[_sc_depth]
+                next_token = _sc_host_token
+                _sc_source = int(_sc_host_token)
+                _sampled_chain_next_depth = _sc_depth + 1
+                if _sc_host_token != int(_sc_predicted[_sc_depth].item()):
+                    # Every later forward consumed the device's token, not
+                    # this one: drop their MTP-cache rows and finish serially.
+                    if _sc_depth + 1 < cycle_depth:
+                        _rollback_mtp_cache(
+                            mtp_cache, _sc_cache_offsets[_sc_depth + 1]
+                        )
+                    _sc_cut = True
+                    break
+            if _sc_cut:
+                _sampled_chain_cuts += 1
+                event["sampled_chain_cut_depth"] = _sampled_chain_next_depth + 1
+                while _sampled_chain_next_depth < cycle_depth:
+                    _sc_depth = _sampled_chain_next_depth
+                    _sc_offset = mtp_position_offset_for_cache(mtp_cache)
+                    _sc_logits, _sc_hidden_next = rt.draft_mtp(
+                        draft_hidden,
+                        mx.array([[int(next_token)]]),
+                        mtp_cache=mtp_cache,
+                        return_hidden=True,
+                        mtp_hidden_variant=mtp_hidden_variant,
+                        mtp_depth=_sc_depth + 1,
+                        position_offset=_sc_offset,
+                    )
+                    _sc_host_token, _sc_q = _qwen4_sampled_chain.serial_read(
+                        _sampled_chain_plan, _sc_logits, _sc_uniforms[_sc_depth]
+                    )
+                    if _sc_q is None:
+                        raise non_finite_logits_error(
+                            np.zeros(1), "sampled draft chain (serial tail)"
+                        )
+                    _sc_source = int(next_token)
+                    draft_tokens.append(_sc_host_token)
+                    draft_probs.append(_sc_q)
+                    draft_hidden = _sc_hidden_next[:, -1:, :]
+                    draft_hidden_for_update.append(draft_hidden)
+                    draft_hidden_update_keys.append(
+                        (_sc_depth + 1, _sc_source)
+                        if online_hidden_corrector_key == "token"
+                        else _sc_depth + 1
+                    )
+                    drafted += 1
+                    drafted_by_depth[_sc_depth] += 1
+                    _sc_event = {
+                        "depth": _sc_depth + 1,
+                        "token": int(_sc_host_token),
+                        "timing_s": {"draft": 0.0},
+                        "mtp_corrector": None,
+                        "draft_core": "sampled-chain-serial",
+                    }
+                    if _sc_offset is not None:
+                        _sc_event["position_offset"] = int(_sc_offset)
+                    event["drafts"].append(_sc_event)
+                    next_token = _sc_host_token
+                    _sampled_chain_next_depth = _sc_depth + 1
+            _sc_elapsed = time.perf_counter() - _sc_started
+            draft_time += _sc_elapsed
+            if event["drafts"]:
+                event["drafts"][-1]["timing_s"]["draft"] = _sc_elapsed
+            _sampled_chain_rounds += 1
+            _greedy_chain_used = _sampled_chain_next_depth >= cycle_depth
         if (
             _greedy_chain_eligible
             and not used_device_core
@@ -13467,6 +13694,7 @@ def generate_mtpk(
     # it armed with at most one stale entry, which the next claim clears and
     # which `take_prescatter_row`'s identity check can never mis-consume.
     _qwen4_draft_k20_prescatter_release(_draft_k20_prescatter_plan)
+    _qwen4_sampled_chain.release(_sampled_chain_plan)
     if constraint is not None:
         # Final sync so `completed` reflects every committed token (the loop
         # may exit between the per-cycle sync and the last commit).
@@ -13714,6 +13942,9 @@ def generate_mtpk(
         context_copy_suspended=len(tokens) < ccopy_suspend_until,
         context_copy_backoff_tokens=ccopy_backoff if ccopy_index is not None else 0,
         context_copy_disabled_reason=ccopy_disabled_reason,
+        sampled_draft_chain_rounds=_sampled_chain_rounds,
+        sampled_draft_chain_cuts=_sampled_chain_cuts,
+        sampled_draft_chain_status=_sampled_chain_status,
         graphbank={
             **(graphbank.to_dict() if graphbank is not None else {}),
             **(

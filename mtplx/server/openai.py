@@ -16140,6 +16140,11 @@ def _metrics_envelope(
             stats.get("context_copy_capacity_growths") or 0
         ),
         "context_copy_disabled_reason": stats.get("context_copy_disabled_reason"),
+        "sampled_draft_chain_rounds": int(
+            stats.get("sampled_draft_chain_rounds") or 0
+        ),
+        "sampled_draft_chain_cuts": int(stats.get("sampled_draft_chain_cuts") or 0),
+        "sampled_draft_chain_status": stats.get("sampled_draft_chain_status"),
         "verify_joint_eval_time_s": float(stats.get("verify_joint_eval_time_s") or 0.0),
         "verify_target_distribution_time_s": float(
             stats.get("verify_target_distribution_time_s") or 0.0
@@ -19903,6 +19908,9 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "context_copy_suspended",
     "context_copy_backoff_tokens",
     "context_copy_disabled_reason",
+    "sampled_draft_chain_rounds",
+    "sampled_draft_chain_cuts",
+    "sampled_draft_chain_status",
     # Grammar-constrained decoding (response_format) counters.
     "constraint_active",
     "constraint_completed",
