@@ -6,6 +6,23 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ## [Unreleased] (2.11.4)
 
+### Changed
+
+- **Request captures hold no content by default** (PR #356, Philip John
+  Basile). Capture is still off unless `MTPLX_REQUEST_CAPTURE_DIR` is set.
+  When it is on, a record now holds the sampler settings, the seed, token
+  counts and SHA-256 digests, and no prompt text, answer text, messages,
+  exception text or token IDs; keys that look like credentials are redacted
+  at any depth. Each kind of content has its own opt-in
+  (`MTPLX_REQUEST_CAPTURE_INCLUDE_PROMPT_TOKENS`,
+  `..._COMPLETION_TOKENS`, `..._PROMPT_TEXT`, `..._RESPONSE_TEXT`,
+  `..._MESSAGES`, `..._EXCEPTION_TEXT`). An opt-in to token IDs keeps the
+  whole sequence, because an exact replay needs every ID;
+  `MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT` and
+  `MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT` bound them when wanted.
+  `mtplx trace` reads the request log and the flight recorder, not these
+  files, so it is unaffected. Records are now `capture_version` 2.
+
 ### Fixed
 
 - **`MTPLX_AR_PIPELINE` gives the same tokens as the classic AR loop**
