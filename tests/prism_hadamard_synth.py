@@ -335,9 +335,23 @@ def build_synthetic_pack(
 def _write_tiny_tokenizer(directory: Path) -> None:
     from tokenizers import Tokenizer, models, pre_tokenizers
 
+    from tokenizers import AddedToken
+
     vocab = {f"t{index}": index for index in range(VOCAB)}
+    specials = {
+        IMAGE_TOKEN_ID: "<|image_pad|>",
+        VIDEO_TOKEN_ID: "<|video_pad|>",
+        VISION_START_TOKEN_ID: "<|vision_start|>",
+        VISION_END_TOKEN_ID: "<|vision_end|>",
+    }
+    for index, text in specials.items():
+        vocab.pop(f"t{index}")
+        vocab[text] = index
     tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="t0"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer.add_special_tokens(
+        [AddedToken(text, special=True) for _index, text in sorted(specials.items())]
+    )
     tokenizer.save(str(directory / "tokenizer.json"))
     (directory / "tokenizer_config.json").write_text(
         json.dumps(
