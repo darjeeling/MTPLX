@@ -25,6 +25,11 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **Dashboard draft totals fall back to the per-depth counts** (PR #490,
+  Wu Shuwen; issue #401). The "accepted of drafted" line and the drafted
+  per verify call tile total `accepted_by_depth` and `drafted_by_depth`
+  when a payload carries no flat totals. The server has sent the flat
+  totals since 2.11.3, and an emitted total still wins.
 - **`MTPLX_AR_PIPELINE` gives the same tokens as the classic AR loop**
   (PR #507, David Tai). The pipelined AR path drew the first output token
   from the request's NumPy generator and every later token from a separate
