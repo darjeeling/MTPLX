@@ -1475,7 +1475,7 @@ def _sustained_prefill_layout() -> str:
     return "contiguous_then_repage"
 
 
-_DENSE_AUTO_ANNOUNCED = False
+_DENSE_AUTO_ANNOUNCED: Any = False
 
 
 def _memory_budget_env_bytes() -> int:
@@ -1515,12 +1515,15 @@ def _dense_decode_max_context() -> int:
         os.environ.get("MTPLX_SUSTAINED_DENSE_DECODE_MAX_CONTEXT") or ""
     ).strip().lower()
     if raw == "auto":
-        # Dense KV bytes per token of context. 65536 = Qwen3.8-27B truth
-        # (16 full-attn layers x K+V x 4 kv heads x D256 x bf16); model
-        # repos with other geometry set the env alongside their config.
-        bytes_per_token = max(
-            1, _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN", 65536)
-        )
+        # Dense KV bytes per token of context: the operator's env, else the
+        # value the loader derived from the served model's config.json
+        # (runtime.load exports it; Flash-Next is 24,576), else 65536, the
+        # Qwen3.8-27B truth (16 full-attn layers x K+V x 4 kv heads x D256
+        # x bf16). Before 2.11.4 nothing set the env, so every model was
+        # budgeted with the 27B's geometry.
+        operator_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN", 0)
+        derived_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN_DERIVED", 0)
+        bytes_per_token = max(1, operator_bytes or derived_bytes or 65536)
         ram_fraction = max(
             1, min(50, _env_int("MTPLX_DENSE_DECODE_RAM_PERCENT", 15))
         )
@@ -1539,21 +1542,31 @@ def _dense_decode_max_context() -> int:
         window = _env_int("MTPLX_CONTEXT_WINDOW_TOKENS", 0)
         if window > 0:
             budget_tokens = min(budget_tokens, window)
-        resolved = max(131072, budget_tokens)
-        # Announce once: a new model that forgot to ship its
-        # MTPLX_DENSE_KV_BYTES_PER_TOKEN gets its budget computed on the
-        # 65536 Qwen3.8 default — this line is how a wrong-geometry day-0
-        # shows itself in the serve log instead of as a silent OOM or a
-        # silently conservative ceiling.
+        # The speed floor (never slower than the shipped 131072 literal)
+        # holds while its dense slab is affordable: a quarter of RAM. Every
+        # seat from 32 GB up keeps it on the 27B geometry (8 GiB slab);
+        # a 16 or 24 GB seat loses it, so an overcommitted explicit window
+        # there no longer pins an 8 GiB dense slab the machine cannot hold.
+        floor_tokens = min(131072, int(total_ram * 25 / 100) // bytes_per_token)
+        resolved = max(floor_tokens, budget_tokens)
+        # Announce once, with the source of the geometry: a model whose
+        # config.json does not describe its attention falls back to the
+        # 65536 Qwen3.8 default, and this line is how a wrong-geometry
+        # day-0 shows itself in the serve log instead of as a silent OOM or
+        # a silently conservative ceiling.
+        # Keyed by the geometry source: the server asks once before the
+        # model load (no derived geometry yet) and again after it, and the
+        # second answer is the one the process serves with.
         global _DENSE_AUTO_ANNOUNCED
-        if not _DENSE_AUTO_ANNOUNCED:
-            _DENSE_AUTO_ANNOUNCED = True
+        announce_key = (bytes_per_token, operator_bytes > 0, derived_bytes > 0)
+        if _DENSE_AUTO_ANNOUNCED != announce_key:
+            _DENSE_AUTO_ANNOUNCED = announce_key
             try:
                 print(
                     "[mtplx] dense-decode ceiling auto: "
                     f"{resolved} tokens ({ram_fraction}% RAM over "
                     f"{bytes_per_token} B/token"
-                    f"{'' if os.environ.get('MTPLX_DENSE_KV_BYTES_PER_TOKEN') else ' — MODEL DEFAULT, set MTPLX_DENSE_KV_BYTES_PER_TOKEN for non-Qwen3.8 geometry'})",
+                    f"{', operator env' if operator_bytes > 0 else ', from the model config' if derived_bytes > 0 else ' — MODEL DEFAULT, set MTPLX_DENSE_KV_BYTES_PER_TOKEN for non-Qwen3.8 geometry'})",
                     flush=True,
                 )
             except Exception:

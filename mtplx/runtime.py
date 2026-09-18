@@ -563,6 +563,34 @@ def _install_architectures_declared_module_alias(config: dict[str, Any]) -> bool
     return False
 
 
+DERIVED_DENSE_KV_BYTES_ENV = "MTPLX_DENSE_KV_BYTES_PER_TOKEN_DERIVED"
+
+
+def _export_derived_model_geometry(config: dict[str, Any] | None) -> int | None:
+    """Publish the served model's dense KV bytes per token, from config.json.
+
+    ``generation._dense_decode_max_context`` has no runtime handle (env is
+    the plumbing in that module), and before this export nothing told it
+    the model's geometry: Flash-Next's dense-decode ceiling was budgeted
+    with the 27B's 65,536 bytes per token against a true 24,576. The value
+    is DERIVED (never typed) and the operator's own
+    MTPLX_DENSE_KV_BYTES_PER_TOKEN still wins. A config that does not
+    describe its attention clears the key, so a second load in one process
+    never inherits the previous model's geometry.
+    """
+
+    import os as _os
+
+    from .memory_plan import dense_kv_bytes_per_token_from_config
+
+    derived = dense_kv_bytes_per_token_from_config(config)
+    if derived and derived > 0:
+        _os.environ[DERIVED_DENSE_KV_BYTES_ENV] = str(int(derived))
+        return int(derived)
+    _os.environ.pop(DERIVED_DENSE_KV_BYTES_ENV, None)
+    return None
+
+
 def load(
     model_path: Path | str,
     *,
@@ -623,6 +651,7 @@ def load(
             return runtime
         path = Path(gemma4_pair["target_model"])
     config = load_config(path)
+    _export_derived_model_geometry(config)
     from .a3b_whole_moe import validate_a3b_whole_moe_load_options
 
     validate_a3b_whole_moe_load_options(
