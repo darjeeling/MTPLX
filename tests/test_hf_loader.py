@@ -1083,6 +1083,101 @@ def test_remove_multi_root_is_ambiguous_and_secondary_is_discovery_only(
     assert not secondary_copy.exists()
 
 
+def test_remove_with_an_explicit_root_ignores_copies_in_other_folders(tmp_path: Path):
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary_copy = _write_complete_model(primary)
+    secondary_copy = _write_complete_model(secondary)
+
+    repo_id, target = resolve_cached_model_target(
+        "mtplx/example",
+        cache_dir=primary,
+        search_dirs=[secondary],
+        explicit_root=True,
+    )
+    assert (repo_id, target) == ("mtplx/example", primary_copy)
+
+    result = remove_cached_model(
+        "mtplx/example",
+        cache_dir=primary,
+        search_dirs=[secondary],
+        explicit_root=True,
+    )
+
+    assert result["removed"] is True
+    assert not primary_copy.exists()
+    assert (secondary_copy / "model.safetensors").is_file()
+
+
+def test_remove_with_an_explicit_root_never_reaches_into_another_folder(
+    tmp_path: Path,
+):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    secondary = tmp_path / "secondary"
+    secondary_copy = _write_complete_model(secondary)
+
+    result = remove_cached_model(
+        "mtplx/example",
+        cache_dir=primary,
+        search_dirs=[secondary],
+        explicit_root=True,
+    )
+
+    assert result["removed"] is False
+    assert result["path"] == str(primary.resolve() / "mtplx--example")
+    assert (secondary_copy / "model.safetensors").is_file()
+
+
+def test_remove_cli_cache_dir_flag_selects_that_folder_as_the_refusal_advises(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The app's exact argv. A second copy in a folder named by
+    MTPLX_MODEL_DIRS used to make this ambiguous, and the refusal's own
+    advice (pass --cache-dir) was already being followed."""
+    from mtplx.cli import main
+
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary_copy = _write_complete_model(primary)
+    secondary_copy = _write_complete_model(secondary)
+    monkeypatch.setenv("MTPLX_MODEL_DIRS", str(secondary))
+
+    exit_code = main(
+        [
+            "remove", "mtplx--example", "--yes", "--missing-ok", "--json",
+            "--cache-dir", str(primary),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["removed"] is True
+    assert Path(payload["path"]) == primary_copy
+    assert not primary_copy.exists()
+    assert (secondary_copy / "model.safetensors").is_file()
+
+
+def test_remove_cli_without_cache_dir_flag_still_refuses_an_ambiguous_ref(
+    tmp_path: Path, monkeypatch, capsys
+):
+    from mtplx.cli import main
+
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary_copy = _write_complete_model(primary)
+    _write_complete_model(secondary)
+    monkeypatch.setenv("MTPLX_MODEL_DIR", str(primary))
+    monkeypatch.setenv("MTPLX_MODEL_DIRS", str(secondary))
+
+    exit_code = main(["remove", "mtplx/example", "--yes", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert "multiple installed copies" in payload["detail"]
+    assert primary_copy.is_dir()
+
+
 def test_remove_top_level_symlink_unlinks_without_touching_target(tmp_path: Path):
     primary = tmp_path / "primary"
     primary.mkdir()

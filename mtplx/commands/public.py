@@ -6203,6 +6203,14 @@ def cmd_remove_public(args: Any) -> int:
         resolve_cached_model_target,
     )
 
+    # A typed --cache-dir names the one folder to act on, so additional
+    # folders that only come from MTPLX_MODEL_DIRS or the config file cannot
+    # make the ref ambiguous (the refusal's own advice is "--cache-dir", and
+    # the app always passes it). Two things stay as they were: a cache_dir
+    # that only came from the config file is a default, not a choice, and a
+    # typed --model-search-dir asks for those folders to be considered.
+    cli_flags = getattr(args, "_cli_flags", None) or set()
+    explicit_root = "cache-dir" in cli_flags and "model-search-dir" not in cli_flags
     # Resolve through the same containment fence the remover uses, so a
     # traversal ref is refused before we offer to delete anything.
     try:
@@ -6210,6 +6218,7 @@ def cmd_remove_public(args: Any) -> int:
             args.model,
             cache_dir=args.cache_dir,
             search_dirs=getattr(args, "model_search_dirs", None),
+            explicit_root=explicit_root,
         )
     except (OSError, ValueError) as exc:
         if getattr(args, "json", False):
@@ -6240,6 +6249,7 @@ def cmd_remove_public(args: Any) -> int:
             args.model,
             cache_dir=args.cache_dir,
             search_dirs=getattr(args, "model_search_dirs", None),
+            explicit_root=explicit_root,
         )
     except (OSError, ValueError) as exc:
         if getattr(args, "json", False):

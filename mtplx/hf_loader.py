@@ -1887,11 +1887,24 @@ def resolve_cached_model_target(
     *,
     cache_dir: str | Path | None = None,
     search_dirs: Iterable[str | Path] | None = None,
+    explicit_root: bool = False,
 ) -> tuple[str, Path]:
-    """Resolve one unambiguous, primary-root cache entry without deleting it."""
+    """Resolve one unambiguous, primary-root cache entry without deleting it.
+
+    ``explicit_root`` means the caller named ``cache_dir`` on purpose (the
+    CLI's ``--cache-dir``, which the app always passes). Removal only ever
+    acts on the primary root, so a named root is the whole answer: copies in
+    the additional folders are not candidates and cannot make the ref
+    ambiguous. Without it, the "multiple installed copies ... select one
+    root explicitly with --cache-dir" refusal could not be satisfied when the
+    additional folders came from ``MTPLX_MODEL_DIRS`` or ``model_dirs`` in
+    the config file, because those are appended whatever the caller passes.
+    """
 
     raw_ref = str(model_ref).strip()
     roots = model_library_roots(cache_dir, search_dirs=search_dirs)
+    if explicit_root:
+        roots = roots[:1]
     # A ref that spells an existing entry's directory name means that entry.
     # `mtplx models` and the app both hand back entries by name, and the
     # public-id alias table must never redirect a delete from the folder the
@@ -1964,9 +1977,13 @@ def remove_cached_model(
     *,
     cache_dir: str | Path | None = None,
     search_dirs: Iterable[str | Path] | None = None,
+    explicit_root: bool = False,
 ) -> dict[str, Any]:
     repo_id, path = resolve_cached_model_target(
-        model_ref, cache_dir=cache_dir, search_dirs=search_dirs
+        model_ref,
+        cache_dir=cache_dir,
+        search_dirs=search_dirs,
+        explicit_root=explicit_root,
     )
     if not (path.exists() or path.is_symlink()):
         return {
