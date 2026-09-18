@@ -357,6 +357,9 @@ def _write_tiny_tokenizer(directory: Path) -> None:
         json.dumps(
             {
                 "tokenizer_class": "PreTrainedTokenizerFast",
+                "chat_template": (
+                    "{% for message in messages %}{{ message['content'] }} {% endfor %}"
+                ),
                 "eos_token": "t2",
                 "pad_token": "t3",
                 "unk_token": "t0",

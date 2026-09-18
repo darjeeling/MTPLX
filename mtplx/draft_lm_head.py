@@ -393,6 +393,14 @@ def _make_embedding_as_linear_head(
     }
 
 
+def _is_rotated_packed_head(module: Any) -> bool:
+    try:
+        from .models.prism_hadamard_qwen35 import HadamardQuantizedLinear
+    except Exception:  # pragma: no cover - the model module needs mlx-lm
+        return False
+    return isinstance(module, HadamardQuantizedLinear)
+
+
 def _install_draft_lm_head(rt: Any, *, bits: int, group_size: int, mode: str) -> dict[str, Any]:
     import mlx.nn as nn
 
@@ -429,7 +437,29 @@ def _install_draft_lm_head(rt: Any, *, bits: int, group_size: int, mode: str) ->
 
     module = getattr(text, "lm_head", None)
     if module is not None:
-        if isinstance(module, nn.QuantizedLinear):
+        if _is_rotated_packed_head(module):
+            # Prism ML's rotated ternary head (Bonsai) is already 2.25 bits
+            # per weight: a 4-bit draft copy would read twice the bytes per
+            # draft position, and a copy built from the raw packed rows
+            # without the activation transform would draft from garbage. The
+            # drafter shares the target head, which is exact (same law,
+            # verified by the target) and is the smallest head available.
+            draft_head = module
+            packed = {
+                "bits": int(module.bits),
+                "group_size": int(module.group_size),
+                "mode": str(module.mode),
+                "weight_shape": list(module.weight.shape),
+                "scales_shape": list(module.scales.shape),
+            }
+            report = {
+                "source": "rotated_packed_lm_head",
+                "original": dict(packed),
+                "draft_only": dict(packed),
+                "reused_existing_quantization": True,
+                "requested": {"bits": int(bits), "group_size": int(group_size), "mode": str(mode)},
+            }
+        elif isinstance(module, nn.QuantizedLinear):
             try:
                 draft_head, report = _make_requantized_head(
                     module,
