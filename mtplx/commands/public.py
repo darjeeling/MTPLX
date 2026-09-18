@@ -691,6 +691,11 @@ def _looks_like_gemma4_model_ref(value: Any) -> bool:
 
 
 def _public_depth_ceiling(args: Any) -> int:
+    # Measurement-only override (acceptance at draft positions above the
+    # family ceiling is read from an eager run; no product lane sets this).
+    raw_ceiling = os.environ.get("MTPLX_EXPERIMENT_DEPTH_CEILING", "").strip()
+    if raw_ceiling.isdigit() and 1 <= int(raw_ceiling) <= 8:
+        return int(raw_ceiling)
     refs = (getattr(args, "model", None), getattr(args, "model_id", None))
     if any(_looks_like_gemma4_model_ref(ref) for ref in refs):
         return MAX_GEMMA4_SPECULATIVE_DEPTH

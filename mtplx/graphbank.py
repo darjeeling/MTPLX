@@ -1437,6 +1437,11 @@ def _compiled_verify_max_context() -> int:
     return max(0, value)
 
 
+_FIXED_M4_DONATION_PROBE = str(
+    __import__("os").environ.get("MTPLX_FIXED_M4_DONATION_PROBE", "")
+).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _compiled_verify_boundary() -> str:
     import os
 
@@ -2272,6 +2277,9 @@ class CompiledVerifyBank:
             self._held_state_refs.clear()
             mx.async_eval(*outputs)
 
+        if _FIXED_M4_DONATION_PROBE:
+            self._probe_fixed_m4_donation(dispatch)
+
         # Route Tape receipt (main contract): the installed replay is a
         # compiled dispatch, so last_dispatch_route() reports it as such.
         self.last_dispatch_kind = "compiled"
@@ -2280,6 +2288,36 @@ class CompiledVerifyBank:
         self.stats["compiled_calls"] += 1
         self.stats["buckets"]["0"] = self.stats["buckets"].get("0", 0) + 1
         return logits, hidden, {}
+
+    def _probe_fixed_m4_donation(self, dispatch) -> None:
+        """MTPLX_FIXED_M4_DONATION_PROBE=1: did the verify write land in place?
+
+        A measuring instrument (it forces a sync, so it is never on in a
+        product lane).  After each installed replay it reads the device
+        address of the first QSA layer's key bank.  A donated buffer keeps its
+        address from one round to the next; a bank that was copied into a
+        fresh allocation moves.  ``fixed_m4_kv_bank_moves`` over
+        ``fixed_m4_kv_bank_probes`` is the share of rounds that paid a whole
+        -bank copy.
+        """
+
+        import numpy as np
+
+        entry = dispatch["qsa_entries"][0]
+        keys = entry.kv.cache[0]
+        mx.eval(keys)
+        address = int(
+            np.asarray(keys.view(mx.uint16), copy=False).__array_interface__["data"][0]
+        )
+        previous = dispatch.get("_probe_key_address")
+        dispatch["_probe_key_address"] = address
+        self.stats["fixed_m4_kv_bank_probes"] = (
+            int(self.stats.get("fixed_m4_kv_bank_probes", 0)) + 1
+        )
+        if previous is not None and previous != address:
+            self.stats["fixed_m4_kv_bank_moves"] = (
+                int(self.stats.get("fixed_m4_kv_bank_moves", 0)) + 1
+            )
 
     def forward_fixed_m4(
         self,

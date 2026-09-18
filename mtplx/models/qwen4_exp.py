@@ -6139,3 +6139,14 @@ def inject_qwen4_exp_mtp_support(
     if not callable(attach):
         return False
     return bool(attach(path))
+
+
+# Measuring instrument, off unless MTPLX_QWEN4_PREFILL_PROFILE=1 is set at
+# load: per-component prefill wall time (mtplx/qwen4_prefill_profile.py).
+if any(
+    os.environ.get(_probe_env, "").strip().lower() in {"1", "true", "yes", "on"}
+    for _probe_env in ("MTPLX_QWEN4_PREFILL_PROFILE", "MTPLX_QWEN4_EXPERT_OVERLAP_PROBE")
+):
+    from mtplx import qwen4_prefill_profile as _qwen4_prefill_profile
+
+    _qwen4_prefill_profile.install()
