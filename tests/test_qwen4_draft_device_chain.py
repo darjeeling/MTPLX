@@ -217,6 +217,17 @@ def _runtime():
     return rt
 
 
+@pytest.fixture(autouse=True)
+def _events_are_recorded(monkeypatch):
+    """The identity tests read per-draft events.  The serve fast path exports
+    MTPLX_DROP_EVENTS=1 into the process environment, and a server test that
+    runs earlier in a full suite leaves it there (found 2026-09-18: all of
+    this file passed alone and seven cases failed inside the full run, with
+    status, rounds and token identity intact and the event list empty)."""
+
+    monkeypatch.delenv("MTPLX_DROP_EVENTS", raising=False)
+
+
 def _generate(seed: int, max_tokens: int = 48):
     from mtplx.generation import generate_mtpk
 
