@@ -258,52 +258,26 @@ GENERATION_MODE_MTP = "mtp"
 GENERATION_MODE_AR = "ar"
 GENERATION_MODES = {GENERATION_MODE_MTP, GENERATION_MODE_AR}
 OPENCODE_CHAT_TEMPLATE_PROFILE_DEFAULT = "local_qwen36"
-OPENCODE_FAIR_BATCHING_DEFAULTS: dict[str, Any] = {
-    # 2026-07-16 agent-lane TPS alignment: `mtplx start opencode` now matches
-    # the app's OpenCode launch card (serial + latency). The ar_batch/agent
-    # lane co-schedules OpenCode's title/summarize side calls with the main
-    # turn and measured 36.8 vs 51.4 decode tok/s at 8k (31.6 vs 42.4 at 33k)
-    # against the serial turbo lane on the same daemon/model — single-stream
-    # coding turns are the product path, and the app's launch card comment
-    # documents the same measured call. Explicit --scheduler-mode/--batching-
-    # preset flags still win (per-flag skip in _apply_opencode_fair_defaults).
-    "scheduler_mode": "serial",
-    "batching_preset": "latency",
-    "decode_batch_max": None,
-    "batch_wait_ms": None,
-    # Not pinned (PX.0): the prefill chunk is a model-tuned value the served
-    # family owns (mtplx/backends/family_settings.py); a launch flag here
-    # would beat the family block on every request. --prefill-chunk-tokens
-    # stays a user override.
-    "prefill_chunk_tokens": None,
-    "ssd_session_cache": "on",
-    "ssd_session_cache_max_size": "32GB",
-    "ssd_session_cache_min_prefix_tokens": 1024,
-}
-HERMES_LATENCY_DEFAULTS: dict[str, Any] = {
-    "scheduler_mode": "serial",
-    "batching_preset": "latency",
-    "max_active_requests": None,
-    "decode_batch_max": None,
-    "batch_wait_ms": None,
-    # Not pinned (PX.0): see OPENCODE_FAIR_BATCHING_DEFAULTS.
-    "prefill_chunk_tokens": None,
-    "ssd_session_cache": "on",
-    "ssd_session_cache_max_size": "100GB",
-    "ssd_session_cache_min_prefix_tokens": 512,
-    "temperature": 0.6,
-    "top_p": 1.0,
-    "top_k": 20,
-    "tool_prompt_mode": "hybrid",
-    "chat_template_profile": OPENCODE_CHAT_TEMPLATE_PROFILE_DEFAULT,
-    "adaptive_policy": "expected_value",
-    "adaptive_min_depth": 1,
-    "adaptive_ev_base_depth": 2,
-    "adaptive_ev_warmup_full_depth_cycles": 4,
-    "adaptive_ev_exploration_interval": 32,
-    "reasoning": "auto",
-    "preserve_thinking": "auto",
-}
+# The start tables are GENERATED from the one launch-lane resolver
+# (mtplx/launch_lane.py, PX.1): the app's presets are tested against the same
+# resolver, so the same client on the same model gets the same lane however
+# the daemon was started. What the resolver settled against the old literal
+# tables: the SSD session-cache cap is "auto" (RAM-tiered) instead of 32GB /
+# 100GB, the minimum banked prefix is 512 everywhere (was 1024 on
+# `start opencode`), the prefill chunk is never a launch flag, and Pi has a
+# table at last (serial + latency, the expected-value policy on families
+# that can use it), matching the app.
+#
+# 2026-07-16 agent-lane TPS alignment, kept: `mtplx start opencode` is
+# serial + latency because the ar_batch/agent lane co-schedules OpenCode's
+# title/summarize side calls with the main turn and measured 36.8 vs 51.4
+# decode tok/s at 8k (31.6 vs 42.4 at 33k). Explicit --scheduler-mode /
+# --batching-preset flags still win (per-flag skip in the appliers below).
+from mtplx.launch_lane import cli_start_defaults as _cli_start_defaults
+
+OPENCODE_FAIR_BATCHING_DEFAULTS: dict[str, Any] = _cli_start_defaults("opencode")
+HERMES_LATENCY_DEFAULTS: dict[str, Any] = _cli_start_defaults("hermes")
+PI_LANE_DEFAULTS: dict[str, Any] = _cli_start_defaults("pi")
 _OPENCODE_HIGH_MEMORY_THRESHOLD_BYTES = 96 * 1024**3
 _OPENCODE_HIGH_MEMORY_MAX_BYTES = "24G"
 _OPENCODE_HIGH_MEMORY_PER_SESSION_BYTES = "16G"
@@ -335,44 +309,21 @@ def _detect_total_ram_bytes_for_opencode_defaults() -> int | None:
 
 
 def _opencode_memory_env_defaults() -> dict[str, str]:
-    total_ram = _detect_total_ram_bytes_for_opencode_defaults()
-    high_memory = (
-        total_ram is not None and total_ram >= _OPENCODE_HIGH_MEMORY_THRESHOLD_BYTES
+    """The coding-agent runtime env block (mtplx/launch_lane.agent_env_block).
+
+    One block for OpenCode, Pi and Hermes from every entry point, in
+    lockstep with the app's codingAgentRuntimeEnvironment: the long-context
+    route (route only, issue #228), block-prefix restore, 6 or 32 bank
+    entries by RAM, "auto" bank budgets (founder memory ruling 2026-07-05),
+    the live-frontier pair, hybrid tool prompts. The read-inspection
+    compaction battery stays gone (#282).
+    """
+
+    from mtplx.launch_lane import agent_env_block
+
+    return agent_env_block(
+        "opencode", _detect_total_ram_bytes_for_opencode_defaults()
     )
-    max_entries = (
-        _OPENCODE_HIGH_MEMORY_MAX_ENTRIES
-        if high_memory
-        else _OPENCODE_DEFAULT_MAX_ENTRIES
-    )
-    return {
-        # Long-context decode route: route only — the MIN_CONTEXT/MIN_Q/MAX_Q
-        # overrides (32768/3/5, unmeasured 1.0.0 launch values) are gone in
-        # lockstep with the app's codingAgentRuntimeEnvironment so the engine
-        # defaults (65536/4/5) govern. Issue #228 measured async_per_head
-        # below 64k at 4-7x SLOWER decode at 43k ctx.
-        "MTPLX_VLLM_METAL_PAGED_GQA_SDPA_ROUTE": "async_per_head",
-        "MTPLX_SESSION_BLOCK_PREFIX_RESTORE": "1",
-        "MTPLX_SESSION_BANK_MAX_ENTRIES": max_entries,
-        # "auto" = the engine budgets half the RAM surplus left after the
-        # model weights (floor 1 GiB, cap 48 GiB). Replaces the flat
-        # 24G/8G tier that ignored the loaded model's size (founder memory
-        # ruling 2026-07-05: 55 GB total was fine on 128 GB, lethal on 32).
-        "MTPLX_SESSION_BANK_MAX_BYTES": "auto",
-        "MTPLX_SESSION_BANK_PER_SESSION_BYTES": "auto",
-        "MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S": "30.0",
-        "MTPLX_DYNAMIC_PAGED_KV_MAX_INITIAL_NEW_TOKENS": "4096",
-        # Model/profile defaults own distribution evaluation and verify
-        # width. Generic lazy pins mask Flash-Next's batched fixed-M4 lane;
-        # enabling lazy bonus alone shortens D3 to an eager three-row window.
-        "MTPLX_OPENCODE_TOOL_HISTORY_LIVE_FRONTIER": "1",
-        "MTPLX_SESSION_LIVE_FRONTIER_REFERENCE_RESTORE": "1",
-        # The read-inspection compaction battery is gone (#282): an explicit
-        # env re-arms that compactor past the engine's passthrough default,
-        # so exporting the battery here silently rewrote agent transcripts.
-        # In lockstep with the app's codingAgentRuntimeEnvironment.
-        "MTPLX_TOOL_PROMPT_MODE": "hybrid",
-        "MTPLX_CHAT_TEMPLATE_PROFILE": OPENCODE_CHAT_TEMPLATE_PROFILE_DEFAULT,
-    }
 
 
 def _absolute_user_path(path: str | Path) -> Path:
@@ -1480,6 +1431,16 @@ def _apply_backend_serve_defaults(args: Any, inspection: dict[str, Any]) -> None
         and getattr(args, key, None) is not None
     }
     injected = set(getattr(args, "_injected_default_flags", set()) or set())
+    # A sampler value a client start table wrote is a default, not a pin: on
+    # a family that owns its sampler it reads as unset (launch_lane, PX.1).
+    from mtplx.launch_lane import family_owned_sampler_overrides
+
+    if family_owned_sampler_overrides(
+        model_family_from_inspection(inspection, descriptor=descriptor)
+    ):
+        for key in set(getattr(args, "_client_table_sampler_flags", set()) or set()):
+            if key.replace("_", "-") not in cli_flags and key not in config_pinned:
+                setattr(args, key, None)
     if (
         "temperature" not in cli_flags
         and "default-temperature" not in cli_flags
@@ -2628,10 +2589,17 @@ def _doctor_explain_report(args: Any, cli_flags: set[str]) -> dict[str, Any]:
         port = int(getattr(args, "port", 8000)) if "port" in cli_flags else 8000
         base_url = f"http://{host}:{port}"
     health = _http_json(base_url + "/health", timeout=1.5)
+    family_section = _doctor_explain_family_settings(health)
+    from mtplx.lane_explain import client_lanes_section
+    from mtplx.memory_plan import detect_total_ram_bytes
+
     return build_explain_report(
         health=health,
         server_url=base_url,
-        family_settings=_doctor_explain_family_settings(health),
+        family_settings=family_section,
+        client_lanes=client_lanes_section(
+            family_section.get("family"), detect_total_ram_bytes()
+        ),
     )
 
 
@@ -13354,8 +13322,11 @@ def _with_server_policy_args(target: Any, source: Any) -> Any:
         ("adaptive_decrease_after", 1),
         ("adaptive_ev_base_depth", 2),
         ("adaptive_ev_accept_priors", "0.92,0.64,0.32"),
-        ("adaptive_ev_draft_cost_s", 0.0048),
-        ("adaptive_ev_extra_verify_cost_s", 0.006),
+        # The server parser's recalibrated pair (2026-08-07). The older
+        # 4.8 / 6.0 ms values were forwarded explicitly from here and made
+        # the unmeasured gate 0.475 on every request's opening cycles.
+        ("adaptive_ev_draft_cost_s", 0.0020),
+        ("adaptive_ev_extra_verify_cost_s", 0.0015),
         ("adaptive_ev_baseline_tok_s", 40.0),
         ("adaptive_ev_safety_margin", 0.10),
         ("adaptive_ev_margin_center", 1.0),
@@ -13369,6 +13340,28 @@ def _with_server_policy_args(target: Any, source: Any) -> Any:
     return target
 
 
+def _apply_client_lane_table(args: Any, table: dict[str, Any]) -> None:
+    """Apply a generated client table; a flag the user typed always wins.
+
+    Sampler values written from a table are recorded, so the serve-defaults
+    pass can tell a client default from a user's pin: a family that owns its
+    sampler (Qwen 3.8, Flash-Next: 1.0 / 0.95 / 20) is never overridden by a
+    client table. Before this, `mtplx start hermes` served top_p 1.0 on those
+    families while the app served the family's 0.95.
+    """
+
+    cli_flags = getattr(args, "_cli_flags", set()) or set()
+    from_table = set(getattr(args, "_client_table_sampler_flags", set()) or set())
+    for attr, value in table.items():
+        flag = attr.replace("_", "-")
+        if flag in cli_flags:
+            continue
+        setattr(args, attr, value)
+        if attr in {"temperature", "top_p", "top_k"}:
+            from_table.add(attr)
+    args._client_table_sampler_flags = from_table
+
+
 def _apply_opencode_fair_defaults(args: Any) -> None:
     """Make ``mtplx start opencode`` match the app's measured OpenCode lane.
 
@@ -13379,23 +13372,13 @@ def _apply_opencode_fair_defaults(args: Any) -> None:
     the SSD/prefill defaults they were silently missing.)
     """
 
-    cli_flags = getattr(args, "_cli_flags", set()) or set()
-    for attr, value in OPENCODE_FAIR_BATCHING_DEFAULTS.items():
-        flag = attr.replace("_", "-")
-        if flag in cli_flags:
-            continue
-        setattr(args, attr, value)
+    _apply_client_lane_table(args, OPENCODE_FAIR_BATCHING_DEFAULTS)
 
 
 def _apply_hermes_latency_defaults(args: Any) -> None:
     """Make ``mtplx start hermes`` match the native app's foreground agent lane."""
 
-    cli_flags = getattr(args, "_cli_flags", set()) or set()
-    for attr, value in HERMES_LATENCY_DEFAULTS.items():
-        flag = attr.replace("_", "-")
-        if flag in cli_flags:
-            continue
-        setattr(args, attr, value)
+    _apply_client_lane_table(args, HERMES_LATENCY_DEFAULTS)
 
 
 def _apply_opencode_memory_env_defaults(env: dict[str, str]) -> None:
@@ -13404,37 +13387,35 @@ def _apply_opencode_memory_env_defaults(env: dict[str, str]) -> None:
 
 
 def _apply_hermes_memory_env_defaults(env: dict[str, str]) -> None:
-    total_ram = _detect_total_ram_bytes_for_opencode_defaults()
-    high_memory = (
-        total_ram is not None and total_ram >= _OPENCODE_HIGH_MEMORY_THRESHOLD_BYTES
-    )
-    # Route only; thresholds defer to engine defaults (65536/4/5) — see the
-    # OpenCode lane note and issue #228.
-    env.setdefault("MTPLX_VLLM_METAL_PAGED_GQA_SDPA_ROUTE", "async_per_head")
-    env.setdefault("MTPLX_SESSION_BLOCK_PREFIX_RESTORE", "1")
-    env.setdefault(
-        "MTPLX_SESSION_BANK_MAX_ENTRIES",
-        _OPENCODE_HIGH_MEMORY_MAX_ENTRIES
-        if high_memory
-        else _OPENCODE_DEFAULT_MAX_ENTRIES,
-    )
-    # Model-aware auto budget (see _opencode_memory_env_defaults).
-    env.setdefault("MTPLX_SESSION_BANK_MAX_BYTES", "auto")
-    env.setdefault("MTPLX_SESSION_BANK_PER_SESSION_BYTES", "auto")
-    env.setdefault("MTPLX_POSTCOMMIT_WAIT_TIMEOUT_S", "30.0")
-    env.setdefault("MTPLX_DYNAMIC_PAGED_KV_MAX_INITIAL_NEW_TOKENS", "4096")
-    # Keep the model's verify width (the fixed-M4 lane needs the bonus row).
-    env.setdefault("MTPLX_OPENCODE_TOOL_HISTORY_LIVE_FRONTIER", "1")
-    env.setdefault("MTPLX_SESSION_LIVE_FRONTIER_REFERENCE_RESTORE", "1")
-    env.setdefault("MTPLX_ACTIVE_READ_INSPECTION_TOTAL_MAX_LINES", "72")
-    env.setdefault("MTPLX_ACTIVE_READ_INSPECTION_MIN_LINES_PER_FILE", "8")
-    env.setdefault("MTPLX_ACTIVE_READ_INSPECTION_MULTI_FILE_LINE_MAX_CHARS", "120")
-    env.setdefault("MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_AFTER_TOOLS", "12")
-    env.setdefault("MTPLX_TOOL_PROMPT_MODE", "hybrid")
-    env.setdefault(
-        "MTPLX_CHAT_TEMPLATE_PROFILE", OPENCODE_CHAT_TEMPLATE_PROFILE_DEFAULT
-    )
-    env.setdefault("MTPLX_CLIENT", "hermes")
+    """Hermes = the shared coding-agent block plus its client tag.
+
+    Until PX.1 this lane also exported four read-inspection limits
+    (MTPLX_ACTIVE_READ_INSPECTION_*, MTPLX_READ_ONLY_INSPECTION_FORCE_ANSWER_
+    AFTER_TOOLS=12). The app removed them because an explicit export re-arms
+    a compactor that rewrote agent transcripts behind the user's back (#282);
+    the CLI Hermes lane kept exporting them. One block now.
+    """
+
+    from mtplx.launch_lane import agent_env_block
+
+    for key, value in agent_env_block(
+        "hermes", _detect_total_ram_bytes_for_opencode_defaults()
+    ).items():
+        env.setdefault(key, value)
+
+
+def _apply_pi_lane_defaults(args: Any) -> None:
+    """Make ``mtplx start pi`` resolve the lane the app gives Pi."""
+
+    cli_flags = getattr(args, "_cli_flags", set()) or set()
+    for attr, value in PI_LANE_DEFAULTS.items():
+        flag = attr.replace("_", "-")
+        if flag in cli_flags:
+            continue
+        if attr in {"temperature", "top_p", "top_k"}:
+            # Pi's sampler helpers own these (they honor the family sampler).
+            continue
+        setattr(args, attr, value)
 
 
 def _quickstart_run_openwebui(
@@ -14561,6 +14542,8 @@ def cmd_quickstart_public(args: Any) -> int:
         args.port = 18085
     if target == "hermes":
         _apply_hermes_latency_defaults(args)
+    if target == "pi":
+        _apply_pi_lane_defaults(args)
     if not getattr(args, "dry_run", False):
         _quickstart_autoselect_busy_port(args, target=target, cli_flags=cli_flags)
     depth_error = _validate_public_depth(args, printer=_quickstart_line)

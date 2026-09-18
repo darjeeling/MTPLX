@@ -881,8 +881,11 @@ def _add_adaptive_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--adaptive-decrease-after", type=_positive_int, default=1)
     parser.add_argument("--adaptive-ev-base-depth", type=_positive_int, default=2)
     parser.add_argument("--adaptive-ev-accept-priors", default="0.92,0.64,0.32")
-    parser.add_argument("--adaptive-ev-draft-cost-s", type=float, default=0.0048)
-    parser.add_argument("--adaptive-ev-extra-verify-cost-s", type=float, default=0.006)
+    # Same values as the server parser (recalibrated 2026-08-07) and the
+    # family block (mtplx/backends/family_settings.py). The older 4.8 / 6.0 ms
+    # pair lived on here and `mtplx start hermes` forwarded it explicitly.
+    parser.add_argument("--adaptive-ev-draft-cost-s", type=float, default=0.0020)
+    parser.add_argument("--adaptive-ev-extra-verify-cost-s", type=float, default=0.0015)
     parser.add_argument("--adaptive-ev-baseline-tok-s", type=float, default=40.0)
     parser.add_argument("--adaptive-ev-safety-margin", type=float, default=0.10)
     parser.add_argument("--adaptive-ev-margin-center", type=float, default=1.0)

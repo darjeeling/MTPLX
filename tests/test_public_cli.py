@@ -1363,8 +1363,10 @@ def test_start_opencode_dry_run_json_writes_no_hidden_cap(
     # (mtplx/backends/family_settings.py); the start tables no longer pin it.
     assert "--prefill-chunk-tokens" not in command
     assert "--ssd-session-cache on" in command
-    assert "--ssd-session-cache-max-size 32GB" in command
-    assert "--ssd-session-cache-min-prefix-tokens 1024" in command
+    # PX.1: one resolver. The cap is "auto" (RAM-tiered) from every entry
+    # point, and the minimum banked prefix is 512 everywhere.
+    assert "--ssd-session-cache-max-size auto" in command
+    assert "--ssd-session-cache-min-prefix-tokens 512" in command
     assert "--api-key $MTPLX_API_KEY" in command
     assert "--top-k 20" in command
     assert "--max-response-tokens" not in command
@@ -2028,7 +2030,7 @@ def test_start_hermes_dry_run_json_matches_native_agent_lane(
     # (mtplx/backends/family_settings.py); the start tables no longer pin it.
     assert "--prefill-chunk-tokens" not in command
     assert "--ssd-session-cache on" in command
-    assert "--ssd-session-cache-max-size 100GB" in command
+    assert "--ssd-session-cache-max-size auto" in command
     assert "--ssd-session-cache-min-prefix-tokens 512" in command
     assert "--temperature 0.6" in command
     assert "--top-p 1.0" in command

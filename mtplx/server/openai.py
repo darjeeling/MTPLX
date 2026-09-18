@@ -1121,6 +1121,27 @@ def _served_model_family(args: argparse.Namespace) -> str:
         return "unknown"
 
 
+def _served_prefill_chunk_default(args: argparse.Namespace) -> int:
+    """The chunk a request runs with when no launch flag or live setting set
+    one: the resolved env (operator export, family stamp or profile), else
+    the served family's block, else the shared 2,048."""
+
+    for key in ("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "MTPLX_PREFILL_CHUNK_SIZE"):
+        raw = str(os.environ.get(key) or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+    try:
+        from mtplx.backends.family_settings import resolved_value
+
+        family = getattr(args, "_served_model_family_cache", None) or _served_model_family(args)
+        value = resolved_value(family, "prefill_chunk_tokens")
+        if isinstance(value, int) and value > 0:
+            return value
+    except Exception:
+        pass
+    return 2048
+
+
 def _served_family_env_stamp(args: argparse.Namespace) -> dict[str, str]:
     try:
         from mtplx.backends.family_settings import family_env_stamp
@@ -16829,6 +16850,9 @@ DASHBOARD_READ_ONLY_SETTINGS_KEYS: tuple[str, ...] = (
     # against the GET payload by identity, so object/array-valued keys ALWAYS
     # ride the POST after a snapshot refresh (2026-07-02 presence-penalty
     # flag). test_settings_get_payload_keys_are_all_classified pins this.
+    # PX.1: what the engine serves for a requested depth policy, and why.
+    "adaptive_policy_effective",
+    "adaptive_policy_reason",
     "api_key_required",
     "api_key_source",
     "architecture_id",
@@ -17684,6 +17708,11 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
         # no restart. A family that owns its own draft policy reports
         # unsupported and the toggle stays hidden.
         "adaptive_policy": str(getattr(args, "adaptive_policy", "none") or "none"),
+        # What the engine actually serves for that request (PX.1): "none"
+        # plus a reason when the family has a compiled verifier at one depth
+        # only ("adaptive depth has no effect on this model yet").
+        "adaptive_policy_effective": _engine_depth_policy(args)["policy"],
+        "adaptive_policy_reason": _engine_depth_policy(args)["reason"],
         "adaptive_depth_supported": bool(backend.supports("native_adaptive_depth_policy")),
         "draft_control": backend.draft_semantics.to_dict(),
         "backend_id": backend.backend_id,
@@ -17729,7 +17758,8 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
             else None
         ),
         "prefill_chunk_tokens": int(
-            getattr(args, "prefill_chunk_tokens", None) or 2048
+            getattr(args, "prefill_chunk_tokens", None)
+            or _served_prefill_chunk_default(args)
         ),
         "ssd_session_cache": str(getattr(args, "ssd_session_cache", "off") or "off"),
         "ssd_session_cache_dir": str(
@@ -21176,6 +21206,47 @@ def _bridge_policy_observability(
     }
 
 
+def _engine_depth_policy(args: argparse.Namespace) -> dict[str, Any]:
+    """The depth policy the ENGINE serves, whatever the launcher asked for.
+
+    A saved app switch, a CLI table or a live setting can ask for an adaptive
+    depth policy on any model. On a family whose verify has a compiled route
+    for some draft depths only (Flash-Next: depth 3) every round the policy
+    stops early runs the eager verifier, so the engine resolves the request
+    to the static compiled depth and reports why (launch_lane, PX.1). The
+    rule reads the family capability ``compiled_verify_depths`` and lifts by
+    itself when more widths are compiled. Memoized per (policy, depth): the
+    family is read from config.json once, not per request.
+    """
+
+    key = (
+        str(getattr(args, "adaptive_policy", "none") or "none"),
+        int(getattr(args, "depth", 3) or 3),
+    )
+    cached = getattr(args, "_engine_depth_policy_cache", None)
+    if isinstance(cached, tuple) and cached and cached[0] == key:
+        return cached[1]
+    family = getattr(args, "_served_model_family_cache", None)
+    if not family:
+        family = _served_model_family(args)
+        try:
+            args._served_model_family_cache = family
+        except Exception:
+            pass
+    from mtplx.launch_lane import resolve_depth_policy
+
+    resolved = resolve_depth_policy(
+        family, requested_policy=key[0], requested_depth=key[1]
+    )
+    resolved["family"] = family
+    resolved["requested_policy"] = key[0]
+    try:
+        args._engine_depth_policy_cache = (key, resolved)
+    except Exception:
+        pass
+    return resolved
+
+
 def _adaptive_config(
     args: argparse.Namespace,
     *,
@@ -21184,6 +21255,14 @@ def _adaptive_config(
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
         return {"policy": "none"}
+    engine = _engine_depth_policy(args)
+    if engine["demoted"]:
+        return {
+            "policy": "none",
+            "requested_policy": policy,
+            "static_depth": engine["depth"],
+            "reason": engine["reason"],
+        }
     effective_max_depth = max(
         1,
         int(max_depth if max_depth is not None else getattr(args, "depth", 3)),
@@ -21247,6 +21326,9 @@ def _make_adaptive_policy(
 ) -> AdaptiveDepthPolicy | ExpectedValueDepthPolicy | None:
     policy = str(getattr(args, "adaptive_policy", "none") or "none")
     if policy == "none":
+        return None
+    if _engine_depth_policy(args)["demoted"]:
+        # No policy object: every round drafts the static compiled depth.
         return None
     effective_max_depth = max(
         1,
@@ -25034,6 +25116,13 @@ def _run_generation(
         and requested_depth > 0
     ):
         effective_depth = max(1, min(int(resolved_mtp_depth), int(requested_depth)))
+    if effective_mode != "ar" and effective_depth > 0:
+        # An adaptive policy the engine resolved to static (a family with a
+        # compiled verifier at one depth only) drafts that depth, never a
+        # deeper one whose verify would run eager on every round.
+        _depth_policy = _engine_depth_policy(state.args)
+        if _depth_policy["demoted"] and _depth_policy.get("depth"):
+            effective_depth = min(effective_depth, int(_depth_policy["depth"]))
     # Include admission and pending-history waits in user-facing TTFT/wall
     # time. Decode still starts at the first produced token; throughput is
     # unaffected. Previously a 39s postcommit wait vanished from the receipt.
