@@ -1398,6 +1398,10 @@ private struct TargetPreset {
     var acceptsSettingsReasoning: Bool = true
     var environment: [String: String] = [:]
 
+    /// Mirrors mtplx/launch_lane.py PI_SCHEDULER_MODE / PI_BATCHING_PRESET.
+    static let piSchedulerMode = "serial"
+    static let piBatchingPreset = "latency"
+
     private static let highMemoryThresholdBytes: UInt64 = 96 * 1024 * 1024 * 1024
     private static let defaultOpenCodeSessionBankMaxEntries = "6"
     private static let highMemoryOpenCodeSessionBankMaxEntries = "32"
@@ -1807,12 +1811,18 @@ private struct TargetPreset {
             let piEnv = codingAgentRuntimeEnvironment(
                 processEnvironment: processEnvironment
             )
+            // Scheduler lane (PX.1, 2026-09-18): Pi used to launch on the
+            // ar_batch agent lane here (2 slots, 50 ms batch wait) and on
+            // serial from `mtplx start pi`: same client, two engine paths.
+            // Both are serial now, the lane the OpenCode preset measured
+            // faster for single-stream coding turns (51.4 against 36.8
+            // decode tok/s at 8K). The owner is one constant in the engine,
+            // mtplx/launch_lane.py PI_SCHEDULER_MODE, and
+            // LaunchLaneParityTests fails if this preset parts from it. An
+            // explicit Settings Performance mode still overrides it (#325).
             return TargetPreset(
-                schedulerMode: "ar_batch",
-                batchingPreset: "agent",
-                maxActiveRequests: 2,
-                decodeBatchMax: 2,
-                batchWaitMs: 50,
+                schedulerMode: TargetPreset.piSchedulerMode,
+                batchingPreset: TargetPreset.piBatchingPreset,
                 topP: 0.95,
                 topK: 20,
                 toolPromptMode: "hybrid",

@@ -2403,11 +2403,13 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertFalse(command.arguments.contains("--pi-launch-command"))
         XCTAssertTrue(command.arguments.containsInOrder(["--app-launch-id", "pi-launch"]))
         XCTAssertFalse(command.arguments.contains("--max-response-tokens"))
-        XCTAssertTrue(command.arguments.containsInOrder(["--scheduler-mode", "ar_batch"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--batching-preset", "agent"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--max-active-requests", "2"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--decode-batch-max", "2"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--batch-wait-ms", "50.0"]))
+        // PX.1: Pi is serial + latency from the app and from `mtplx start pi`
+        // (one constant, mtplx/launch_lane.py PI_SCHEDULER_MODE).
+        XCTAssertTrue(command.arguments.containsInOrder(["--scheduler-mode", "serial"]))
+        XCTAssertTrue(command.arguments.containsInOrder(["--batching-preset", "latency"]))
+        XCTAssertFalse(command.arguments.contains("--max-active-requests"))
+        XCTAssertFalse(command.arguments.contains("--decode-batch-max"))
+        XCTAssertFalse(command.arguments.contains("--batch-wait-ms"))
         // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
         XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
         XCTAssertTrue(command.arguments.containsInOrder(["--tool-prompt-mode", "hybrid"]))
