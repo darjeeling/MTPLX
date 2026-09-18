@@ -2763,6 +2763,23 @@ def _select_backend_context_window(
     )
 
 
+def _machine_fit_for_default_window(fit_plan: Any) -> int:
+    """The machine fit that shapes the DEFAULT serving window (0 = no clamp).
+
+    A plan that says "model does not fit" carries the floor window as its
+    fit. Passing 0 there (the pre-2.11.4 behavior) meant "no clamp", so the
+    worse the fit, the larger the window: the 27B on a 16 or 24 GB Mac and
+    Flash-Next on 96 GB were served the full 262,144-token model maximum
+    under a MODEL DOES NOT FIT banner. The floor is the honest default; an
+    explicit --context-window still wins and --allow-swap still lifts the
+    fit (both handled by the caller).
+    """
+
+    if fit_plan is None or not bool(getattr(fit_plan, "available", False)):
+        return 0
+    return max(0, int(getattr(fit_plan, "context_window_fit", 0) or 0))
+
+
 def _validate_mtp_batch_settings(args: argparse.Namespace) -> None:
     """Reject an invalid fixed-width MTP service before model construction."""
 
@@ -3426,11 +3443,13 @@ class ServerState:
             "prefill_transient_bytes_per_token": _plan_transient_per_token,
         }
         _fit_plan = _plan_memory(**_plan_inputs)
-        _machine_fit = (
-            int(_fit_plan.context_window_fit)
-            if _fit_plan.available and _fit_plan.model_fits
-            else 0
-        )
+        _machine_fit = _machine_fit_for_default_window(_fit_plan)
+        if _fit_plan.available and not _fit_plan.model_fits and not self.allow_swap:
+            _startup_line(
+                "[5/6] Memory plan: the model does not fit this Mac, so the "
+                f"default context window is the {_machine_fit}-token floor; "
+                "--context-window or --allow-swap overrides it"
+            )
         self.context_window = _select_backend_context_window(
             self.backend_descriptor,
             model_max=int(self.model_context_window_max),
