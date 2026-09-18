@@ -2387,14 +2387,14 @@ def _set_metal_memory_limit(mx: Any, name: str, value: int) -> str:
 def _metal_system_reserve_bytes(total_ram_bytes: int) -> int:
     """Unwired headroom macOS keeps outside the allocator caps.
 
-    16 GiB is right on 128 GB+ machines, but as a flat constant it
-    refused the 96 GB class by exactly the release notes' own margin
-    (issue #400: 77.3 GiB weights + 6 GiB floor margin + 16 GiB = 99.3
-    > 96, while the same pack ships healthy there with ~16 GiB left
-    unwired). Scale to RAM/8 below 128 GB, floored at 8 GiB — macOS's
-    own practical working floor — and keep 128 GB+ behavior unchanged.
+    The rule lives in ``memory_plan.system_reserve_bytes`` (pure
+    arithmetic) so the caps, the planner and the planner replay in the
+    tests read one number: RAM/8 below 128 GB, floored at 8 GiB, 16 GiB
+    from 128 GB up (issue #400).
     """
-    return int(min(16 * 1024**3, max(8 * 1024**3, total_ram_bytes // 8)))
+    from mtplx.memory_plan import system_reserve_bytes
+
+    return system_reserve_bytes(int(total_ram_bytes))
 
 
 def _resident_floor_margin_bytes(total_ram_bytes: int | None) -> int:
@@ -2490,6 +2490,7 @@ def _apply_metal_memory_caps(
             }
     mem_limit = _parse_metal_memory_size_bytes(mem_raw, default_mem)
     wired_limit = _parse_metal_memory_size_bytes(wired_raw, default_wired)
+    mem_source = "env" if mem_raw else "default"
     if resident_floor:
         if (mem_raw and mem_limit < resident_floor) or (
             wired_raw and wired_limit < resident_floor
@@ -2503,6 +2504,20 @@ def _apply_metal_memory_caps(
                 "memory_limit_bytes": int(mem_limit),
                 "wired_limit_bytes": int(wired_limit),
             }
+        if not mem_raw and total_ram is not None and total_ram > 0:
+            # A floor above the 75% rule lifts the limit to the machine's
+            # whole engine envelope, not to the bare floor: a limit that
+            # equals the weights leaves the admission line (0.97 of it)
+            # under the resident set, so the pressure guard and the
+            # fixed-M4 memory gate fire on every request (96 GB Flash-Next).
+            from mtplx.memory_plan import engine_envelope_bytes
+
+            lifted = engine_envelope_bytes(
+                total_ram, resident_floor_bytes=resident_floor
+            )
+            if lifted > mem_limit:
+                mem_limit = lifted
+                mem_source = "resident_floor"
         mem_limit = max(mem_limit, resident_floor)
         wired_limit = max(wired_limit, resident_floor)
 
@@ -2525,7 +2540,9 @@ def _apply_metal_memory_caps(
         applied["memory_limit_bytes"] = int(mem_limit)
         # "env": the operator set MTPLX_MEMORY_LIMIT_BYTES; the memory plan
         # then takes it as the engine budget both ways (#443).
-        applied["memory_limit_source"] = "env" if mem_raw else "default"
+        # "resident_floor": the family's wired floor lifted the limit to
+        # the machine envelope; the plan derives the same number itself.
+        applied["memory_limit_source"] = mem_source
     except Exception as exc:
         applied["memory_limit_error"] = str(exc)
     try:
@@ -3441,6 +3458,14 @@ class ServerState:
             # phantom headroom and died at 119 GB with no 507.
             "aux_bytes_per_token": _plan_aux_from_config(_plan_model_config),
             "prefill_transient_bytes_per_token": _plan_transient_per_token,
+            # The family's wired floor (Flash-Next, Laguna): above the 75%
+            # rule it defines the envelope, so the plan, the Metal limit and
+            # the fixed-M4 memory gate read one number.
+            "resident_floor_bytes": (
+                _caps.get("minimum_resident_bytes")
+                if isinstance(_caps, dict)
+                else None
+            ),
         }
         _fit_plan = _plan_memory(**_plan_inputs)
         _machine_fit = _machine_fit_for_default_window(_fit_plan)
