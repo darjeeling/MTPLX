@@ -128,6 +128,11 @@ _KNOWN_PUBLIC_MODEL_ALIASES = {
 }
 
 
+# Checkpoint prefixes the vision tower tensors live under (mlx-vlm layout and
+# the Hugging Face Qwen3.5 MoE layout); mirrors mtplx.vision.qwen3_vl_tower.
+_VISION_TENSOR_PREFIXES = ("vision_tower.", "model.visual.")
+
+
 def normalize_mtp_key(key: str) -> str:
     text = str(key)
     for prefix in MTP_KEY_PREFIXES:
@@ -556,6 +561,27 @@ class ModelInspection:
     backend_status: str | None = None
     backend_artifact: dict[str, Any] | None = None
     gemma4_pair: dict[str, Any] | None = None
+    vision_declared: bool = False
+
+    @property
+    def vision(self) -> dict[str, Any]:
+        """Whether the artifact can take image input, from metadata alone.
+
+        Capable means all three pieces the vision path needs are present: a
+        ``vision_config`` in config.json, vision tower tensors in the weight
+        files, and ``preprocessor_config.json``.
+        """
+
+        tensors = sum(
+            1 for key in self.weight_keys if key.startswith(_VISION_TENSOR_PREFIXES)
+        )
+        preprocessor = bool(self.sidecars.get("preprocessor_config.json"))
+        return {
+            "declared": bool(self.vision_declared),
+            "tower_tensors": tensors,
+            "preprocessor_config": preprocessor,
+            "capable": bool(self.vision_declared and tensors > 0 and preprocessor),
+        }
 
     @property
     def passes_primary_gate(self) -> bool:
@@ -591,6 +617,7 @@ class ModelInspection:
             "laguna_s_2_1_artifacts_complete": self.laguna_s_2_1_artifacts_complete,
             "quantization": self.quantization,
             "sidecars": self.sidecars,
+            "vision": self.vision,
             "model_files": list(self.model_files),
             "passes_primary_gate": self.passes_primary_gate,
             "mtp": self.mtp.to_dict() if self.mtp else None,
@@ -1164,6 +1191,7 @@ def _inspect_hf_model(repo_id: str) -> ModelInspection:
         mtp_pattern=_mtp_pattern_from_config(config),
         quantization=quant,
         sidecars={name: name in files for name in MULTIMODAL_SIDECARS},
+        vision_declared=isinstance(config.get("vision_config"), dict),
         model_files=model_files,
         weight_keys=combined_weight_keys,
         mtp=mtp,
@@ -1193,6 +1221,7 @@ def _inspect_hf_model(repo_id: str) -> ModelInspection:
         mtp_pattern=inspection.mtp_pattern,
         quantization=inspection.quantization,
         sidecars=inspection.sidecars,
+        vision_declared=inspection.vision_declared,
         model_files=inspection.model_files,
         weight_keys=inspection.weight_keys,
         mtp=inspection.mtp,
@@ -1326,6 +1355,7 @@ def inspect_model(model_dir: Path | str) -> ModelInspection:
         mtp_pattern=_mtp_pattern_from_config(config),
         quantization=quant,
         sidecars={name: (model_path / name).exists() for name in MULTIMODAL_SIDECARS},
+        vision_declared=isinstance(config.get("vision_config"), dict),
         model_files=tuple(sorted(p.name for p in model_path.glob("model*.safetensors"))),
         weight_keys=weight_keys,
         mtp=mtp,
@@ -1350,6 +1380,7 @@ def inspect_model(model_dir: Path | str) -> ModelInspection:
         mtp_pattern=inspection.mtp_pattern,
         quantization=inspection.quantization,
         sidecars=inspection.sidecars,
+        vision_declared=inspection.vision_declared,
         model_files=inspection.model_files,
         weight_keys=inspection.weight_keys,
         mtp=inspection.mtp,

@@ -3187,3 +3187,41 @@ def test_pull_reuse_reports_the_models_bytes_not_the_folders(monkeypatch, tmp_pa
     assert events[0]["disk_bytes"] >= total + 20_000
     assert result["size_bytes"] == total
     assert result["stale_bytes"] == 20_000
+
+
+def test_inspect_reports_vision_capability_from_metadata(tmp_path):
+    """Capable needs all three: vision_config, tower tensors, the preprocessor."""
+
+    config = {
+        "model_type": "qwen3_5",
+        "text_config": {"model_type": "qwen3_5_text", "hidden_size": 8},
+        "vision_config": {"patch_size": 16},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    weight_map = {
+        "language_model.model.embed_tokens.weight": "model.safetensors",
+        "vision_tower.merger.linear_fc2.weight": "model.safetensors",
+        "vision_tower.patch_embed.proj.weight": "model.safetensors",
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}), encoding="utf-8"
+    )
+    vision = inspect_model(tmp_path).to_dict()["vision"]
+    assert vision == {
+        "declared": True,
+        "tower_tensors": 2,
+        "preprocessor_config": False,
+        "capable": False,
+    }
+
+    (tmp_path / "preprocessor_config.json").write_text("{}", encoding="utf-8")
+    assert inspect_model(tmp_path).to_dict()["vision"]["capable"] is True
+
+    # A pack that lost its tower tensors is not capable, whatever config says.
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"language_model.model.embed_tokens.weight": "x"}}),
+        encoding="utf-8",
+    )
+    stripped = inspect_model(tmp_path).to_dict()["vision"]
+    assert stripped["declared"] is True and stripped["capable"] is False
+
