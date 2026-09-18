@@ -5004,7 +5004,12 @@ final class MTPLXAppCoreTests: XCTestCase {
         )
 
         try await backend.updateLiveSettings(wanted)
-        XCTAssertEqual(backend.settings, wanted)
+        // A stopped backend serves the persisted settings, and those always
+        // carry the client-control policy since the explicit switch landed
+        // (a1152ee3): the default configuration lets the app control clients.
+        var expected = wanted
+        expected.managedClientControls = "app"
+        XCTAssertEqual(backend.settings, expected)
 
         let options = BenchmarkStartOptions(settings: backend.settings)
         XCTAssertEqual(options.temperature, 1.0)
