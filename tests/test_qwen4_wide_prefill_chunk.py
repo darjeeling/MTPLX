@@ -123,8 +123,8 @@ def test_the_wide_chunk_is_granted_while_memory_allows(monkeypatch):
         == 4096
     )
     assert receipt["granted"] is True
-    assert receipt["need_bytes"] == 65536 * 28_416 + int(3.0 * GIB)
-    assert receipt["threshold_bytes"] == int(110 * GIB * 0.90)
+    assert receipt["need_bytes"] == 65536 * 28_416 + 8 * GIB
+    assert receipt["threshold_bytes"] == int(110 * GIB * 0.97)
 
 
 def test_a_tight_machine_keeps_the_2048_row_plan(monkeypatch):
@@ -204,3 +204,18 @@ def test_the_lowered_crossover_applies_to_wide_forwards_only(monkeypatch):
     assert qwen4_exp._qsa_prefill_crossover(4096, 8192) == 8192
     monkeypatch.setenv("MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT", "0")
     assert qwen4_exp._qsa_prefill_crossover(4096, 32768) == 32768
+
+
+def test_the_measured_128_gb_seat(monkeypatch):
+    """96 GiB engine budget, 88.3 GB live: granted through 64K, refused at 128K
+    (measured peaks 98.8 and 100.0 GB against a 103.1 GB budget)."""
+
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "4096")
+    monkeypatch.delenv("MTPLX_PREFILL_CHUNK_SIZE", raising=False)
+    monkeypatch.delenv("MTPLX_QWEN4_PREFILL_WIDE_PRESSURE", raising=False)
+    _memory(monkeypatch, limit=96 * GIB, live=int(88.3e9))
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=4061) == 4096
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=65502) == 4096
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=131039) is None
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_WIDE_PRESSURE", "0.99")
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=131039) == 4096

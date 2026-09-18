@@ -486,14 +486,24 @@ def _metal_memory_limit_bytes(rt: Any) -> int:
     return usable_engine_bytes(total) if total else 0
 
 
-#: Extra allocator bytes one prefill forward needs at 4,096 rows over the
-#: 2,048-row plan.  Flash-Next on a 128 GB M5 Max, cold prompts, 2026-09-18,
-#: with the block-sparse lane armed from 16K as the lane stamps it: peak
-#: 98.8 GB against 97.3 at 64K, and 100.0 against 98.4 at 128K.  (With the
-#: masked dense lane still serving 16K to 32K the same width peaked at 103.4.)
-#: Charged linearly in the width, at twice the measured figure.
-_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS = int(3.0 * 2**30)
-_WIDE_PREFILL_PRESSURE_FRACTION = 0.90
+#: Allocator bytes a Flash-Next prefill needs above what is live when it starts
+#: and above its own KV growth, at 4,096-row chunks with the block-sparse lane
+#: armed from 16K as the lane stamps it.  128 GB M5 Max, cold prompts,
+#: 2026-09-18: process peak 98.8 GB at 64K and 100.0 GB at 128K from 88.3 GB
+#: live, with 1.9 and 3.7 GB of KV growth, so 8.0 to 8.6 GB.  The 2,048-row plan
+#: needs about 1.6 GB less.  Charged linearly in the width.
+_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS = 8 * 2**30
+#: The line the fixed-M4 lane's own live gate holds (its PRESSURE_FRACTION).
+_WIDE_PREFILL_PRESSURE_FRACTION = 0.97
+
+
+def _wide_prefill_pressure_fraction() -> float:
+    raw = os.environ.get("MTPLX_QWEN4_PREFILL_WIDE_PRESSURE")
+    try:
+        value = float(raw) if raw else _WIDE_PREFILL_PRESSURE_FRACTION
+    except ValueError:
+        value = _WIDE_PREFILL_PRESSURE_FRACTION
+    return min(1.0, max(0.5, value))
 
 
 def _prefill_chunk_env_is_pinned() -> bool:
@@ -529,7 +539,8 @@ def qwen4_wide_prefill_chunk_tokens(
 
     Per request and never sticky: the width is granted only while live
     allocator bytes, the prompt's own KV growth and the wider forward's
-    transient stay under 0.90 of the Metal limit.  A refusal is the 2,048-row
+    whole transient stay under 0.97 of the Metal limit
+    (``MTPLX_QWEN4_PREFILL_WIDE_PRESSURE``).  A refusal is the 2,048-row
     plan, which is today's behaviour, so the gate can only ever give memory
     back.  An operator who moves the ``MTPLX_PREFILL_CHUNK_SIZE`` knobs off
     their profile defaults is obeyed here, and ``--prefill-chunk-tokens``
@@ -549,7 +560,7 @@ def qwen4_wide_prefill_chunk_tokens(
     transient = (_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS * wide) // 4096
     need = prompt_tokens * max(0, per_token) + transient
     live = _mlx_live_memory_bytes()
-    line = int(limit * _WIDE_PREFILL_PRESSURE_FRACTION)
+    line = int(limit * _wide_prefill_pressure_fraction())
     if live + need > line:
         _mlx_release_allocator_cache()
         live = _mlx_live_memory_bytes()
