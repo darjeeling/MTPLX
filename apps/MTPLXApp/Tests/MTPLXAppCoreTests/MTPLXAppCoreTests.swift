@@ -2024,7 +2024,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertFalse(command.arguments.contains("--max-active-requests"))
         XCTAssertFalse(command.arguments.contains("--decode-batch-max"))
         XCTAssertFalse(command.arguments.contains("--batch-wait-ms"))
-        XCTAssertTrue(command.arguments.containsInOrder(["--prefill-chunk-tokens", "2048"]))
+        // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
         XCTAssertTrue(command.arguments.containsInOrder(["--ssd-session-cache", "on"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--ssd-session-cache-max-size", "auto"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--ssd-session-cache-min-prefix-tokens", "512"]))
@@ -2114,7 +2115,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         // daemon defaults, exactly as they do for the "Other" target.
         XCTAssertTrue(command.arguments.containsInOrder(["--decode-batch-max", "8"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--batch-wait-ms", "20.0"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--prefill-chunk-tokens", "2048"]))
+        // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
     }
 
     func testCommandBuilderChatAutoKeepsSingleStreamSerialLane() throws {
@@ -2184,7 +2186,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--profile", "sustained"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--scheduler-mode", "serial"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--batching-preset", "latency"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--prefill-chunk-tokens", "2048"]))
+        // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
         XCTAssertFalse(command.arguments.contains("--max-active-requests"))
         XCTAssertFalse(command.arguments.contains("--decode-batch-max"))
         XCTAssertFalse(command.arguments.contains("--batch-wait-ms"))
@@ -2405,7 +2408,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--max-active-requests", "2"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--decode-batch-max", "2"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--batch-wait-ms", "50.0"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--prefill-chunk-tokens", "2048"]))
+        // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
         XCTAssertTrue(command.arguments.containsInOrder(["--tool-prompt-mode", "hybrid"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--chat-template-profile", "local_qwen36"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--top-p", "0.95"]))
@@ -4891,7 +4895,8 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--max-active-requests", "8"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--decode-batch-max", "8"]))
         XCTAssertTrue(command.arguments.containsInOrder(["--batch-wait-ms", "20.0"]))
-        XCTAssertTrue(command.arguments.containsInOrder(["--prefill-chunk-tokens", "2048"]))
+        // PX.0: presets never pin the prefill chunk; the engine's family block owns it.
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
     }
 
     func testMutableSettingsIncludesPrefillChunkTokens() throws {

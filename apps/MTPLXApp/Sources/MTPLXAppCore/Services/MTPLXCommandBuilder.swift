@@ -1233,8 +1233,7 @@ private enum SchedulingOverridePreset: String {
                 batchingPreset: "throughput",
                 maxActiveRequests: 8,
                 decodeBatchMax: 8,
-                batchWaitMs: 20,
-                prefillChunkTokens: 2048
+                batchWaitMs: 20
             )
         case .agent:
             return TargetPreset(
@@ -1242,8 +1241,7 @@ private enum SchedulingOverridePreset: String {
                 batchingPreset: "agent",
                 maxActiveRequests: 4,
                 decodeBatchMax: 4,
-                batchWaitMs: 50,
-                prefillChunkTokens: 2048
+                batchWaitMs: 50
             )
         }
     }
@@ -1366,6 +1364,10 @@ private struct TargetPreset {
     var maxActiveRequests: Int? = nil
     var decodeBatchMax: Int? = nil
     var batchWaitMs: Double? = nil
+    // Never set by a target or performance preset (PX.0): the prefill chunk
+    // is a model-tuned value the served family owns in the engine
+    // (mtplx/backends/family_settings.py), and a launch flag beats that
+    // block on every request. Only the user's own Settings value is passed.
     var prefillChunkTokens: Int? = nil
     var depth: Int? = nil
     var verifyStrategy: String? = nil
@@ -1811,7 +1813,6 @@ private struct TargetPreset {
                 maxActiveRequests: 2,
                 decodeBatchMax: 2,
                 batchWaitMs: 50,
-                prefillChunkTokens: 2048,
                 topP: 0.95,
                 topK: 20,
                 toolPromptMode: "hybrid",
@@ -1855,7 +1856,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 depth: 3,
                 ssdSessionCache: "on",
                 temperature: 0.6,
@@ -1882,7 +1882,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "on",
                 temperature: 0.6,
                 topP: 1.0,
@@ -1908,7 +1907,6 @@ private struct TargetPreset {
                 maxActiveRequests: 4,
                 decodeBatchMax: 4,
                 batchWaitMs: 50,
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "on"
             )
         case .benchmark:
@@ -1921,7 +1919,6 @@ private struct TargetPreset {
             return TargetPreset(
                 schedulerMode: "serial",
                 batchingPreset: "latency",
-                prefillChunkTokens: 2048,
                 ssdSessionCache: "off",
                 topP: 0.95,
                 topK: 20,
