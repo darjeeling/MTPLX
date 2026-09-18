@@ -858,6 +858,14 @@ def load(
         if blocked_prefill_env_enabled():
             gdn_prefill_report = install_gdn_blocked_prefill_patch()
             logger.info("[gdn-blocked-prefill] %s", gdn_prefill_report)
+            if not gdn_prefill_report.get("installed"):
+                from .demotions import note as _note_demotion
+
+                _note_demotion(
+                    "gdn_blocked_prefill_not_engaged",
+                    "MTPLX_GDN_BLOCKED_PREFILL is on but the patch did not "
+                    f"install: {gdn_prefill_report.get('error') or 'unknown error'}",
+                )
         from .qwen_row_owned_router import (
             install_qwen_row_owned_routers,
             prepare_qwen_row_owned_routers,
