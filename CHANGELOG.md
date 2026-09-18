@@ -4,6 +4,18 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] (2.11.4)
+
+### Fixed
+
+- **`MTPLX_AR_PIPELINE` gives the same tokens as the classic AR loop**
+  (PR #507, David Tai). The pipelined AR path drew the first output token
+  from the request's NumPy generator and every later token from a separate
+  `mx.random` stream, so one request with one seed gave a different
+  continuation depending on whether the path engaged. The flag now shares
+  the classic loop's per-token draw, and a new test holds the two token
+  sequences equal at temperature 1.0, top-p 0.95, top-k 20.
+
 ## [2.11.3] - 2026-09-17
 
 ### Added
