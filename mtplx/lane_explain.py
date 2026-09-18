@@ -199,6 +199,17 @@ def render_explain_lines(report: dict[str, Any]) -> list[str]:
         )
         for row in family["rows"]:
             lines.append(f"  {row['key']}: {row['value']} ({row['source']})")
+            if row.get("requires") == "tensor_unit_gpu":
+                # Measured on a tensor-unit GPU, so only such a Mac gets it.
+                has_units = isinstance(units, dict) and bool(units.get("route"))
+                lines.append(
+                    "      needs tensor units: "
+                    + (
+                        "this Mac has them"
+                        if has_units
+                        else "this Mac does not, so the engine default serves"
+                    )
+                )
             lines.append(f"      {row['receipt']}")
     client_lanes = report.get("client_lanes")
     if isinstance(client_lanes, list) and client_lanes:

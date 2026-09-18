@@ -67,9 +67,10 @@ def test_flash_next_inherited_values_say_so_and_name_their_cell():
         assert "Cell" in block[key].receipt or "P2.2" in block[key].receipt, key
 
 
-def test_todays_blocks_change_nothing():
-    # Initial values are today's effective values, so the stamp is empty for
-    # both families: nothing moves until a measured number is written.
+def test_blocks_change_nothing_on_a_mac_without_tensor_units():
+    # Every value that is not capability-bound equals the engine default, so
+    # the stamp is empty for both families on an M1 to M4: nothing moves until
+    # a measured number is written for that class of Mac.
     assert fs.family_env_stamp("qwen4_exp") == {}
     assert fs.family_env_stamp("qwen3_8") == {}
     assert fs.family_env_stamp("some_other_family") == {}
@@ -77,6 +78,25 @@ def test_todays_blocks_change_nothing():
     assert fs.resolved_value("qwen4_exp", "qsa_prefill_compile_rows") == 2048
     assert fs.resolved_value("qwen3_8", "first_verify_reserve_tokens") == 512
     assert fs.resolved_value("qwen4_exp", "first_verify_reserve_tokens") == 1024
+
+
+def test_flash_next_prefill_width_is_stamped_on_tensor_unit_gpus_only():
+    # Measured on an M5 Max on 2026-09-18, so only a tensor-unit GPU gets it.
+    block = fs.family_settings("qwen4_exp")
+    for key in ("prefill_wide_chunk_tokens", "qsa_prefill_wide_min_context"):
+        assert block[key].source == fs.MEASURED
+        assert block[key].requires == fs.TENSOR_UNIT_GPU
+        assert block[key].engine_default == 0
+    assert fs.family_env_stamp("qwen4_exp", capabilities=(fs.TENSOR_UNIT_GPU,)) == {
+        "MTPLX_QWEN4_PREFILL_WIDE_CHUNK": "4096",
+        "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT": "16384",
+    }
+    assert fs.family_env_stamp("qwen4_exp", capabilities=("something_else",)) == {}
+    # The base chunk stays the plan every Mac runs and the refusal falls back to.
+    assert fs.resolved_value("qwen4_exp", "prefill_chunk_tokens") == 2048
+    # The 27B has no wide-chunk receipt and no QSA layers: nothing to stamp.
+    assert fs.family_env_stamp("qwen3_8", capabilities=(fs.TENSOR_UNIT_GPU,)) == {}
+    assert fs.resolved_value("qwen3_8", "prefill_wide_chunk_tokens") is None
 
 
 def test_one_number_edit_moves_the_chunk_and_its_compiled_width_together(monkeypatch):
@@ -195,10 +215,13 @@ def test_server_stamps_the_family_block_and_an_operator_export_wins(
     assert overrides["MTPLX_PREFILL_CHUNK_SIZE_REPAGE"] == "4096"
 
 
-def test_server_stamp_is_empty_today_for_both_families(monkeypatch, tmp_path):
+def test_server_stamp_is_empty_without_tensor_units(monkeypatch, tmp_path):
     from mtplx.server import openai
 
+    monkeypatch.setattr(openai, "_qwen4_tensor_unit_gpu", lambda: False)
     stamp_keys = {
+        "MTPLX_QWEN4_PREFILL_WIDE_CHUNK",
+        "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT",
         "MTPLX_PREFILL_CHUNK_SIZE_DENSE",
         "MTPLX_PREFILL_CHUNK_SIZE_REPAGE",
         "MTPLX_QSA_PREFILL_COMPILE_ROWS",
@@ -214,6 +237,23 @@ def test_server_stamp_is_empty_today_for_both_families(monkeypatch, tmp_path):
     args = _serve_args(tmp_path, FLASH_NEXT_CONFIG)
     assert openai._served_family_env_stamp(args) == {}
     assert not (stamp_keys & set(openai._server_runtime_env_overrides(args, None)))
+
+
+def test_server_stamps_the_prefill_width_on_a_tensor_unit_mac(monkeypatch, tmp_path):
+    from mtplx.server import openai
+
+    monkeypatch.setattr(openai, "_qwen4_tensor_unit_gpu", lambda: True)
+    for key in ("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT"):
+        monkeypatch.delenv(key, raising=False)
+    args = _serve_args(tmp_path, FLASH_NEXT_CONFIG)
+    assert openai._served_family_env_stamp(args) == {
+        "MTPLX_QWEN4_PREFILL_WIDE_CHUNK": "4096",
+        "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT": "16384",
+    }
+    # The dense 27B on the same Mac gets nothing.
+    dense = tmp_path / "dense"
+    dense.mkdir()
+    assert openai._served_family_env_stamp(_serve_args(dense, DENSE_27B_CONFIG)) == {}
 
 
 def test_the_user_flag_still_beats_the_family_block():
@@ -242,6 +282,17 @@ def test_doctor_explain_lists_each_setting_with_its_source(capsys):
     )
     text = "\n".join(lane_explain.render_explain_lines(report))
     assert "prefill_chunk_tokens: 2048 (inherited-27B-era, unmeasured)" in text
+    assert "prefill_wide_chunk_tokens: 4096 (measured)" in text
+    assert "needs tensor units: this Mac has them" in text
+    portable = lane_explain.build_explain_report(
+        health=None,
+        server_url="http://127.0.0.1:8000",
+        tensor_units={"architecture": "applegpu_g15s", "hardware": False,
+                      "route": False, "fallback_forced": False},
+        family_settings=section,
+    )
+    text = "\n".join(lane_explain.render_explain_lines(portable))
+    assert "needs tensor units: this Mac does not, so the engine default serves" in text
     assert "compiled_verify_depths: [3]" in text
 
 

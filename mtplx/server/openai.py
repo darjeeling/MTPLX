@@ -974,22 +974,6 @@ def _server_runtime_env_overrides(
             # leaves them inert.
             if os.environ.get("MTPLX_NGRAM_PREWARM") is None:
                 overrides.setdefault("MTPLX_NGRAM_PREWARM", "auto")
-            # Flash-Next's own prefill width (2026-09-18, M5 Max, same-session
-            # arms): 4,096-row chunks, and for forwards of 2,048 rows or more
-            # the block-sparse attention lane armed from 16,384 tokens of
-            # history instead of 32,768 (a warm turn's short suffix keeps the
-            # 32,768 crossover).  The wide chunk is granted per request
-            # against live memory (generation.qwen4_wide_prefill_chunk_tokens)
-            # and falls back to the 2,048 plan; the measured consumer of the
-            # sparse lane needs tensor units, so an M1 to M4 keeps today's
-            # values untouched.
-            if _qwen4_tensor_unit_gpu():
-                for key, value in (
-                    ("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "4096"),
-                    ("MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT", "16384"),
-                ):
-                    if os.environ.get(key) is None:
-                        overrides.setdefault(key, value)
             # The stage-3 child routes are consumed at model load and raise
             # unless stage 3 itself resolves on, so they are derived from the
             # resolved parent, never stamped alone: the routed-down reduction,
@@ -1124,6 +1108,12 @@ def _server_runtime_env_overrides(
     # differ from the engine defaults, so a block that matches them changes
     # nothing. An operator export wins, and the launch flag
     # --prefill-chunk-tokens is a request-local override above all of this.
+    # Flash-Next's own prefill width lives there too (2026-09-18): a
+    # 4,096-row chunk granted per request against live memory
+    # (generation.qwen4_wide_prefill_chunk_tokens), and for forwards of 2,048
+    # rows or more the block-sparse attention lane from 16,384 tokens of
+    # history. Both were measured on an M5 Max, so the block asks for tensor
+    # units and an M1 to M4 keeps today's values.
     for key, value in _served_family_env_stamp(args).items():
         if not str(os.environ.get(key) or "").strip():
             overrides[key] = value
@@ -1170,9 +1160,12 @@ def _served_prefill_chunk_default(args: argparse.Namespace) -> int:
 
 def _served_family_env_stamp(args: argparse.Namespace) -> dict[str, str]:
     try:
-        from mtplx.backends.family_settings import family_env_stamp
+        from mtplx.backends.family_settings import TENSOR_UNIT_GPU, family_env_stamp
 
-        return dict(family_env_stamp(_served_model_family(args)))
+        capabilities = (TENSOR_UNIT_GPU,) if _qwen4_tensor_unit_gpu() else ()
+        return dict(
+            family_env_stamp(_served_model_family(args), capabilities=capabilities)
+        )
     except Exception:
         return {}
 
@@ -1205,8 +1198,6 @@ _QWEN4_PORT_KEYS = (
     "MTPLX_QWEN4_OPDIET",
     "MTPLX_QWEN4_DRAFT_K20_PRESCATTER",
     "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN",
-    "MTPLX_QWEN4_PREFILL_WIDE_CHUNK",
-    "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT",
     "MTPLX_QWEN4_BLOCK_VERIFY",
     "MTPLX_QWEN4_VERIFY_GLUE",
     "MTPLX_QWEN4_VERIFY_GLUE_ITEMS",
@@ -1228,13 +1219,13 @@ _QWEN4_LANE_KEYS = _QWEN4_PORT_KEYS + (
 def _qwen4_tensor_unit_gpu() -> bool:
     """Whether this GPU has tensor units (generation 17, M5 class).
 
-    Read through the detector the verify kernels use, so
+    Read through the one detector every lane uses (mtplx.nax_detect), so
     MTPLX_FORCE_GPU_FAMILY_FALLBACK=1 rehearses the path an M1 to M4 takes.
     Never raises: an unknown GPU keeps the portable defaults.
     """
 
     try:
-        from mtplx.nax_verify import nax_available
+        from mtplx.nax_detect import nax_available
 
         return bool(nax_available())
     except Exception:

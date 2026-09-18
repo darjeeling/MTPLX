@@ -3,9 +3,11 @@
 The shared profile keeps what is true for every model (memory plan, paging,
 safety). A number that was tuned ON a model lives here, in that model's
 block, with where it came from. Flash-Next (released 2026-08-26) was serving
-on constants tuned on the dense 27B months earlier: nothing here changes a
-value, it records the owner and the receipt so the next measured number has
-exactly one place to go.
+on constants tuned on the dense 27B months earlier: the block records the
+owner and the receipt of every such value, so a measured number has exactly
+one place to go. The first two went in on 2026-09-18 (the wide prefill chunk
+and the sparse attention crossover for wide forwards), both measured on an M5
+Max and therefore stamped on tensor-unit GPUs only (``requires``).
 
 HOW TO CHANGE A FLASH-NEXT VALUE (the main session's one-number edit):
 edit the ``value=`` of the entry in ``QWEN4_EXP_SETTINGS`` below, set
@@ -25,13 +27,18 @@ Pure data and arithmetic: no MLX import, no server import.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 MEASURED = "measured"
 INHERITED = "inherited-27B-era, unmeasured"
 FAMILY_OWN = "family-own, measured at one chunk width"
 DERIVED = "derived from config.json"
 SHARED_DEFAULT = "shared default, conservative"
+
+# A capability the Mac must have before a value is stamped. A value measured
+# on one GPU class is that class's value: everything else keeps the engine
+# default (plan section 4A, rule 2).
+TENSOR_UNIT_GPU = "tensor_unit_gpu"
 
 # Sources that satisfy "this family has its own receipt or says it has none".
 ACCOUNTED_SOURCES = frozenset({MEASURED, INHERITED, FAMILY_OWN, DERIVED})
@@ -40,7 +47,9 @@ ACCOUNTED_SOURCES = frozenset({MEASURED, INHERITED, FAMILY_OWN, DERIVED})
 # in this list; a family block must carry every one of them.
 MODEL_TUNED_KEYS: tuple[str, ...] = (
     "prefill_chunk_tokens",
+    "prefill_wide_chunk_tokens",
     "qsa_prefill_compile_rows",
+    "qsa_prefill_wide_min_context",
     "qsa_prefill_score_mb",
     "prefill_cleanup_every",
     "decode_clear_every",
@@ -69,18 +78,25 @@ class ModelTunedSetting:
     # key whose family value differs from this, so a block that matches the
     # engine default changes nothing at all.
     engine_default: Any = None
+    # Capability this Mac must report before the value is stamped ("" = any
+    # Mac). Without it the engine default serves, which is what shipped before
+    # the value was measured.
+    requires: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = self.value
         if isinstance(value, (frozenset, set, tuple)):
             value = sorted(value) if isinstance(value, (frozenset, set)) else list(value)
-        return {
+        row = {
             "key": self.key,
             "value": value,
             "source": self.source,
             "receipt": self.receipt,
             "env": list(self.env),
         }
+        if self.requires:
+            row["requires"] = self.requires
+        return row
 
 
 def _block(*settings: ModelTunedSetting) -> dict[str, ModelTunedSetting]:
@@ -141,21 +157,56 @@ QWEN4_EXP_SETTINGS: dict[str, ModelTunedSetting] = _block(
         value=2048,
         source=INHERITED,
         receipt=(
-            "set 2026-05-07/09 for the dense models (4956b5ae8, 7ac0740a1); "
-            "one Flash-Next receipt: 4,096 lost on 2026-08-29 while the "
-            "dense-mask route served 2K to 32K (MEASUREMENTS.md:28607). "
-            "Cell P2.2"
+            "set 2026-05-07/09 for the dense models (4956b5ae8, 7ac0740a1). "
+            "Cell P2.2 closed on 2026-09-18 for tensor-unit GPUs only (see "
+            "prefill_wide_chunk_tokens); this stays the plan every other Mac "
+            "runs and the one a refused wide grant falls back to"
         ),
         env=("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "MTPLX_PREFILL_CHUNK_SIZE_REPAGE"),
         engine_default=2048,
     ),
     ModelTunedSetting(
+        key="prefill_wide_chunk_tokens",
+        value=4096,
+        source=MEASURED,
+        receipt=(
+            "2026-09-18, M5 Max 128 GB, cold prompts, one session "
+            "(overnight-20260918 cells pfx-default4 against pfx-dense-2k): 4K "
+            "810 to 1,250 tok/s, 16K 1,208 to 1,340, 64K 1,002 to 1,126 with "
+            "the tail ladder; 8,192 ties on speed with 3.4 GB more peak. "
+            "Granted per request against live memory "
+            "(generation.qwen4_wide_prefill_chunk_tokens), else the 2,048 plan"
+        ),
+        env=("MTPLX_QWEN4_PREFILL_WIDE_CHUNK",),
+        engine_default=0,
+        requires=TENSOR_UNIT_GPU,
+    ),
+    ModelTunedSetting(
         key="qsa_prefill_compile_rows",
         value=_FOLLOWS_CHUNK,
         source=INHERITED,
-        receipt="tied to the chunk width (qwen4_exp._qsa_prefill_compile_rows). Moves with P2.2",
+        receipt=(
+            "tied to the chunk width (qwen4_exp._qsa_prefill_compile_rows); "
+            "an armed wide chunk earns the second captured width "
+            "(_qsa_prefill_compile_row_set). Moves with P2.2"
+        ),
         env=("MTPLX_QSA_PREFILL_COMPILE_ROWS",),
         engine_default=2048,
+    ),
+    ModelTunedSetting(
+        key="qsa_prefill_wide_min_context",
+        value=16384,
+        source=MEASURED,
+        receipt=(
+            "2026-09-18, M5 Max: 4,096-row forwards on the masked dense lane "
+            "run 1,132 tok/s at 16K of history, 817 at 20K, 695 at 28K, the "
+            "block-sparse lane holds 1,100 to 1,165; armed from 8K it loses "
+            "(1,317 against 1,433). Forwards under 2,048 rows keep the 32,768 "
+            "crossover their own A/B chose"
+        ),
+        env=("MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT",),
+        engine_default=0,
+        requires=TENSOR_UNIT_GPU,
     ),
     ModelTunedSetting(
         key="qsa_prefill_score_mb",
@@ -265,7 +316,23 @@ QWEN3_8_SETTINGS: dict[str, ModelTunedSetting] = _block(
         engine_default=2048,
     ),
     ModelTunedSetting(
+        key="prefill_wide_chunk_tokens",
+        value=None,
+        source=INHERITED,
+        receipt=(
+            "no wide-chunk receipt on this family; the 2026-09-18 pair moved "
+            "+5% at 4K and +1% at 16K from the tail ladder alone. Its own "
+            "width ladder is queue item 5a2"
+        ),
+    ),
+    ModelTunedSetting(
         key="qsa_prefill_compile_rows",
+        value=None,
+        source=DERIVED,
+        receipt="not applicable: no QSA layers in this family (config.json)",
+    ),
+    ModelTunedSetting(
+        key="qsa_prefill_wide_min_context",
         value=None,
         source=DERIVED,
         receipt="not applicable: no QSA layers in this family (config.json)",
@@ -377,19 +444,27 @@ def compiled_verify_depths(family: str | None) -> frozenset[int] | None:
     return frozenset(int(item) for item in value) if value else None
 
 
-def family_env_stamp(family: str | None) -> dict[str, str]:
+def family_env_stamp(
+    family: str | None, *, capabilities: Iterable[str] = ()
+) -> dict[str, str]:
     """Env keys the server stamps for this family at startup.
 
     Only a value that differs from the engine's built-in default is carried,
     so a block that matches today's defaults stamps nothing and cannot change
-    behavior. The caller keeps the usual rule: an operator export wins.
+    behavior. A value that names a capability (``requires``) is carried only
+    when the caller reports it in ``capabilities``, so a Mac without it keeps
+    the engine default. The caller keeps the usual rule: an operator export
+    wins.
     """
 
     block = family_settings(family)
     if block is None:
         return {}
+    have = frozenset(str(item) for item in capabilities)
     stamp: dict[str, str] = {}
     for setting in block.values():
+        if setting.requires and setting.requires not in have:
+            continue
         if setting.env_by_field and isinstance(setting.value, dict):
             defaults = setting.engine_default if isinstance(setting.engine_default, dict) else {}
             for field_name, env_key in setting.env_by_field:

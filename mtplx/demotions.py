@@ -32,6 +32,10 @@ KINDS: dict[str, str] = {
         "A Flash-Next sparse prefill chunk selected its blocks but no sparse "
         "consumer took them, so the dense mask was rebuilt."
     ),
+    "qwen4_wide_prefill_chunk_refused": (
+        "A Flash-Next prompt prefilled in 2,048-row chunks because the wider "
+        "chunk did not fit under the memory line for that request."
+    ),
     "fixed_m4_lane_skipped": (
         "A Flash-Next request ran without the compiled verifier (memory gate, "
         "operator ceiling, or a draft depth below 3)."

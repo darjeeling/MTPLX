@@ -1,9 +1,10 @@
 """Flash-Next's own prefill width (2026-09-18).
 
-The speed lane stamps a 4,096-row prefill chunk and a 16,384-token sparse
-attention crossover on tensor-unit GPUs only; the wide chunk is granted per
-request against live memory and a refusal is the 2,048-row plan that ships
-today.  An operator's explicit chunk or crossover always wins.
+The family's settings block stamps a 4,096-row prefill chunk and a
+16,384-token sparse attention crossover on tensor-unit GPUs only; the wide
+chunk is granted per request against live memory and a refusal is the
+2,048-row plan that ships today, counted in the demotion ledger.  An
+operator's explicit chunk or crossover always wins.
 """
 
 from __future__ import annotations
@@ -139,6 +140,24 @@ def test_a_tight_machine_keeps_the_2048_row_plan(monkeypatch):
         is None
     )
     assert receipt["granted"] is False
+
+
+def test_a_refusal_is_counted_and_a_grant_is_not(monkeypatch):
+    # Nothing goes slow in silence: /health, the request log and
+    # `mtplx doctor --explain` read this ledger.
+    from mtplx import demotions
+
+    kind = "qwen4_wide_prefill_chunk_refused"
+    assert kind in demotions.KINDS
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "4096")
+    monkeypatch.delenv("MTPLX_PREFILL_CHUNK_SIZE", raising=False)
+    _memory(monkeypatch, limit=110 * GIB, live=85 * GIB)
+    before = demotions.mark()
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=65536) == 4096
+    assert demotions.since(before).get(kind, 0) == 0
+    _memory(monkeypatch, limit=96 * GIB, live=85 * GIB)
+    assert generation.qwen4_wide_prefill_chunk_tokens(None, prompt_tokens=131072) is None
+    assert demotions.since(before)[kind] == 1
 
 
 def test_the_allocator_cache_is_released_before_a_refusal(monkeypatch):

@@ -508,6 +508,11 @@ def _metal_memory_limit_bytes(rt: Any) -> int:
 _WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS = 8 * 2**30
 #: The line the fixed-M4 lane's own live gate holds (its PRESSURE_FRACTION).
 _WIDE_PREFILL_PRESSURE_FRACTION = 0.97
+_WIDE_PREFILL_REFUSED_REASON = (
+    "live memory plus this prompt's KV growth plus the wide forward's "
+    "transient is over 0.97 of the Metal limit; the stderr line "
+    "[qwen4-prefill] carries the arithmetic"
+)
 
 
 def _wide_prefill_pressure_fraction() -> float:
@@ -587,6 +592,7 @@ def qwen4_wide_prefill_chunk_tokens(
             threshold_bytes=int(line),
         )
     if not granted:
+        _note_demotion("qwen4_wide_prefill_chunk_refused", _WIDE_PREFILL_REFUSED_REASON)
         try:
             print(
                 f"[qwen4-prefill] {wide}-row chunk not granted for this request, "
