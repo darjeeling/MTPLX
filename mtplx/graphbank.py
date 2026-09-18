@@ -22,11 +22,51 @@ from .demotions import note as _note_demotion, note_bank_fallback as _note_bank_
 from .gdn_capture import resolve_gdn_capture_backend
 
 
+# Process-wide state of the Flash-Next fixed-M4 compiled lane (PX.4):
+# "proven" flips after the first dispatch evaluated cleanly on this GPU;
+# "retired" holds the one-line reason after a dispatch failure, and the lane
+# stays on the eager verifier for the life of the process.
+_FIXED_M4_LANE: dict[str, Any] = {"proven": False, "retired": None}
+_MISSING = object()
+
+
+def fixed_m4_lane_retired_reason() -> str | None:
+    """Why the fixed-M4 compiled lane is retired for this process, or None."""
+
+    return _FIXED_M4_LANE["retired"]
+
+
+def retire_fixed_m4_lane(reason: str) -> None:
+    """Retire the lane for the process: one printed line, one ledger entry."""
+
+    first = _FIXED_M4_LANE["retired"] is None
+    text = " ".join(str(reason).split())[:400]
+    if first:
+        _FIXED_M4_LANE["retired"] = text
+    _note_demotion("fixed_m4_dispatch_retired", _FIXED_M4_LANE["retired"])
+    if not first:
+        return
+    try:
+        print(
+            "[mtplx] Flash-Next compiled verifier could not dispatch on this GPU "
+            f"({text}). Verify runs the eager path for the rest of this process; "
+            "output is unchanged. Please report this line with `mtplx doctor "
+            "--json`.",
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
 # Demotion ledger reasons for the per-round sites: constants, so the verify
 # path formats nothing (mtplx/demotions.py cost contract).
 _FIXED_M4_OTHER_WIDTH_REASON = (
     "verify width other than 4 has no compiled route: an adaptive stop, the "
     "last round before max_tokens, or a draft depth of 4 or 5"
+)
+_FIXED_M4_RETIRED_ROUND_REASON = (
+    "the compiled verifier was retired for this process after a dispatch "
+    "failure, so this round ran the eager forward"
 )
 _FIXED_M4_NO_HOST_INPUTS_REASON = (
     "a width-4 verify reached the bank without host-owned n-gram inputs (a "
@@ -2305,16 +2345,173 @@ class CompiledVerifyBank:
         return_hidden: bool = True,
         hidden_variant: str | None = None,
     ):
-        """Run the installed physical-M4 route with host-owned n-gram inputs."""
+        """Run the installed physical-M4 route with host-owned n-gram inputs.
 
-        del return_hidden, hidden_variant
+        The first dispatch of the process runs under a guard
+        (``_prove_fixed_m4_dispatch``): a kernel an older GPU refuses retires
+        the lane to the eager verifier for the life of the process instead
+        of failing the request. Once proven, this is the unguarded replay.
+        """
+
+        del return_hidden
         self.stats["calls"] += 1
-        return self._forward_installed_fixed_m4(
+        if _FIXED_M4_LANE["retired"] is not None:
+            return self._fixed_m4_retired_forward(
+                input_ids,
+                cache=cache,
+                committed_count=committed_count,
+                hidden_variant=hidden_variant,
+            )
+        if _FIXED_M4_LANE["proven"]:
+            return self._forward_installed_fixed_m4(
+                input_ids,
+                host_input_ids,
+                completion_tokens,
+                committed_count,
+                cache,
+            )
+        return self._prove_fixed_m4_dispatch(
             input_ids,
             host_input_ids,
             completion_tokens,
             committed_count,
             cache,
+            hidden_variant=hidden_variant,
+        )
+
+    def _fixed_m4_state_refs(self) -> list[tuple[Any, str, tuple, tuple, tuple]]:
+        """References (never copies) to every leaf the replay rebinds.
+
+        Holding them keeps MLX from donating the input buffers for this one
+        dispatch, so a failed dispatch leaves the pre-round state intact and
+        restoring it is a rebind.
+        """
+
+        dispatch = self._fixed_m4_dispatch
+        saved: list[tuple[Any, str, tuple, tuple, tuple]] = []
+        for kind, entry, n_leaves in dispatch["state_plan"]:
+            if kind == VERIFY_SPEC_KIND_QSA:
+                leaves = (
+                    entry.kv.cache[0],
+                    entry.kv.cache[1],
+                    entry.kv.cache[2],
+                    entry.raw_keys,
+                    entry.pooled,
+                )
+                rollback = tuple(entry.kv.rollback_state)
+            else:
+                leaves = tuple(entry.cache[:n_leaves])
+                rollback = ()
+            captured = (
+                getattr(entry, "_mtplx_verify_rows", _MISSING),
+                getattr(entry, "_mtplx_verify_ple", _MISSING),
+            )
+            saved.append((entry, kind, leaves, rollback, captured))
+        return saved
+
+    @staticmethod
+    def _restore_fixed_m4_state(saved: list[tuple[Any, str, tuple, tuple, tuple]]) -> None:
+        for entry, kind, leaves, rollback, captured in saved:
+            if kind == VERIFY_SPEC_KIND_QSA:
+                entry.kv.cache[0], entry.kv.cache[1], entry.kv.cache[2] = leaves[:3]
+                entry.raw_keys = leaves[3]
+                entry.pooled = leaves[4]
+                for slot, value in enumerate(rollback):
+                    entry.kv.rollback_state[slot] = value
+            else:
+                for slot, value in enumerate(leaves):
+                    entry.cache[slot] = value
+            for name, value in zip(("_mtplx_verify_rows", "_mtplx_verify_ple"), captured):
+                if value is _MISSING:
+                    if hasattr(entry, name):
+                        try:
+                            delattr(entry, name)
+                        except AttributeError:
+                            pass
+                else:
+                    setattr(entry, name, value)
+
+    def _prove_fixed_m4_dispatch(
+        self,
+        input_ids,
+        host_input_ids,
+        completion_tokens,
+        committed_count: int,
+        cache: Any,
+        *,
+        hidden_variant: str | None,
+    ):
+        """First dispatch of the process: prove the lane or retire it.
+
+        Every receipt behind the fixed-M4 kernels is an M5 Max, the lane is
+        armed by model geometry alone, and its dispatch had no try/except: a
+        kernel that an older GPU refuses to build or dispatch (the 896-thread
+        pipeline cap of issue #400 is the known shape of that failure) was a
+        failed request. The generic bank already falls back after an
+        exception streak; this lane now does the same on its first dispatch.
+
+        The round is evaluated inside the guard (the generation loop blocks
+        on these logits next anyway), with the input leaves held so nothing
+        is donated: on a failure the pre-round state is restored by rebinding
+        and the same verify window runs the eager forward, the route every
+        width other than 4 already takes through this bank.
+        """
+
+        self.reserve_fixed_m4_window(cache, committed_count=committed_count)
+        saved = self._fixed_m4_state_refs()
+        compiled_before = int(self.stats.get("compiled_calls", 0))
+        bucket_before = int(self.stats["buckets"].get("0", 0))
+        try:
+            result = self._forward_installed_fixed_m4(
+                input_ids,
+                host_input_ids,
+                completion_tokens,
+                committed_count,
+                cache,
+            )
+            mx.eval(result[0], result[1])
+        except Exception as exc:  # noqa: BLE001 - any dispatch failure retires the lane
+            self._restore_fixed_m4_state(saved)
+            self._held_state_refs.clear()
+            # The replay counts itself before the guard's blocking eval; a
+            # round that failed there was not a compiled round.
+            self.stats["compiled_calls"] = compiled_before
+            self.stats["buckets"]["0"] = bucket_before
+            retire_fixed_m4_lane(f"{type(exc).__name__}: {exc}")
+            return self._fixed_m4_retired_forward(
+                input_ids,
+                cache=cache,
+                committed_count=committed_count,
+                hidden_variant=hidden_variant,
+            )
+        _FIXED_M4_LANE["proven"] = True
+        return result
+
+    def _fixed_m4_retired_forward(
+        self,
+        input_ids,
+        *,
+        cache: Any,
+        committed_count: int | None,
+        hidden_variant: str | None,
+    ):
+        """The eager verify forward through an installed bank (lane retired)."""
+
+        self.reserve_fixed_m4_window(
+            cache,
+            committed_count=committed_count,
+            window_tokens=_decode_length(input_ids),
+        )
+        self.last_dispatch_kind = "eager"
+        self.last_fallback_reason = "fixed_m4_dispatch_retired"
+        self.last_fallback_transition = False
+        self.stats["fallback_calls"] = int(self.stats.get("fallback_calls", 0)) + 1
+        _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_RETIRED_ROUND_REASON)
+        return self._runtime_forward(
+            input_ids,
+            cache=cache,
+            return_hidden=True,
+            hidden_variant=hidden_variant,
         )
 
     def forward_ar_capture(

@@ -83,6 +83,7 @@ from .graphbank import (
     cache_array_tree,
     compiled_verify_mode,
     ensure_eager_window_capacity,
+    fixed_m4_lane_retired_reason as _fixed_m4_lane_retired_reason,
     paged_offsets_context_ok as _paged_offsets_context_ok,
     promote_kv_cache_offsets,
     set_paged_offsets_context_ok,
@@ -396,6 +397,14 @@ def _qwen4_fixed_m4_compiled_verify_requested(
         return False
     if receipt is not None:
         receipt.update(requested_depth=int(speculative_depth), engaged=False)
+    _retired = _fixed_m4_lane_retired_reason()
+    if _retired is not None:
+        # A kernel this GPU refused retired the lane for the process
+        # (graphbank first-dispatch guard): plain eager batched verify.
+        if receipt is not None:
+            receipt["reason"] = "dispatch_retired"
+        _note_demotion("fixed_m4_lane_skipped", _FIXED_M4_RETIRED_SKIP_REASON)
+        return False
     if int(speculative_depth) < 3:
         # This bank has only a four-row compiled forward. D1/D2 otherwise
         # pay the O(context) copy and memory twice, then run eager anyway.
@@ -490,6 +499,10 @@ def _metal_memory_limit_bytes(rt: Any) -> int:
     return usable_engine_bytes(total) if total else 0
 
 
+_FIXED_M4_RETIRED_SKIP_REASON = (
+    "the compiled verifier failed to dispatch on this GPU earlier in this "
+    "process and was retired; see the fixed_m4_dispatch_retired reason"
+)
 _COPY_ROUND_EAGER_REASON = (
     "copy-block rounds on the batched lane run the eager forward (width 9 to "
     "25 has no compiled route)"
