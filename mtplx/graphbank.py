@@ -18,7 +18,20 @@ from typing import Any
 import mlx.core as mx
 
 from .attention_context import attention_phase
+from .demotions import note as _note_demotion, note_bank_fallback as _note_bank_fallback
 from .gdn_capture import resolve_gdn_capture_backend
+
+
+# Demotion ledger reasons for the per-round sites: constants, so the verify
+# path formats nothing (mtplx/demotions.py cost contract).
+_FIXED_M4_OTHER_WIDTH_REASON = (
+    "verify width other than 4 has no compiled route: an adaptive stop, the "
+    "last round before max_tokens, or a draft depth of 4 or 5"
+)
+_FIXED_M4_NO_HOST_INPUTS_REASON = (
+    "a width-4 verify reached the bank without host-owned n-gram inputs (a "
+    "copy block of 3), so it ran the eager forward"
+)
 
 
 def _prepare_fixed_m4_materialized(
@@ -2348,6 +2361,7 @@ class CompiledVerifyBank:
                 self.last_dispatch_kind = "eager"
                 self.last_fallback_reason = "fixed_m4_host_inputs_missing"
                 self.last_fallback_transition = False
+                _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_NO_HOST_INPUTS_REASON)
                 return self._runtime_forward(
                     input_ids,
                     cache=cache,
@@ -2360,6 +2374,7 @@ class CompiledVerifyBank:
             self.last_dispatch_kind = "eager"
             self.last_fallback_reason = "fixed_m4_short_window"
             self.last_fallback_transition = False
+            _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_OTHER_WIDTH_REASON)
             return self._runtime_forward(
                 input_ids,
                 cache=cache,
@@ -3632,6 +3647,7 @@ class CompiledVerifyBank:
     ):
         if self.strict_no_fallback:
             raise RuntimeError(f"qwen4 fixed-M4 verifier refused: {reason}")
+        _note_bank_fallback(reason)
         self.last_dispatch_kind = "eager"
         self.last_fallback_reason = reason
         growth_transition = (
