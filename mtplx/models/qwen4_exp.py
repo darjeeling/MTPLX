@@ -1778,6 +1778,18 @@ def _qsa_prefill_crossover(rows: int, general: int) -> int:
     return int(general)
 
 
+def _qsa_prefill_floor(rows: int) -> int:
+    """Selector crossover for a forward of ``rows`` rows."""
+
+    return _qsa_prefill_crossover(rows, _qsa_prefill_min_context())
+
+
+def _qsa_prefill_flash_floor(rows: int) -> int:
+    """Block-sparse consumer crossover for a forward of ``rows`` rows."""
+
+    return _qsa_prefill_crossover(rows, _qsa_prefill_flash_min_context())
+
+
 def _qsa_prefill_compile_row_set() -> tuple[int, ...]:
     """The canonical width plus the family's wide prefill chunk, when armed.
 
@@ -1808,8 +1820,7 @@ def _qsa_large_prefill_enabled(rows: int, total_tokens: int) -> bool:
         # restored/SSD chunk may straddle the crossover; routing it by final T
         # would make its early rows pay the exact fixed-cost pathology this
         # guard exists to avoid.
-        and int(total_tokens) - int(rows)
-        >= _qsa_prefill_crossover(rows, _qsa_prefill_min_context())
+        and int(total_tokens) - int(rows) >= _qsa_prefill_floor(rows)
         # Capability/pipeline resolution is only useful for eligible prefill
         # chunks. Never pay its imports and native readiness checks on every
         # AR or speculative decode layer, especially on portable consumers.
@@ -1822,8 +1833,7 @@ def _qsa_prefill_flash_attention_enabled(rows: int, total_tokens: int) -> bool:
 
     return (
         _qsa_large_prefill_enabled(rows, total_tokens)
-        and int(total_tokens) - int(rows)
-        >= _qsa_prefill_crossover(rows, _qsa_prefill_flash_min_context())
+        and int(total_tokens) - int(rows) >= _qsa_prefill_flash_floor(rows)
     )
 
 
