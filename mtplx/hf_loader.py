@@ -1869,16 +1869,52 @@ def pull_model(
     }
 
 
+def _names_existing_cache_entry(name: str, root: Path) -> bool:
+    """True when ``name`` is exactly one existing direct child of ``root``."""
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or name.startswith(".")
+    ):
+        return False
+    return os.path.lexists(root / name)
+
+
 def resolve_cached_model_target(
     model_ref: str,
     *,
     cache_dir: str | Path | None = None,
     search_dirs: Iterable[str | Path] | None = None,
+    explicit_root: bool = False,
 ) -> tuple[str, Path]:
-    """Resolve one unambiguous, primary-root cache entry without deleting it."""
+    """Resolve one unambiguous, primary-root cache entry without deleting it.
+
+    ``explicit_root`` means the caller named ``cache_dir`` on purpose (the
+    CLI's ``--cache-dir``, which the app always passes). Removal only ever
+    acts on the primary root, so a named root is the whole answer: copies in
+    the additional folders are not candidates and cannot make the ref
+    ambiguous. Without it, the "multiple installed copies ... select one
+    root explicitly with --cache-dir" refusal could not be satisfied when the
+    additional folders came from ``MTPLX_MODEL_DIRS`` or ``model_dirs`` in
+    the config file, because those are appended whatever the caller passes.
+    """
 
     raw_ref = str(model_ref).strip()
-    repo_id = repo_id_from_model_ref(raw_ref)
+    roots = model_library_roots(cache_dir, search_dirs=search_dirs)
+    if explicit_root:
+        roots = roots[:1]
+    # A ref that spells an existing entry's directory name means that entry.
+    # `mtplx models` and the app both hand back entries by name, and the
+    # public-id alias table must never redirect a delete from the folder the
+    # user pointed at onto a first-party repo's folder (a hand-named
+    # "qwen3.8-27b-mtplx-optimized-speed" resolved to
+    # Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed and would have taken the
+    # wrong 60 GB). The literal name then goes through the same multi-root
+    # checks as any other ref.
+    literal_entry = any(_names_existing_cache_entry(raw_ref, root) for root in roots)
+    repo_id = None if literal_entry else repo_id_from_model_ref(raw_ref)
     if repo_id is None:
         # Not a Hugging Face id: only a cached directory name ("Org--Name" or
         # a bare branded name) is accepted. Anything carrying a path
@@ -1896,13 +1932,15 @@ def resolve_cached_model_target(
             "invalid cached model reference"
         )
 
-    roots = model_library_roots(cache_dir, search_dirs=search_dirs)
     matches: list[tuple[int, Path]] = []
     seen: set[str] = set()
     for root_index, root in enumerate(roots):
-        names = [safe_model_name(repo_id)]
-        if "/" in repo_id:
-            names.append(repo_id.split("/", 1)[1])
+        if literal_entry:
+            names = [raw_ref]
+        else:
+            names = [safe_model_name(repo_id)]
+            if "/" in repo_id:
+                names.append(repo_id.split("/", 1)[1])
         for name in names:
             path = root / name
             if path == root or path.parent.resolve() != root.resolve():
@@ -1939,9 +1977,13 @@ def remove_cached_model(
     *,
     cache_dir: str | Path | None = None,
     search_dirs: Iterable[str | Path] | None = None,
+    explicit_root: bool = False,
 ) -> dict[str, Any]:
     repo_id, path = resolve_cached_model_target(
-        model_ref, cache_dir=cache_dir, search_dirs=search_dirs
+        model_ref,
+        cache_dir=cache_dir,
+        search_dirs=search_dirs,
+        explicit_root=explicit_root,
     )
     if not (path.exists() or path.is_symlink()):
         return {

@@ -450,14 +450,36 @@ class SessionBankEntry:
     def prefix_len(self) -> int:
         return len(self.token_ids)
 
-    def _ensure_boundaries_loaded(self) -> None:
+    def _ensure_boundaries_loaded(
+        self, *, should_abort: Callable[[], bool] | None = None
+    ) -> None:
+        """Hydrate the lazily loaded boundary records.
+
+        ``should_abort`` is for the idle-lane persistence jobs only: they
+        hydrate on the model-owner thread before encoding, so a waiting
+        request interrupts them between records (ColdEncodeInterrupted). The
+        loader is put back first, because an entry that lost it would persist
+        without boundaries and downgrade its whole lineage on the next
+        restart. Restores pass nothing and are never interrupted.
+        """
         if self.gdn_boundaries or self.gdn_boundary_loader is None:
             return
         loader, self.gdn_boundary_loader = self.gdn_boundary_loader, None
         try:
+            if should_abort is None:
+                records = loader()
+            else:
+                try:
+                    records = loader(should_abort=should_abort)
+                except TypeError:
+                    # A loader that predates the interrupt contract.
+                    records = loader()
             self.gdn_boundaries = [
-                (int(r[0]), r[1], r[2] if len(r) > 2 else None) for r in loader() or ()
+                (int(r[0]), r[1], r[2] if len(r) > 2 else None) for r in records or ()
             ]
+        except ColdEncodeInterrupted:
+            self.gdn_boundary_loader = loader
+            raise
         except Exception:
             # Fail closed: a missing/corrupt boundary payload just means the
             # partial-restore path declines, exactly as if none were stored.
@@ -2251,6 +2273,29 @@ class SessionBank:
                 time.perf_counter() - sync_started
             )
 
+    def _hydrate_boundaries_for_persistence(self, entry: SessionBankEntry) -> None:
+        """Boundary hydration for the idle-lane persistence jobs.
+
+        It runs on the model-owner thread like the encode that follows it, so
+        it polls the cold tier's foreground signal between records and raises
+        ColdEncodeInterrupted for the job's re-dispatch. Tiers without the
+        accessor (test doubles, older tiers) hydrate uninterrupted.
+        """
+        should_abort: Callable[[], bool] | None = None
+        accessor = getattr(self.cold_tier, "encode_should_abort", None)
+        if callable(accessor):
+            try:
+                should_abort = accessor()
+            except Exception:
+                should_abort = None
+        try:
+            entry._ensure_boundaries_loaded(should_abort=should_abort)
+        except ColdEncodeInterrupted:
+            note = getattr(self.cold_tier, "note_encode_yield", None)
+            if callable(note):
+                note()
+            raise
+
     def _cold_enqueue_job(
         self, entry: SessionBankEntry, put_entry: Callable[..., Any]
     ) -> None:
@@ -2260,7 +2305,6 @@ class SessionBank:
         # silently downgrade its whole lineage on the next restart — so
         # hydrate first. Runs on the postcommit/idle lane; the loader fails
         # closed on a corrupt payload.
-        entry._ensure_boundaries_loaded()
         capabilities = ["ar_insert"]
         if entry.logits is not None and entry.hidden is not None:
             capabilities.append("mtp_full")
@@ -2275,6 +2319,10 @@ class SessionBank:
             and int(entry.nbytes) >= int(spill_threshold)
         )
         try:
+            # Hydration is part of the same owner-thread job, so it takes the
+            # same foreground signal and the same re-dispatch as the encode
+            # (issue #505: it ran before the try, unchecked).
+            self._hydrate_boundaries_for_persistence(entry)
             try:
                 if use_spill:
                     stored = spill(
@@ -2413,20 +2461,20 @@ class SessionBank:
                 }
             )
             return False
-        entry._ensure_boundaries_loaded()
-        view = replace(
-            entry,
-            cache_snapshot=snapshot,
-            mtp_history_snapshot=mtp_snapshot,
-            nbytes=int(entry.oversized_nbytes or 0),
-            live_ref_only=False,
-            cache_ref=None,
-            mtp_history_cache_ref=None,
-        )
-        capabilities = ["ar_insert"]
-        if view.logits is not None and view.hidden is not None:
-            capabilities.append("mtp_full")
         try:
+            self._hydrate_boundaries_for_persistence(entry)
+            view = replace(
+                entry,
+                cache_snapshot=snapshot,
+                mtp_history_snapshot=mtp_snapshot,
+                nbytes=int(entry.oversized_nbytes or 0),
+                live_ref_only=False,
+                cache_ref=None,
+                mtp_history_cache_ref=None,
+            )
+            capabilities = ["ar_insert"]
+            if view.logits is not None and view.hidden is not None:
+                capabilities.append("mtp_full")
             stored = spill(view, capabilities=capabilities, raise_on_yield=True)
         except ColdEncodeInterrupted:
             # A foreground request arrived mid-encode. Re-dispatch for the

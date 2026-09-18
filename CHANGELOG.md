@@ -4,6 +4,40 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] (2.11.4)
+
+### Changed
+
+- **Request captures hold no content by default** (PR #356, Philip John
+  Basile). Capture is still off unless `MTPLX_REQUEST_CAPTURE_DIR` is set.
+  When it is on, a record now holds the sampler settings, the seed, token
+  counts and SHA-256 digests, and no prompt text, answer text, messages,
+  exception text or token IDs; keys that look like credentials are redacted
+  at any depth. Each kind of content has its own opt-in
+  (`MTPLX_REQUEST_CAPTURE_INCLUDE_PROMPT_TOKENS`,
+  `..._COMPLETION_TOKENS`, `..._PROMPT_TEXT`, `..._RESPONSE_TEXT`,
+  `..._MESSAGES`, `..._EXCEPTION_TEXT`). An opt-in to token IDs keeps the
+  whole sequence, because an exact replay needs every ID;
+  `MTPLX_REQUEST_CAPTURE_PROMPT_TOKEN_LIMIT` and
+  `MTPLX_REQUEST_CAPTURE_COMPLETION_TOKEN_LIMIT` bound them when wanted.
+  `mtplx trace` reads the request log and the flight recorder, not these
+  files, so it is unaffected. Records are now `capture_version` 2.
+
+### Fixed
+
+- **Dashboard draft totals fall back to the per-depth counts** (PR #490,
+  Wu Shuwen; issue #401). The "accepted of drafted" line and the drafted
+  per verify call tile total `accepted_by_depth` and `drafted_by_depth`
+  when a payload carries no flat totals. The server has sent the flat
+  totals since 2.11.3, and an emitted total still wins.
+- **`MTPLX_AR_PIPELINE` gives the same tokens as the classic AR loop**
+  (PR #507, David Tai). The pipelined AR path drew the first output token
+  from the request's NumPy generator and every later token from a separate
+  `mx.random` stream, so one request with one seed gave a different
+  continuation depending on whether the path engaged. The flag now shares
+  the classic loop's per-token draw, and a new test holds the two token
+  sequences equal at temperature 1.0, top-p 0.95, top-k 20.
+
 ## [2.11.3] - 2026-09-17
 
 ### Added

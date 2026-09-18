@@ -125,6 +125,26 @@ public enum BenchmarkDaemonReadinessError: Error, Equatable, LocalizedError {
     }
 }
 
+public enum CachedModelRemovalError: Error, Equatable, LocalizedError {
+    case selectedModel
+    case servedByRunningDaemon
+    case transferInProgress
+    case outsideManagedCache
+
+    public var errorDescription: String? {
+        switch self {
+        case .selectedModel:
+            return "Switch to another model before removing this download."
+        case .servedByRunningDaemon:
+            return "MTPLX is running this model. Switch models or stop MTPLX first."
+        case .transferInProgress:
+            return "Wait for the current model download or update to finish."
+        case .outsideManagedCache:
+            return "This model is outside the MTPLX download cache and was left untouched."
+        }
+    }
+}
+
 public struct ClientHandoffNotice: Equatable, Sendable {
     public let target: LaunchTarget
     public let status: String
@@ -525,6 +545,40 @@ public final class MTPLXBackendStore: ObservableObject {
         try persistConfiguration(next)
     }
 
+    /// Whether a live daemon may still be reading the entry. The daemon
+    /// keeps its model's weight files mapped for as long as the process
+    /// lives, so the model `/health` reports stays off limits until the
+    /// daemon is verifiably gone. The selection alone is not enough: a
+    /// switch to a model that still has to download leaves the previous
+    /// daemon serving the old entry while `configuration.model` already
+    /// points at the new one.
+    nonisolated static func runningDaemonReads(
+        installedPath: String,
+        repoID: String,
+        daemonState: DaemonState,
+        healthModel: String?,
+        healthModelPath: String?
+    ) -> Bool {
+        switch daemonState {
+        case .stopped, .crashed:
+            return false
+        case .starting, .warming, .running, .degraded, .stopping:
+            break
+        }
+        let installed = NSString(string: installedPath).expandingTildeInPath
+        let standardizedInstalled = NSString(string: installed).standardizingPath
+        for candidate in [healthModelPath, healthModel].compactMap({ $0 }) {
+            let expanded = NSString(string: candidate).expandingTildeInPath
+            if NSString(string: expanded).standardizingPath == standardizedInstalled {
+                return true
+            }
+            if candidate.caseInsensitiveCompare(repoID) == .orderedSame {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Commit a Performance mode pick straight to settings.json.
     ///
     /// Issue #398: Mode used to live in the Settings draft behind a Save
@@ -581,6 +635,56 @@ public final class MTPLXBackendStore: ObservableObject {
                 + "(Settings mode \(scheduling.selectedPreset), target \(scheduling.target))",
             stream: .system
         )
+    }
+
+    /// Return a removable CLI reference only for app-managed cache entries.
+    /// User-selected folders and Forge output outside the cache are never
+    /// exposed through the destructive model-picker action.
+    public func cachedModelReference(forInstalledPath path: String) -> String? {
+        modelDownloader.cachedModelReference(forInstalledPath: path)
+    }
+
+    public func removeCachedModel(
+        repoID: String,
+        installedPath: String
+    ) async throws -> CachedModelRemovalResult {
+        guard let entryName = modelDownloader.cachedEntryName(forInstalledPath: installedPath),
+              entryName.replacingOccurrences(of: "--", with: "/")
+                  .caseInsensitiveCompare(repoID) == .orderedSame
+        else {
+            throw CachedModelRemovalError.outsideManagedCache
+        }
+        guard !isModelDownloading, modelPackUpdatingRepoID == nil else {
+            throw CachedModelRemovalError.transferInProgress
+        }
+
+        let expandedSelected = (configuration.model as NSString).expandingTildeInPath
+        let expandedInstalled = (installedPath as NSString).expandingTildeInPath
+        let selectedOption = downloadableModelOption(for: repoID)
+        guard expandedSelected != expandedInstalled,
+              configuration.model.caseInsensitiveCompare(repoID) != .orderedSame,
+              selectedOption?.matches(configuration.model) != true
+        else {
+            throw CachedModelRemovalError.selectedModel
+        }
+        guard !Self.runningDaemonReads(
+            installedPath: installedPath,
+            repoID: repoID,
+            daemonState: daemonState,
+            healthModel: health?.model,
+            healthModelPath: health?.modelPath
+        ) else {
+            throw CachedModelRemovalError.servedByRunningDaemon
+        }
+
+        let result = try await modelDownloader.removeCachedModel(directoryName: entryName)
+        modelUpdates.removeAll {
+            $0.repoID.caseInsensitiveCompare(repoID) == .orderedSame
+        }
+        if modelPackUpdateNeedsRestart?.repoID.caseInsensitiveCompare(repoID) == .orderedSame {
+            modelPackUpdateNeedsRestart = nil
+        }
+        return result
     }
 
     public func applyConfiguration(
