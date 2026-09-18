@@ -2968,6 +2968,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--summary", action="store_true", help="Print a compact check summary"
     )
     doctor_p.add_argument(
+        "--explain",
+        action="store_true",
+        help=(
+            "Explain what the engine picked for this Mac and why, and list "
+            "every time the running server left a fast lane (with counts and "
+            "reasons). Reads the server on --port when it was passed, else "
+            "on 8000."
+        ),
+    )
+    doctor_p.add_argument(
         "--bundle",
         action="store_true",
         help="Write a redacted doctor bundle under ~/.mtplx/reports",

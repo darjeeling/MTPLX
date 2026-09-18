@@ -2591,6 +2591,8 @@ def _build_doctor_report(args: Any) -> dict[str, Any]:
         thermal_control=thermal_control,
         server_dependencies=server_deps if getattr(args, "deep", False) else None,
     )
+    if getattr(args, "explain", False):
+        report["explain"] = _doctor_explain_report(args, cli_flags)
     if getattr(args, "topic", None) == "opencode":
         report["opencode"] = _opencode_doctor_report(args)
     if getattr(args, "topic", None) == "pi":
@@ -2608,7 +2610,30 @@ def _build_doctor_report(args: Any) -> dict[str, Any]:
     return report
 
 
+def _doctor_explain_report(args: Any, cli_flags: set[str]) -> dict[str, Any]:
+    """The --explain block: the lane, its sources, and the live demotions."""
+
+    from mtplx.lane_explain import build_explain_report
+
+    base_url = str(getattr(args, "base_url", None) or "").rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")]
+    if not base_url:
+        host = str(getattr(args, "host", None) or "127.0.0.1")
+        port = int(getattr(args, "port", 8000)) if "port" in cli_flags else 8000
+        base_url = f"http://{host}:{port}"
+    health = _http_json(base_url + "/health", timeout=1.5)
+    return build_explain_report(health=health, server_url=base_url)
+
+
 def _render_doctor_report(args: Any, report: dict[str, Any]) -> int:
+    if isinstance(report.get("explain"), dict):
+        from mtplx.lane_explain import render_explain_lines
+
+        for line in render_explain_lines(report["explain"]):
+            print(line)
+        if not getattr(args, "summary", False) and not getattr(args, "deep", False):
+            return 0
     if getattr(args, "summary", False):
         diagnostics = report["diagnostics"]
         print(f"MTPLX doctor: {diagnostics['overall']}")

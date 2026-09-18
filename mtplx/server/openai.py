@@ -16211,6 +16211,9 @@ def _metrics_envelope(
         "mtp_history_position_base": int(stats.get("mtp_history_position_base") or 0),
         **({"fixed_m4_admission": stats["fixed_m4_admission"]}
            if stats.get("fixed_m4_admission") else {}),
+        # Demotions recorded while this request ran (kind -> count); the
+        # meanings and reasons are on /health (degradation.demotions).
+        **({"demotions": stats["demotions"]} if stats.get("demotions") else {}),
         **({"compiled_verify": stats["graphbank"]["compiled_verify"]}
            if (stats.get("graphbank") or {}).get("compiled_verify") else {}),
         **_maintenance_timing_stats(stats),
@@ -17189,10 +17192,20 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
     if flash_dispatches:
         nax["flash_dispatch_counters"] = flash_dispatches
 
+    # Nothing goes slow in silence: every demotion off a fast lane, with a
+    # count and the last plain-English reason (mtplx/demotions.py).
+    try:
+        from mtplx.demotions import snapshot as _demotions_snapshot
+
+        demotions: Any = _demotions_snapshot()
+    except BaseException:
+        demotions = "unknown"
+
     return {
         "compiled_verify": compiled_verify,
         "profile_env_overridden": profile_env_overridden,
         "nax": nax,
+        "demotions": demotions,
     }
 
 
