@@ -486,6 +486,97 @@ def _metal_memory_limit_bytes(rt: Any) -> int:
     return usable_engine_bytes(total) if total else 0
 
 
+#: Extra allocator bytes one prefill forward needs at 4,096 rows over the
+#: 2,048-row plan.  Flash-Next on a 128 GB M5 Max, cold prompts, 2026-09-18,
+#: with the block-sparse lane armed from 16K as the lane stamps it: peak
+#: 98.8 GB against 97.3 at 64K, and 100.0 against 98.4 at 128K.  (With the
+#: masked dense lane still serving 16K to 32K the same width peaked at 103.4.)
+#: Charged linearly in the width, at twice the measured figure.
+_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS = int(3.0 * 2**30)
+_WIDE_PREFILL_PRESSURE_FRACTION = 0.90
+
+
+def _prefill_chunk_env_is_pinned() -> bool:
+    """Whether an operator moved the legacy chunk knobs off their defaults.
+
+    Every profile stamps ``MTPLX_PREFILL_CHUNK_SIZE=auto`` with 2,048 for both
+    layouts, so the keys being present says nothing.  A number in the single
+    knob, or a layout width other than 2,048, is somebody's decision.
+    """
+
+    raw = (os.environ.get("MTPLX_PREFILL_CHUNK_SIZE") or "auto").strip().lower()
+    if raw != "auto":
+        return True
+    for name in ("MTPLX_PREFILL_CHUNK_SIZE_DENSE", "MTPLX_PREFILL_CHUNK_SIZE_REPAGE"):
+        value = (os.environ.get(name) or "2048").strip()
+        if value != "2048":
+            return True
+    return False
+
+
+def qwen4_wide_prefill_chunk_tokens(
+    rt: Any, *, prompt_tokens: int, receipt: dict | None = None
+) -> int | None:
+    """The wider prefill chunk this request may use, or None for the default.
+
+    ``MTPLX_QWEN4_PREFILL_WIDE_CHUNK`` names the width (the Flash-Next speed
+    lane stamps 4096 on tensor-unit GPUs; unset or 0 means off).  Routed
+    experts cost 5.6 microseconds per token per layer at 2,048 rows and 3.5 at
+    4,096 on an M5 Max, so a cold prompt runs its wide chunks at about 1,820
+    tok/s instead of 1,760, and the block-sparse attention lane that arms with
+    them holds 1,125 tok/s from 16K of history where the masked dense lane has
+    fallen to 700.
+
+    Per request and never sticky: the width is granted only while live
+    allocator bytes, the prompt's own KV growth and the wider forward's
+    transient stay under 0.90 of the Metal limit.  A refusal is the 2,048-row
+    plan, which is today's behaviour, so the gate can only ever give memory
+    back.  An operator who moves the ``MTPLX_PREFILL_CHUNK_SIZE`` knobs off
+    their profile defaults is obeyed here, and ``--prefill-chunk-tokens``
+    never reaches this function.
+    """
+
+    wide = _env_int("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", 0)
+    if wide <= 2048 or _prefill_chunk_env_is_pinned():
+        return None
+    prompt_tokens = max(0, int(prompt_tokens))
+    if prompt_tokens <= 2048:
+        return None
+    limit = _metal_memory_limit_bytes(rt)
+    if limit <= 0:
+        return wide
+    per_token = _qwen4_fixed_m4_promotion_bytes_per_token(rt)
+    transient = (_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS * wide) // 4096
+    need = prompt_tokens * max(0, per_token) + transient
+    live = _mlx_live_memory_bytes()
+    line = int(limit * _WIDE_PREFILL_PRESSURE_FRACTION)
+    if live + need > line:
+        _mlx_release_allocator_cache()
+        live = _mlx_live_memory_bytes()
+    granted = live + need <= line
+    if receipt is not None:
+        receipt.update(
+            wide_chunk_tokens=wide,
+            granted=bool(granted),
+            live_bytes=int(live),
+            need_bytes=int(need),
+            threshold_bytes=int(line),
+        )
+    if not granted:
+        try:
+            print(
+                f"[qwen4-prefill] {wide}-row chunk not granted for this request, "
+                f"2,048-row plan: prompt {prompt_tokens} tokens, live "
+                f"{live / 1e9:.1f} GB + need {need / 1e9:.1f} GB over the "
+                f"{line / 1e9:.1f} GB line",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+    return wide if granted else None
+
+
 def _announce_qwen4_fixed_m4_skip(reason: str) -> None:
     try:
         print(
@@ -4337,14 +4428,38 @@ def _gdn_boundary_tail_min_rung() -> int:
         return 1024
 
 
+def _gdn_boundary_tail_backoff() -> int:
+    """How far before the prompt end the nearest boundary sits (0 = old grid).
+
+    The next turn of an agent session diverges from this prompt a few tokens
+    before its end (the generation prompt is re-rendered as the assistant
+    turn), so the closer this boundary is, the less the warm turn re-prefills:
+    64 tokens instead of up to 256 on the interval grid.  It also shortens the
+    one narrow forward every cold prompt still pays (64 rows cost about
+    0.15 s on Flash-Next, 220 to 256 rows about 0.30 s).
+    """
+
+    raw = os.environ.get("MTPLX_GDN_BOUNDARY_TAIL_BACKOFF", "64")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 64
+
+
 def _geometric_tail_edges(
-    start: int, end: int, tail_interval: int, min_rung: int | None = None
+    start: int,
+    end: int,
+    tail_interval: int,
+    min_rung: int | None = None,
+    backoff: int | None = None,
 ) -> list[int]:
     """Boundary positions inside the final chunk ``[start, end)``, ascending.
 
-    ``top`` is the last point of the chunk's own ``interval`` grid below
-    ``end`` (the dense layout's final boundary), so the nearest boundary to
-    the prompt end is exactly as close as the dense grid's.  Behind it the
+    ``top`` is the nearest boundary to the prompt end: ``end - backoff``, or,
+    with a backoff of 0 or a chunk too short for it, the last point of the
+    chunk's own ``interval`` grid below ``end`` (the dense layout's final
+    boundary).  It is never further from the prompt end than the dense
+    grid's.  Behind it the
     edges sit at ``top - (2**k - 1) * rung``, ``rung`` being the minimum rung
     width rounded up to the interval grid: their distances from the prompt
     end fall one into each power-of-two bucket that
@@ -4356,10 +4471,14 @@ def _geometric_tail_edges(
 
     if min_rung is None:
         min_rung = _gdn_boundary_tail_min_rung()
+    if backoff is None:
+        backoff = _gdn_boundary_tail_backoff()
     rung = -(-max(int(min_rung), tail_interval) // tail_interval) * tail_interval
     top = start + ((end - 1 - start) // tail_interval) * tail_interval
     if top - start < tail_interval:
         return []
+    if 0 < backoff < end - top and end - backoff - start >= tail_interval:
+        top = end - backoff
     edges = [top]
     reach = rung
     while top - reach - start >= rung:

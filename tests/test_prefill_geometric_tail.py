@@ -40,6 +40,7 @@ def _plan(tokens, chunk, **kwargs):
 def _default_layout(monkeypatch):
     monkeypatch.delenv("MTPLX_GDN_BOUNDARY_TAIL_LAYOUT", raising=False)
     monkeypatch.delenv("MTPLX_GDN_BOUNDARY_TAIL_MIN_RUNG", raising=False)
+    monkeypatch.delenv("MTPLX_GDN_BOUNDARY_TAIL_BACKOFF", raising=False)
 
 
 @pytest.mark.parametrize("tokens,chunk", CASES)
@@ -80,15 +81,20 @@ def test_the_wide_part_of_the_last_chunk_stays_wide(tokens, chunk):
 
 
 @pytest.mark.parametrize("tokens,chunk", CASES)
-def test_nearest_boundary_is_as_close_to_the_prompt_end_as_the_dense_grid(
+def test_nearest_boundary_is_never_further_from_the_prompt_end_than_the_dense_grid(
     tokens, chunk, monkeypatch
 ):
     geometric = _plan(tokens, chunk)
+    monkeypatch.setenv("MTPLX_GDN_BOUNDARY_TAIL_BACKOFF", "0")
+    on_grid = _plan(tokens, chunk)
     monkeypatch.setenv("MTPLX_GDN_BOUNDARY_TAIL_LAYOUT", "dense")
     dense = _plan(tokens, chunk)
     # The last span's start is the boundary an agent turn restores from (the
     # next request diverges a few tokens before this prompt's end).
-    assert geometric[-1][0] == dense[-1][0]
+    assert on_grid[-1][0] == dense[-1][0]
+    assert geometric[-1][0] >= dense[-1][0]
+    if tokens - dense[-1][0] > 64 and len(dense) > 1 and dense[-1][0] > 0:
+        assert tokens - geometric[-1][0] == 64
 
 
 def test_edges_fall_one_into_each_retention_bucket():
@@ -98,7 +104,9 @@ def test_edges_fall_one_into_each_retention_bucket():
     assert distances[0] <= INTERVAL
     buckets = [(d - 1).bit_length() for d in distances]
     assert len(set(buckets)) == len(buckets), (distances, buckets)
-    assert all((edge - start) % INTERVAL == 0 for edge in edges)
+    assert distances[0] == 64
+    on_grid = _geometric_tail_edges(start, end, INTERVAL, backoff=0)
+    assert all((edge - start) % INTERVAL == 0 for edge in on_grid)
     assert all(edge - start >= INTERVAL for edge in edges)
 
 
@@ -159,22 +167,28 @@ def test_dense_layout_is_the_shipped_2_11_3_plan(monkeypatch):
 
 
 def test_geometric_layout_for_the_measured_cells():
+    assert [e - s for s, e in _plan(4060, 2048)] == [2048, 1948, 64]
+    assert [e - s for s, e in _plan(4060, 8192)] == [2972, 1024, 64]
+    assert [e - s for s, e in _plan(16349, 8192)] == [8192, 5021, 2048, 1024, 64]
+
+
+def test_backoff_zero_keeps_the_nearest_boundary_on_the_interval_grid(monkeypatch):
+    monkeypatch.setenv("MTPLX_GDN_BOUNDARY_TAIL_BACKOFF", "0")
     assert [e - s for s, e in _plan(4060, 2048)] == [2048, 1792, 220]
-    assert [e - s for s, e in _plan(4060, 8192)] == [2816, 1024, 220]
     assert [e - s for s, e in _plan(16349, 8192)] == [8192, 4864, 2048, 1024, 221]
 
 
 def test_full_ladder_when_the_minimum_rung_is_one_interval(monkeypatch):
     monkeypatch.setenv("MTPLX_GDN_BOUNDARY_TAIL_MIN_RUNG", "256")
-    assert [e - s for s, e in _plan(4060, 2048)] == [2048, 1024, 512, 256, 220]
+    assert [e - s for s, e in _plan(4060, 2048)] == [2048, 1180, 512, 256, 64]
     assert [e - s for s, e in _plan(16349, 8192)] == [
         8192,
-        4096,
+        4253,
         2048,
         1024,
         512,
         256,
-        221,
+        64,
     ]
 
 

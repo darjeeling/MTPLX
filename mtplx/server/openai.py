@@ -974,6 +974,22 @@ def _server_runtime_env_overrides(
             # leaves them inert.
             if os.environ.get("MTPLX_NGRAM_PREWARM") is None:
                 overrides.setdefault("MTPLX_NGRAM_PREWARM", "auto")
+            # Flash-Next's own prefill width (2026-09-18, M5 Max, same-session
+            # arms): 4,096-row chunks, and for forwards of 2,048 rows or more
+            # the block-sparse attention lane armed from 16,384 tokens of
+            # history instead of 32,768 (a warm turn's short suffix keeps the
+            # 32,768 crossover).  The wide chunk is granted per request
+            # against live memory (generation.qwen4_wide_prefill_chunk_tokens)
+            # and falls back to the 2,048 plan; the measured consumer of the
+            # sparse lane needs tensor units, so an M1 to M4 keeps today's
+            # values untouched.
+            if _qwen4_tensor_unit_gpu():
+                for key, value in (
+                    ("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "4096"),
+                    ("MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT", "16384"),
+                ):
+                    if os.environ.get(key) is None:
+                        overrides.setdefault(key, value)
             # The stage-3 child routes are consumed at model load and raise
             # unless stage 3 itself resolves on, so they are derived from the
             # resolved parent, never stamped alone: the routed-down reduction,
@@ -1133,6 +1149,8 @@ _QWEN4_PORT_KEYS = (
     "MTPLX_QWEN4_OPDIET",
     "MTPLX_QWEN4_DRAFT_K20_PRESCATTER",
     "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN",
+    "MTPLX_QWEN4_PREFILL_WIDE_CHUNK",
+    "MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT",
     "MTPLX_QWEN4_BLOCK_VERIFY",
     "MTPLX_QWEN4_VERIFY_GLUE",
     "MTPLX_QWEN4_VERIFY_GLUE_ITEMS",
@@ -1149,6 +1167,22 @@ _QWEN4_LANE_KEYS = _QWEN4_PORT_KEYS + (
     "MTPLX_FRSPEC_VOCAB",
     "MTPLX_QSA_GATHER_MAX_ROWS",
 )
+
+
+def _qwen4_tensor_unit_gpu() -> bool:
+    """Whether this GPU has tensor units (generation 17, M5 class).
+
+    Read through the detector the verify kernels use, so
+    MTPLX_FORCE_GPU_FAMILY_FALLBACK=1 rehearses the path an M1 to M4 takes.
+    Never raises: an unknown GPU keeps the portable defaults.
+    """
+
+    try:
+        from mtplx.nax_verify import nax_available
+
+        return bool(nax_available())
+    except Exception:
+        return False
 
 
 def _qwen4_port_opt_in(overrides: Mapping[str, str], key: str) -> bool:
@@ -25071,6 +25105,20 @@ def _run_generation(
             # setting stays the default for real requests.
             if prefill_chunk_tokens is None:
                 prefill_chunk_tokens = getattr(state.args, "prefill_chunk_tokens", None)
+            if prefill_chunk_tokens is None:
+                # The family's own wider chunk (Flash-Next on tensor-unit
+                # GPUs), granted per request against live memory.  An explicit
+                # flag or a caller's tighter chunk never reaches this line.
+                from mtplx.generation import qwen4_wide_prefill_chunk_tokens
+
+                _wide_chunk_receipt: dict[str, Any] = {}
+                prefill_chunk_tokens = qwen4_wide_prefill_chunk_tokens(
+                    state.runtime,
+                    prompt_tokens=len(prompt_ids),
+                    receipt=_wide_chunk_receipt,
+                )
+                if _wide_chunk_receipt and request_observability is not None:
+                    request_observability["prefill_wide_chunk"] = _wide_chunk_receipt
             # Install the per-request live decode sink (flight recorder) so
             # _DecodeTrace publishes by-depth acceptance at 1 Hz mid-request.
             # Owner-thread module slot; cleared in the lock-release finally.

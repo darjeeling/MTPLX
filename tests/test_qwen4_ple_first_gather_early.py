@@ -446,6 +446,7 @@ def _predict(**stubs):
         "_gdn_boundary_tail_interval": lambda: 256,
         "_gdn_boundary_tail_layout": lambda: "geometric",
         "_gdn_boundary_tail_min_rung": lambda: 1024,
+        "_gdn_boundary_tail_backoff": lambda: 64,
     }
     namespace.update(stubs)
     exec(compile(module, "<generation>", "exec"), namespace)

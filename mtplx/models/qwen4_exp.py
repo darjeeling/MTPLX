@@ -1751,6 +1751,51 @@ def _qsa_prefill_compile_rows() -> int:
         return 2048
 
 
+_QSA_PREFILL_WIDE_ROWS = 2048
+
+
+def _qsa_prefill_wide_min_context() -> int:
+    """History crossover for forwards of 2,048 rows or more (0 = the general one).
+
+    The selector's fixed cost is paid per forward, so it amortizes sooner over
+    a wide forward than over a warm turn's short suffix.  Flash-Next on an M5
+    Max, 2026-09-18, 4,096-row chunks: the masked dense lane runs 1,132 tok/s
+    at 16K of history, 817 at 20K and 695 at 28K, while the block-sparse lane
+    holds 1,125 from 16K up.  Narrow forwards keep the 32,768 crossover their
+    own A/B chose.
+    """
+
+    try:
+        return max(0, int(os.environ.get("MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT") or 0))
+    except ValueError:
+        return 0
+
+
+def _qsa_prefill_crossover(rows: int, general: int) -> int:
+    wide = _qsa_prefill_wide_min_context()
+    if wide >= 2049 and int(rows) >= _QSA_PREFILL_WIDE_ROWS:
+        return min(int(general), wide)
+    return int(general)
+
+
+def _qsa_prefill_compile_row_set() -> tuple[int, ...]:
+    """The canonical width plus the family's wide prefill chunk, when armed.
+
+    MTPLX_QWEN4_PREFILL_WIDE_CHUNK is granted per request against live memory
+    and falls back to the 2,048 plan, so both widths are full chunks of real
+    prompts and both earn a captured graph.  Two traces, never one per tail.
+    """
+
+    rows = {_qsa_prefill_compile_rows()}
+    try:
+        wide = int(os.environ.get("MTPLX_QWEN4_PREFILL_WIDE_CHUNK") or 0)
+    except ValueError:
+        wide = 0
+    if wide > 2048:
+        rows.add(wide)
+    return tuple(sorted(rows))
+
+
 def _qsa_large_prefill_enabled(rows: int, total_tokens: int) -> bool:
     # S>1 is not sufficient: MTP target verification also uses multiple rows.
     # The request-scoped phase signal keeps speculative verify/rollback on its
@@ -1763,7 +1808,8 @@ def _qsa_large_prefill_enabled(rows: int, total_tokens: int) -> bool:
         # restored/SSD chunk may straddle the crossover; routing it by final T
         # would make its early rows pay the exact fixed-cost pathology this
         # guard exists to avoid.
-        and int(total_tokens) - int(rows) >= _qsa_prefill_min_context()
+        and int(total_tokens) - int(rows)
+        >= _qsa_prefill_crossover(rows, _qsa_prefill_min_context())
         # Capability/pipeline resolution is only useful for eligible prefill
         # chunks. Never pay its imports and native readiness checks on every
         # AR or speculative decode layer, especially on portable consumers.
@@ -1776,7 +1822,8 @@ def _qsa_prefill_flash_attention_enabled(rows: int, total_tokens: int) -> bool:
 
     return (
         _qsa_large_prefill_enabled(rows, total_tokens)
-        and int(total_tokens) - int(rows) >= _qsa_prefill_flash_min_context()
+        and int(total_tokens) - int(rows)
+        >= _qsa_prefill_crossover(rows, _qsa_prefill_flash_min_context())
     )
 
 
@@ -2992,7 +3039,7 @@ class QSAIndexer(nn.Module):
             and rows >= _qsa_prefill_min_rows()
             and (
                 mode not in ("prefill_blocks", "update_only")
-                or rows != _qsa_prefill_compile_rows()
+                or rows not in _qsa_prefill_compile_row_set()
             )
         ):
             return False
