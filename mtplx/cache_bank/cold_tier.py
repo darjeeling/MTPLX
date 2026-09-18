@@ -101,6 +101,9 @@ MANIFEST_STATS_TTL_S = 5.0
 DISK_USAGE_SCAN_DUTY_DIVISOR = 20
 # The walk yields to foreground traffic every this many files.
 DISK_USAGE_SCAN_YIELD_EVERY_FILES = 4096
+# An encode unit (one eval plus one host copy of at most 32 MiB) that takes
+# this long is reported: it is the bound on how long a request waits.
+ENCODE_SLOW_UNIT_S = 1.0
 _COMMITTED_CACHE_POLICIES = frozenset({"committed", "last_window"})
 
 
@@ -479,6 +482,13 @@ class SessionBankColdTier:
             "last_miss_reason": None,
             "last_archive_path": None,
             "encode_yields_foreground": 0,
+            # Issue #505: the owner-thread encode in units. The longest unit
+            # is the longest a request can have waited behind this tier, so
+            # a stall names itself here instead of in a watchdog line.
+            "encode_units": 0,
+            "encode_slow_units": 0,
+            "encode_longest_unit_s": 0.0,
+            "encode_longest_unit": None,
             "writer_foreground_pauses": 0,
             "writer_foreground_pause_s": 0.0,
             "writer_pause_expired_busy": 0,
@@ -557,9 +567,7 @@ class SessionBankColdTier:
         # eventual serialization could capture mutated pages — silently
         # corrupt persisted sessions that degrade on every restore. Bytes are
         # captured at snapshot time; the writer thread is pure file IO.
-        should_abort: Callable[[], bool] | None = None
-        if self._encode_yield_enabled and self.foreground_busy is not None:
-            should_abort = self.foreground_busy
+        should_abort = self.encode_should_abort()
         try:
             encoded = encode_payload(
                 cache_snapshot=getattr(entry, "cache_snapshot"),
@@ -570,6 +578,7 @@ class SessionBankColdTier:
                 has_recurrent=bool(getattr(entry, "has_recurrent", False)),
                 block_size=self.block_size,
                 should_abort=should_abort,
+                on_unit=self._observe_encode_unit,
             )
         except ColdEncodeInterrupted:
             self._release_pending(estimated_nbytes)
@@ -842,9 +851,7 @@ class SessionBankColdTier:
         raise_on_yield: bool,
         claimed_digests: set[str],
     ) -> bool:
-        should_abort: Callable[[], bool] | None = None
-        if self._encode_yield_enabled and self.foreground_busy is not None:
-            should_abort = self.foreground_busy
+        should_abort = self.encode_should_abort()
         tensor_blobs: dict[str, dict[str, Any]] = {}
         written_state = {"logical": 0, "physical": 0, "deduped_hits": 0}
         tier = self
@@ -891,7 +898,11 @@ class SessionBankColdTier:
                 else:
                     written_state["deduped_hits"] += 1
 
-        codec = TreeCodec(block_size=self.block_size, should_abort=should_abort)
+        codec = TreeCodec(
+            block_size=self.block_size,
+            should_abort=should_abort,
+            on_unit=self._observe_encode_unit,
+        )
         codec.tensors = _WriteThroughTensors()
         boundaries = tuple(
             (int(r[0]), r[1], r[2] if len(r) > 2 else None)
@@ -2315,7 +2326,11 @@ class SessionBankColdTier:
         boundary_loader = (
             None
             if include_gdn_boundaries or partial_restore
-            else (lambda: decode_gdn_boundaries(payload_spec, read_tensor))
+            else (
+                lambda should_abort=None: decode_gdn_boundaries(
+                    payload_spec, read_tensor, should_abort=should_abort
+                )
+            )
         )
         return ColdRestoreRecord(
             entry_id=str(metadata["entry_id"]),
@@ -2790,6 +2805,43 @@ class SessionBankColdTier:
     def _inc(self, key: str, amount: int = 1) -> None:
         with self._stats_lock:
             self._stats[key] = int(self._stats.get(key, 0) or 0) + int(amount)
+
+    def encode_should_abort(self) -> Callable[[], bool] | None:
+        """The foreground signal the owner-thread persistence work polls, or
+        None when the yield contract is off or unwired. One accessor so the
+        encode, the streaming spill and the boundary hydration that runs
+        before them cannot drift apart."""
+        if self._encode_yield_enabled and self.foreground_busy is not None:
+            return self.foreground_busy
+        return None
+
+    def note_encode_yield(self) -> None:
+        """Count a yield taken outside the tier (boundary hydration)."""
+        self._inc("encode_yields_foreground")
+
+    def _observe_encode_unit(self, kind: str, seconds: float, nbytes: int) -> None:
+        """TreeCodec.on_unit sink. A unit is one eval plus one host copy of
+        at most 32 MiB; anything over ENCODE_SLOW_UNIT_S is logged with what
+        it was, because that is the wait a queued request paid."""
+        slow = float(seconds) >= ENCODE_SLOW_UNIT_S
+        with self._stats_lock:
+            self._stats["encode_units"] = int(self._stats.get("encode_units", 0) or 0) + 1
+            if slow:
+                self._stats["encode_slow_units"] = (
+                    int(self._stats.get("encode_slow_units", 0) or 0) + 1
+                )
+            if float(seconds) > float(self._stats.get("encode_longest_unit_s", 0.0) or 0.0):
+                self._stats["encode_longest_unit_s"] = round(float(seconds), 4)
+                self._stats["encode_longest_unit"] = f"{kind}:{int(nbytes)}B"
+        if slow:
+            logger.warning(
+                "SessionBank SSD encode unit took %.2f s (%s, %d bytes); a unit "
+                "is bounded in size, so this is the machine (memory pressure, "
+                "swap, disk) and not the amount of work",
+                float(seconds),
+                kind,
+                int(nbytes),
+            )
 
     def _set_last_miss(self, reason: str) -> None:
         with self._stats_lock:

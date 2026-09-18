@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -79,6 +80,15 @@ class ColdEncodeInterrupted(RuntimeError):
     """
 
 
+# One unit of owner-thread work between two abort checks: one eval plus one
+# host copy of at most this many bytes. The encode runs on the single
+# model-owner thread, so a request that arrives mid-encode waits for the unit
+# in flight and no longer for the tensor in flight (issue #505: the check sat
+# before an eval and a copy whose size nothing bounded). 32 MiB is a few
+# milliseconds of copy on any Apple Silicon Mac.
+DEFAULT_ENCODE_UNIT_BYTES = 32 * 1024 * 1024
+
+
 class TreeCodec:
     """Flatten JSON-safe trees plus MLX arrays into raw tensor blobs."""
 
@@ -87,11 +97,41 @@ class TreeCodec:
         *,
         block_size: int = 256,
         should_abort: Callable[[], bool] | None = None,
+        unit_bytes: int | None = None,
+        on_unit: Callable[[str, float, int], None] | None = None,
     ) -> None:
         self._next_tensor_id = 0
         self.tensors: dict[str, bytes] = {}
         self.block_size = max(1, int(block_size))
         self.should_abort = should_abort
+        self.unit_bytes = max(
+            1, int(DEFAULT_ENCODE_UNIT_BYTES if unit_bytes is None else unit_bytes)
+        )
+        # on_unit(kind, seconds, nbytes) after every unit, so the tier can
+        # report the longest one. A stall is then named by its own counters
+        # instead of being inferred from a watchdog line.
+        self.on_unit = on_unit
+
+    def _materialize(self, kind: str, array: Any) -> bytes:
+        """One bounded unit: evaluate ``array``, copy it to host bytes, report
+        the wall time, then look for a waiting request.
+
+        The check AFTER the unit is what bounds the wait: the caller's check
+        before the next unit only runs once the caller gets there, and the
+        last unit of a tensor is followed by hashing, a blob write or the
+        next tensor's graph build.
+        """
+        started = time.perf_counter()
+        mx.eval(array)
+        raw = bytes(memoryview(array))
+        observer = self.on_unit
+        if observer is not None:
+            try:
+                observer(kind, time.perf_counter() - started, len(raw))
+            except Exception:
+                pass
+        self._check_abort()
+        return raw
 
     def _check_abort(self) -> None:
         check = self.should_abort
@@ -136,14 +176,17 @@ class TreeCodec:
 
     def _encode_tensor(self, value: Any) -> dict[str, Any]:
         self._check_abort()
-        mx.eval(value)
+        # dtype and shape are graph metadata: reading them evaluates nothing.
+        # The whole-tensor mx.eval that used to sit here was the unbounded
+        # unit of issue #505; every eval now happens inside _materialize on a
+        # slice of bounded size.
         dtype = _dtype_name(value.dtype)
         shape = [int(dim) for dim in value.shape]
         if len(shape) >= 3 and shape[2] >= self.block_size * 2:
             return self._encode_tensor_blocks(value, dtype=dtype, shape=shape)
         name = f"tensor_{self._next_tensor_id:08d}"
         self._next_tensor_id += 1
-        raw = bytes(memoryview(value))
+        raw = self._tensor_bytes(value, shape)
         self.tensors[name] = raw
         return {
             "kind": "tensor",
@@ -152,6 +195,29 @@ class TreeCodec:
             "shape": [int(dim) for dim in value.shape],
             "nbytes": len(raw),
         }
+
+    def _tensor_bytes(self, value: Any, shape: list[int]) -> bytes:
+        """Row-major bytes of a tensor stored as ONE blob, captured in units
+        of at most ``unit_bytes``.
+
+        The on-disk format is unchanged (a single ``tensor`` blob, the same
+        bytes and therefore the same content hash as before): only the work
+        is sliced. The slices run along the first axis longer than one,
+        because with every earlier axis of length one the slices' bytes
+        concatenate to exactly the whole tensor's row-major bytes.
+        """
+        nbytes = int(getattr(value, "nbytes", 0) or 0)
+        axis = next((i for i, dim in enumerate(shape) if dim > 1), None)
+        if axis is None or nbytes <= self.unit_bytes:
+            return self._materialize("tensor", value)
+        row_bytes = max(1, nbytes // shape[axis])
+        rows = max(1, self.unit_bytes // row_bytes)
+        out = bytearray()
+        for start in range(0, shape[axis], rows):
+            slices = [slice(None)] * len(shape)
+            slices[axis] = slice(start, min(shape[axis], start + rows))
+            out += self._materialize("tensor_slice", value[tuple(slices)])
+        return bytes(out)
 
     def _encode_tensor_blocks(
         self,
@@ -164,13 +230,13 @@ class TreeCodec:
         blocks: list[dict[str, Any]] = []
         total = 0
         for start in range(0, shape[axis], self.block_size):
-            self._check_abort()
+            # No check here: _encode_tensor checked before the first block and
+            # _materialize checks after every block.
             end = min(shape[axis], start + self.block_size)
             slices = [slice(None)] * len(shape)
             slices[axis] = slice(start, end)
             chunk = value[tuple(slices)]
-            mx.eval(chunk)
-            raw = bytes(memoryview(chunk))
+            raw = self._materialize("block", chunk)
             name = f"tensor_{self._next_tensor_id:08d}"
             self._next_tensor_id += 1
             self.tensors[name] = raw
@@ -282,8 +348,15 @@ def encode_payload(
     has_recurrent: bool | None = None,
     block_size: int = 256,
     should_abort: Callable[[], bool] | None = None,
+    unit_bytes: int | None = None,
+    on_unit: Callable[[str, float, int], None] | None = None,
 ) -> EncodedPayload:
-    codec = TreeCodec(block_size=block_size, should_abort=should_abort)
+    codec = TreeCodec(
+        block_size=block_size,
+        should_abort=should_abort,
+        unit_bytes=unit_bytes,
+        on_unit=on_unit,
+    )
     spec = build_payload_spec(
         codec,
         cache_snapshot=cache_snapshot,
@@ -464,15 +537,49 @@ def _eval_decoded_arrays(decoded: DecodedPayload) -> None:
 
 
 def decode_gdn_boundaries(
-    spec: dict[str, Any], read_tensor: Callable[[str], bytes]
+    spec: dict[str, Any],
+    read_tensor: Callable[[str], bytes],
+    *,
+    should_abort: Callable[[], bool] | None = None,
 ) -> tuple:
     """Decode only the interior recurrent boundaries from a payload spec.
 
     Used lazily by SSD-restored entries: exact restores skip the MB-scale
     boundary payloads entirely, and partial restores load them on demand
-    through this helper (batched single eval)."""
-    boundaries = tuple(
-        (
+    through this helper.
+
+    One record is read and evaluated at a time (a record is ~90 MB on the
+    27B and an entry keeps up to eight). With ``should_abort`` the decode
+    raises ColdEncodeInterrupted between records: the idle-lane persistence
+    job hydrates these on the model-owner thread before it encodes, and that
+    hydration used to be one unchecked read-and-eval of every record while a
+    request waited (issue #505). A restore passes nothing and is never
+    interrupted.
+    """
+
+    def collect(value: Any, arrays: list[Any]) -> None:
+        if isinstance(value, mx.array):
+            arrays.append(value)
+        elif isinstance(value, CacheSnapshot):
+            collect(value.states, arrays)
+            collect(value.meta_states, arrays)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item, arrays)
+
+    def interrupted() -> bool:
+        if should_abort is None:
+            return False
+        try:
+            return bool(should_abort())
+        except Exception:
+            return False
+
+    boundaries = []
+    for record in spec.get("gdn_boundaries") or []:
+        if interrupted():
+            raise ColdEncodeInterrupted()
+        decoded = (
             int(record["tokens"]),
             CacheSnapshot(
                 states=tuple(decode_tree(record["states"], read_tensor)),
@@ -480,24 +587,12 @@ def decode_gdn_boundaries(
             ),
             decode_tree(record.get("hidden_last") or {"kind": "none"}, read_tensor),
         )
-        for record in (spec.get("gdn_boundaries") or [])
-    )
-    arrays: list[Any] = []
-
-    def collect(value: Any) -> None:
-        if isinstance(value, mx.array):
-            arrays.append(value)
-        elif isinstance(value, CacheSnapshot):
-            collect(value.states)
-            collect(value.meta_states)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                collect(item)
-
-    collect(boundaries)
-    if arrays:
-        mx.eval(*arrays)
-    return boundaries
+        arrays: list[Any] = []
+        collect(decoded, arrays)
+        if arrays:
+            mx.eval(*arrays)
+        boundaries.append(decoded)
+    return tuple(boundaries)
 
 
 def _gdn_boundary_spec_at_or_below(
