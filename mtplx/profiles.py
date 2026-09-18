@@ -424,6 +424,9 @@ MODEL_RUNTIME_ENV_OVERRIDE_KEYS = frozenset(
         "MTPLX_QWEN4_OPDIET",
         "MTPLX_QWEN4_OPDIET_ITEMS",
         "MTPLX_QWEN4_DRAFT_K20_PRESCATTER",
+        # 2026-09-18: sampled draft chain, one device sync per round, stamped
+        # with the FR-Spec draft head (mtplx/qwen4_draft_device_chain.py).
+        "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN",
         "MTPLX_QWEN4_BLOCK_VERIFY",
         "MTPLX_QWEN4_VERIFY_GLUE",
         "MTPLX_QWEN4_VERIFY_GLUE_ITEMS",

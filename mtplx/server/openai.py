@@ -1036,6 +1036,16 @@ def _server_runtime_env_overrides(
                     and os.environ.get("MTPLX_QWEN4_DRAFT_K20_PRESCATTER") is None
                 ):
                     overrides.setdefault("MTPLX_QWEN4_DRAFT_K20_PRESCATTER", "1")
+                # Sampled draft chain (2026-09-18): every sampled draft depth
+                # in one device sync, each pick re-derived and confirmed on
+                # the host, token-identical to the serial compact-row reader
+                # for every seed (mtplx/qwen4_draft_device_chain.py). It reads
+                # the FR-Spec head's compact row, so it follows that head.
+                if (
+                    _qwen4_port_opt_in(overrides, "MTPLX_FRSPEC_DRAFT")
+                    and os.environ.get("MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN") is None
+                ):
+                    overrides.setdefault("MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN", "1")
         if _qwen4_port_opt_in(overrides, "MTPLX_QWEN4_BATCHED_TARGET_DISTRIBUTIONS"):
             # Fixed-M4 target distributions (PR #391 step 1 by davidtai, his
             # 2026-08-29 production A/B/A/B): batch all four temperature-1 /
@@ -1122,6 +1132,7 @@ _QWEN4_PORT_KEYS = (
     "MTPLX_QWEN4_ROUTE_KERNEL",
     "MTPLX_QWEN4_OPDIET",
     "MTPLX_QWEN4_DRAFT_K20_PRESCATTER",
+    "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN",
     "MTPLX_QWEN4_BLOCK_VERIFY",
     "MTPLX_QWEN4_VERIFY_GLUE",
     "MTPLX_QWEN4_VERIFY_GLUE_ITEMS",

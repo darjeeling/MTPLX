@@ -405,6 +405,7 @@ def test_flash_next_speed_lane_is_default_on_and_pack_gated(
         "MTPLX_QWEN4_ROUTE_KERNEL",
         "MTPLX_QWEN4_VERIFY_GLUE",
         "MTPLX_QWEN4_DRAFT_K20_PRESCATTER",
+        "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN",
     ):
         assert overrides.get(key) == "1", key
     assert overrides["MTPLX_QWEN4_VERIFY_GLUE_ITEMS"] == "qsa_rope,qsa_rope_idx"
@@ -477,7 +478,14 @@ def test_flash_next_speed_lane_is_default_on_and_pack_gated(
     assert "MTPLX_FRSPEC_DRAFT" not in overrides
     assert "MTPLX_FRSPEC_VOCAB" not in overrides
     assert "MTPLX_QWEN4_DRAFT_K20_PRESCATTER" not in overrides
+    # The sampled draft chain reads the FR-Spec head's compact row.
+    assert "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN" not in overrides
     monkeypatch.delenv("MTPLX_FRSPEC_DRAFT")
+    # Its own kill switch wins over the stamp.
+    monkeypatch.setenv("MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN", "0")
+    overrides = _server_runtime_env_overrides(args, {})
+    assert "MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN" not in overrides
+    monkeypatch.delenv("MTPLX_QWEN4_SAMPLED_DRAFT_CHAIN")
     # The stage-3 children follow their parent's kill switch, and the routing
     # head follows the paired GLU; the verify glue follows the fixed verifier.
     monkeypatch.setenv("MTPLX_QWEN4_M4_STAGE3", "0")
