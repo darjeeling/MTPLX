@@ -17688,7 +17688,7 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
             getattr(args, "ssd_session_cache_dir", "~/.mtplx/session-bank")
         ),
         "ssd_session_cache_max_size": str(
-            getattr(args, "ssd_session_cache_max_size", "100GB")
+            getattr(args, "ssd_session_cache_max_size", "auto")
         ),
         "ssd_session_cache_min_prefix_tokens": int(
             getattr(args, "ssd_session_cache_min_prefix_tokens", 512) or 512
@@ -37144,8 +37144,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ssd-session-cache-max-size",
-        default=os.environ.get("MTPLX_SSD_SESSION_CACHE_MAX_SIZE", "100GB"),
-        help="Soft maximum SSD SessionBank cache size.",
+        # "auto" is the RAM-tiered cap (cold_tier.default_cold_tier_max_bytes:
+        # 16 GB of RAM or less gives 16 GB, up to 32 gives 24 GB, up to 64
+        # gives 32 GB, above that 100 GB). The old literal "100GB" default
+        # made that tiering unreachable from bare `mtplx serve`, so a 16 GB
+        # Mac got a 100 GB store while the app (which passes "auto") did not.
+        default=os.environ.get("MTPLX_SSD_SESSION_CACHE_MAX_SIZE", "auto"),
+        help=(
+            "Soft maximum SSD SessionBank cache size, for example 32GB. "
+            "Default auto: scaled to this Mac's RAM (16 GB to 100 GB)."
+        ),
     )
     parser.add_argument(
         "--ssd-session-cache-min-prefix-tokens",

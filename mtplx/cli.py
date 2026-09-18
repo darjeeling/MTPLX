@@ -828,8 +828,11 @@ def _add_ssd_session_cache_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ssd-session-cache-max-size",
-        default="100GB",
-        help="Soft maximum SSD SessionBank cache size.",
+        default="auto",
+        help=(
+            "Soft maximum SSD SessionBank cache size, for example 32GB. "
+            "Default auto: scaled to this Mac's RAM (16 GB to 100 GB)."
+        ),
     )
     parser.add_argument(
         "--ssd-session-cache-min-prefix-tokens",

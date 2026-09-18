@@ -63,3 +63,52 @@ def test_hourly_write_budget_default_is_128gib(monkeypatch, tmp_path):
     finally:
         tier.close()
     assert os.environ.get("MTPLX_SSD_WRITE_BUDGET_PER_HOUR") is None
+
+
+# --- PX.3(d), 2026-09-18: bare `mtplx serve` reaches the RAM-tiered cap -------
+#
+# The serve parsers defaulted the cap to the literal "100GB", so the tiering
+# above was unreachable unless a launcher passed "auto" (the app does): a
+# 16 GB Mac serving from the terminal got a 100 GB session store.
+
+
+def _serve_namespace(monkeypatch, tmp_path, argv):
+    from mtplx.server import openai
+
+    monkeypatch.delenv("MTPLX_SSD_SESSION_CACHE_MAX_SIZE", raising=False)
+    monkeypatch.delenv("MTPLX_SSD_SESSION_CACHE", raising=False)
+    return openai.parse_args(["--model", str(tmp_path / "model"), *argv])
+
+
+def test_serve_parser_default_cap_is_auto(monkeypatch, tmp_path):
+    args = _serve_namespace(monkeypatch, tmp_path, [])
+    assert args.ssd_session_cache_max_size == "auto"
+
+
+def test_public_cli_serve_default_cap_is_auto():
+    from mtplx.cli import build_parser
+
+    args = build_parser().parse_args(["serve", "--model", "models/example"])
+    assert args.ssd_session_cache_max_size == "auto"
+
+
+def test_auto_cap_resolves_through_the_ram_tiers(monkeypatch):
+    for ram_gib, expected in ((16, 16), (32, 24), (64, 32), (128, 100)):
+        _pin(monkeypatch, ram_gib=ram_gib, free_gib=100)
+        assert (
+            cold_tier.parse_size_bytes("auto", cold_tier.default_cold_tier_max_bytes())
+            == expected * GIB
+        )
+
+
+def test_an_explicit_cap_still_wins(monkeypatch, tmp_path):
+    args = _serve_namespace(
+        monkeypatch, tmp_path, ["--ssd-session-cache-max-size", "48GB"]
+    )
+    _pin(monkeypatch, ram_gib=16, free_gib=900)
+    assert (
+        cold_tier.parse_size_bytes(
+            args.ssd_session_cache_max_size, cold_tier.default_cold_tier_max_bytes()
+        )
+        == 48 * GIB
+    )
