@@ -22,17 +22,35 @@ request body:
              ``_maybe_canonicalize_committed_reasoning`` (the committed-think
              substitution and the committed-id splice), on the tokenizer the
              runtime loads (``mtplx.runtime._load_tokenizer_resilient``).
+             tests/test_agent_prompt_fidelity.py proves this chain returns the
+             ids the endpoint hands to generation.
+
+Two walks over each synthetic session:
+
+  stateless  every turn boundary rendered on its own (a cold request). Also
+             checks the cache side of the same seam: the prefix the postcommit
+             banks after an assistant turn must be a prefix of the next
+             request (``postcommit_prefix_ok``).
+  session    the same walk with a committed stream between turns: turn k's
+             served prompt plus the ids the model "generated" for the next
+             assistant message (canonical; with BPE seams split or joined the
+             way the tokenizer never produces; with the end-of-turn token
+             kept; with a trailing newline the response stripped). Reports
+             what the next prompt's ids are, whether they extend the committed
+             stream, and how they differ from the reference.
 
 Every difference is decoded and attributed to a documented mechanism
 (file:line in ``MECHANISMS``) or reported as UNEXPLAINED. Output: one JSON
-line per (session, turn) and a summary table.
+line per (session, turn), a summary table on stderr, exit code 1 when anything
+is unexplained.
 
 All conversations are synthetic and written in this file. Nothing is read
 from a request log, a session bank or a client's history.
 
 Usage:
   .venv/bin/python scripts/audit_agent_prompt_fidelity.py \
-      [--pack DIR ...] [--out results.jsonl] [--summary-json summary.json]
+      [--pack DIR ...] [--scenario stateless|session] [--only-session NAME] \
+      [--out results.jsonl] [--summary-json summary.json]
 """
 
 from __future__ import annotations
@@ -70,82 +88,66 @@ THINK_SEAM = "<|im_start|>assistant\n<think>\n"
 # ---------------------------------------------------------------------------
 MECHANISMS: dict[str, dict[str, Any]] = {
     "tool_contract_system_injection": {
-        "where": "mtplx/server/openai.py:8124 _with_mtplx_tool_contract, "
-        "text at :7557 _mtplx_tool_contract_text; mode chosen at :21067 "
-        "_tool_prompt_mode_for_request (pi/hermes -> hybrid, opencode -> compact)",
-        "what": "MTPLX appends its tool contract (dated, tool signatures, "
-        "format example) to the first system message in hybrid and compact "
-        "tool-prompt modes.",
+        "where": "mtplx/server/openai.py:8124 _with_mtplx_tool_contract, text at :7557 "
+        "_mtplx_tool_contract_text; mode chosen at :21107 _tool_prompt_mode_for_request "
+        "(pi/hermes -> hybrid, opencode -> compact, no client header -> launch mode)",
+        "what": "MTPLX appends its tool contract (dated, one-line tool signatures, format "
+        "example, steering clauses) to the first system message in the hybrid and compact "
+        "tool-prompt modes; it creates the system message when the client sent none.",
     },
     "compact_mode_template_tools_omitted": {
-        "where": "mtplx/server/openai.py:6737 _template_tools_for_prompt_mode, "
-        "mode at :21110 (client opencode -> compact)",
-        "what": "Compact mode passes no tools to the chat template: the "
-        "template's '# Tools' block with the JSON schemas is not rendered; "
-        "the contract's one-line signatures stand in for it.",
+        "where": "mtplx/server/openai.py:6737 _template_tools_for_prompt_mode; mode at :21107 "
+        "(client opencode -> compact)",
+        "what": "Compact mode passes no tools to the chat template: the template's '# Tools' "
+        "block with the JSON schemas and descriptions is not rendered; the contract's one-line "
+        "signatures stand in for it.",
     },
     "tool_schema_key_sort": {
         "where": "mtplx/server/openai.py:8714 _normalize_tool_specs",
-        "what": "Every tool schema is re-serialized with sorted object keys "
-        "so a client's JSON key order cannot change the system prefix. The "
-        "JSON values are equal; the key order the model reads is alphabetical "
-        "instead of the client's (type, function, name, description, "
-        "parameters).",
+        "what": "Every tool schema is re-serialized with sorted object keys so a client's JSON "
+        "key order cannot change the system prefix. The JSON values are equal; the key order "
+        "the model reads is alphabetical instead of the client's (type, function, name, "
+        "description, parameters).",
     },
     "generation_seam_segmentation": {
-        "where": "mtplx/server/openai.py:13305 "
-        "_tool_history_generation_boundaries, :13337 "
-        "_qwen_assistant_generation_boundaries, policy note at :14610",
-        "what": "History is encoded in segments split right after every "
-        "'<|im_start|>assistant\\n<think>\\n' so the ids match what the model "
-        "saw at generation time (prompt ended there). Same text; a token that "
-        "a one-pass encode merges across the seam (an empty think block: "
-        "'\\n\\n') stays split ('\\n','\\n').",
+        "where": "mtplx/server/openai.py:13304 _qwen_assistant_generation_boundaries, :13331 "
+        "_assistant_generation_boundaries, used at :14226 "
+        "_encode_generation_compatible_tool_history and in :14530 _encode_messages_uncached",
+        "what": "Thinking on: history is encoded in segments cut right after every "
+        "'<|im_start|>assistant\\n<think>\\n', so the ids are the ones the model saw when it "
+        "generated that turn (its prompt ended there). Same text; the only token a one-pass "
+        "encode merges across the cut is the blank line of an EMPTY think block ('\\n\\n' "
+        "stays '\\n','\\n').",
     },
     "opencode_tool_call_preamble_strip": {
-        "where": "mtplx/server/openai.py:12785 _canonicalize_agent_transcript "
-        "(strip_tool_call_preamble_text, set at request_policy.py:599 for "
-        "OpenCode)",
-        "what": "For OpenCode the visible text of an assistant turn that "
-        "also made tool calls is removed from history.",
+        "where": "mtplx/server/openai.py:12806 in _canonicalize_agent_transcript "
+        "(strip_tool_call_preamble_text, set for OpenCode at mtplx/server/request_policy.py:592)",
+        "what": "For OpenCode the visible text of an assistant turn that also made tool calls "
+        "is removed from history. With a live session and thinking on, the committed turn "
+        "body puts it back (:13757 _substitute_committed_reasoning_messages).",
     },
     "thinking_off_history_reasoning_dropped": {
-        "where": "mtplx/server/openai.py:14522 include_reasoning "
-        "(_encode_messages_uncached) and :13093 _message_to_template_dict",
-        "what": "With thinking off, reasoning_content echoed on history "
-        "turns is not given to the template: those turns render the empty "
-        "think scaffold.",
+        "where": "mtplx/server/openai.py:14562 include_reasoning (_encode_messages_uncached) "
+        "and :13073 _message_to_template_dict",
+        "what": "With thinking off, reasoning_content echoed on history turns is not given to "
+        "the template: those turns render the empty think scaffold.",
     },
     "consecutive_role_merge": {
-        "where": "mtplx/server/omlx_bridge/adapter.py:134 "
-        "_merge_consecutive_roles",
-        "what": "Two consecutive user (or plain assistant) messages are "
-        "joined with a blank line into one turn.",
-    },
-    "inline_think_content_kept_as_single_source": {
-        "where": "mtplx/server/openai.py:13093 _message_to_template_dict",
-        "what": "Assistant content that already starts with an inline "
-        "<think> block keeps it as the only reasoning source.",
+        "where": "mtplx/server/omlx_bridge/adapter.py:134 _merge_consecutive_roles",
+        "what": "Two consecutive user (or plain assistant) messages are joined with a blank "
+        "line into one turn.",
     },
     "committed_id_splice": {
-        "where": "mtplx/server/openai.py:13407 _splice_committed_token_ids, "
-        "called from :13892 _maybe_canonicalize_committed_reasoning",
-        "what": "Where the re-rendered history and the session's committed "
-        "stream decode to the same text, the ids the model itself generated "
-        "are served (same text, different token boundaries).",
+        "where": "mtplx/server/openai.py:13408 _splice_committed_token_ids, called from :13893 "
+        "_maybe_canonicalize_committed_reasoning",
+        "what": "Where the re-rendered history and the session's committed stream decode to "
+        "the same text, the ids the model itself generated are served (same text, different "
+        "token boundaries).",
     },
     "committed_whitespace_restore": {
-        "where": "mtplx/server/openai.py:13464 (whitespace branch of "
-        "_splice_committed_token_ids)",
-        "what": "Whitespace tokens the model generated and the response "
-        "stripped are put back from the committed stream.",
-    },
-    "committed_turn_body_substitution": {
-        "where": "mtplx/server/openai.py:13756 "
-        "_substitute_committed_reasoning_messages, fields at :13353",
-        "what": "A history turn the committed stream covers is re-rendered "
-        "from the committed bytes (think interior and tool-call body as "
-        "generated) instead of the client's echo.",
+        "where": "mtplx/server/openai.py:13465 (whitespace branch of _splice_committed_token_ids)",
+        "what": "Whitespace tokens the model generated and the response stripped are put back "
+        "from the committed stream.",
     },
 }
 
@@ -863,7 +865,7 @@ class MtplxPath:
             has_foreground=lambda: False,
             sessions=_AuditSessions(),
         )
-        # What ServerState does with the tokenizer at start-up (openai.py:3375).
+        # What ServerState does with the tokenizer at start-up (openai.py:3375-3400).
         template_report = oa._apply_chat_template_profile(tokenizer, args)
         state.template_hash = oa._template_hash(tokenizer)
         state.reasoning_history_scoped_capable = oa._template_supports_scoped_reasoning(tokenizer)
@@ -877,8 +879,8 @@ class MtplxPath:
                headers: dict[str, str] | None = None) -> dict[str, Any]:
         """The prompt ids for one request, built by the calls ``chat_completions``
         makes and in its order (mtplx/server/openai.py: resolve_request_policy at
-        :31440, _vision_extract_and_flatten :31549, _encode_messages :31570,
-        _maybe_canonicalize_committed_reasoning :31663)."""
+        :31480, _vision_extract_and_flatten :31589, _encode_messages :31610,
+        _maybe_canonicalize_committed_reasoning :31703)."""
         oa = self.oa
         state = self.state
         state.args.enable_thinking = bool(thinking)
@@ -1225,10 +1227,15 @@ def compare(ref: Reference, ref_ids: Sequence[int], mtplx_ids: Sequence[int], *,
     # and the generation prompt) equal to the reference, id for id.
     record["body_identical"] = bool(findings) and all(f.role == "system" for f in findings)
     counts: dict[str, int] = {}
+    examples: dict[str, str] = {}
     for finding in findings:
         key = finding.mechanism or "UNEXPLAINED"
         counts[key] = counts.get(key, 0) + 1
-    record["mechanisms"] = [{"mechanism": k, "count": v, "where": MECHANISMS.get(k, {}).get("where")} for k, v in sorted(counts.items())]
+        examples.setdefault(key, f"turn block {finding.block} ({finding.role}): {finding.detail}")
+    record["mechanisms"] = [
+        {"mechanism": k, "count": v, "where": MECHANISMS.get(k, {}).get("where"), "example": examples[k]}
+        for k, v in sorted(counts.items())
+    ]
     unexplained: dict[tuple[str, str, str], dict[str, Any]] = {}
     for finding in findings:
         if finding.mechanism is None:
