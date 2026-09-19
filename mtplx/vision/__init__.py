@@ -43,9 +43,11 @@ class VisionSpec:
     temporal_patch_size: int
     out_hidden_size: int
     # M-RoPE contract from text_config.rope_parameters, for families whose
-    # attention ropes image tokens at (t, h, w) grid positions (qwen4_exp).
-    # None when the family doesn't declare sections; serving then keeps plain
-    # sequential rope, which is what pre-mrope families expect.
+    # attention ropes image tokens at (t, h, w) grid positions: qwen4_exp in
+    # its own attention, the dense qwen3_5 packs through mtplx.dense_mrope
+    # (which reads the section layout from the config at load). None when the
+    # family doesn't declare sections; serving then keeps plain sequential
+    # rope, which is what pre-mrope families expect.
     model_type: str = ""
     mrope_section: tuple[int, ...] | None = None
     mrope_interleaved: bool = False
