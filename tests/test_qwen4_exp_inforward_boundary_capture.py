@@ -76,11 +76,17 @@ def _ids(tokens: int, seed: int = 3) -> mx.array:
     return mx.random.randint(0, 128, (1, tokens))
 
 
+def _is_recurrent(entry) -> bool:
+    # By ancestry, not by name: in a full run the runtime's patch has swapped
+    # the stock class for its FixedArraysCache subclass.
+    return any(base.__name__ == "ArraysCache" for base in type(entry).__mro__)
+
+
 def _recurrent_states(cache):
     return [
         [np.array(leaf) for leaf in entry.state]
         for entry in cache
-        if type(entry).__name__ == "ArraysCache"
+        if _is_recurrent(entry)
     ]
 
 
@@ -138,11 +144,11 @@ def test_a_capture_equals_the_cache_of_a_forward_that_ends_there(tm, edge):
     captured = take_boundary_captures(cache)[edge]
     assert len(captured) == len(cache)
     layout = [
-        state for entry, state in zip(cache, captured) if type(entry).__name__ == "ArraysCache"
+        state for entry, state in zip(cache, captured) if _is_recurrent(entry)
     ]
     # Entries that can be trimmed (the attention caches) carry no capture.
     for entry, state in zip(cache, captured):
-        assert (state is None) == (type(entry).__name__ != "ArraysCache")
+        assert (state is None) == (not _is_recurrent(entry))
     _same(_recurrent_states(reference), [[np.array(leaf) for leaf in state] for state in layout], exact=False)
 
 
