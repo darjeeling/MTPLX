@@ -44,6 +44,7 @@ import re
 import struct
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -527,12 +528,66 @@ def _hyper_residual_write(
         return hyper + (block_out[..., None, :] * inject[..., :, None]).reshape(
             *hyper.shape
         )
+    if _hc_write_compile_applies(hyper):
+        return _hc_compiled_write(int(inject.shape[-1]), int(block_out.shape[-1]))(
+            hyper, block_out, inject
+        )
     grouped = hyper.reshape(
         *hyper.shape[:-1], inject.shape[-1], block_out.shape[-1]
     )
     return (
         grouped + block_out[..., None, :] * inject[..., :, None]
     ).reshape(*hyper.shape)
+
+
+#: Forwards at least this wide take the compiled write. Decode and verify
+#: widths (1 to 8 rows) keep their own lanes: the compiled verifier already
+#: fuses these ops itself, which is what the view spelling above is for.
+_HC_COMPILE_MIN_ROWS = 32
+
+
+def _hc_write_compile_applies(hyper: mx.array) -> bool:
+    raw = (os.environ.get("MTPLX_QWEN4_HC_PREFILL_COMPILE") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Half-width dtypes only. There each op's result is rounded to 16 bits
+    # before the next op reads it, fused or not, so the fused kernel cannot
+    # differ from the two eager ones. In float32 nothing sits between the ops
+    # and a fused kernel may contract them, so the float32 path (the CPU-exact
+    # bisection path) stays eager.
+    if hyper.dtype not in (mx.bfloat16, mx.float16):
+        return False
+    rows = 1
+    for dim in hyper.shape[:-1]:
+        rows *= int(dim)
+    return rows >= _HC_COMPILE_MIN_ROWS
+
+
+@lru_cache(maxsize=None)
+def _hc_compiled_write(hc_count: int, hidden_size: int):
+    """The hyper-connection write as one fused kernel at prefill width.
+
+    In an eager prefill forward the multiply and the add are two kernels over
+    a [rows, hc * hidden] stream, 96 times per token. Fused: 0.14 microseconds
+    per token per write against 0.22 at 4,096 rows, 0.17 against 0.23 at 2,048
+    (kernel alone, M5 Max, 2026-09-18), about 7 microseconds of a 545
+    microsecond token. Every output bit is unchanged (the test compares bits;
+    182 million values compared at the real geometry). The trace is shapeless
+    (unflatten / flatten are the same views as the reshapes above), so one
+    trace serves every layer and every forward width.
+
+    The READ was tried the same way and gains nothing: it is bound by its two
+    GEMMs and its two reductions, not by its elementwise ops (0.76 compiled
+    against 0.75 eager), so it stays eager.
+    """
+
+    def write(hyper, block_out, inject):
+        grouped = mx.unflatten(hyper, -1, (hc_count, hidden_size))
+        return mx.flatten(
+            grouped + block_out[..., None, :] * inject[..., :, None], -2, -1
+        )
+
+    return mx.compile(write, shapeless=True)
 
 
 class GroupedRMSNorm(nn.Module):
