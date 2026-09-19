@@ -13200,7 +13200,6 @@ def _encode_plain_text(tokenizer: Any, text: str) -> list[int]:
 # canonicalization test. Deriving them from the live template is the larger
 # follow-up; until then this note is the true statement of scope.
 _QWEN_ASSISTANT_THINK_PROMPT = "<|im_start|>assistant\n<think>\n"
-_QWEN_IM_END = "<|im_end|>"
 _DISABLED_THINK_GENERATION_PROMPT_RE = re.compile(
     r"(?is)(<\|im_start\|>assistant[^\n\r]*[\r\n]+)<think>\s*$"
 )
@@ -13302,39 +13301,18 @@ def _close_disabled_think_generation_prompt(
     return closed
 
 
-def _tool_history_generation_boundaries(rendered: str) -> list[int]:
-    """Find assistant tool-call history boundaries that must not be retokenized.
-
-    Qwen's generation prompt ends with ``<think>\n``. On the next tool-result
-    turn the structured assistant ``tool_calls`` history renders as the same
-    visible text, but tokenizing the whole transcript can merge the newline
-    after ``<think>`` with the generated ``</think>``/tool XML that follows.
-    That one-token boundary drift is enough to make SessionBank miss and force
-    OpenCode/Pi-style agents to cold-prefill the full tool schema again.
-
-    Splitting exactly after the assistant generation prompt preserves the
-    generation-time token boundary while keeping the rendered prompt text
-    unchanged.
-    """
-
-    boundaries: list[int] = []
-    marker = _QWEN_ASSISTANT_THINK_PROMPT
-    marker_len = len(marker)
-    search_from = 0
-    while True:
-        marker_at = rendered.find(marker, search_from)
-        if marker_at < 0:
-            break
-        boundary = marker_at + marker_len
-        block_end = rendered.find(_QWEN_IM_END, boundary)
-        search_end = block_end if block_end >= 0 else len(rendered)
-        if rendered.find("<tool_call>", boundary, search_end) >= 0:
-            boundaries.append(boundary)
-        search_from = boundary
-    return boundaries
-
-
 def _qwen_assistant_generation_boundaries(rendered: str) -> list[int]:
+    """Where a THINKING assistant generation began: right after ``<think>\n``.
+
+    Qwen's thinking generation prompt ends with ``<think>\n``. On the next
+    turn the same assistant turn comes back as history text, and tokenizing
+    the whole transcript in one pass can merge that newline with what the
+    model generated after it (an empty think block: ``\n`` + ``\n</think>``
+    becomes one ``\n\n`` token). That one-token drift is enough to make
+    SessionBank miss and force OpenCode/Pi-style agents to cold-prefill the
+    full tool schema again. Cutting exactly after the generation prompt keeps
+    the generation-time token boundary while the rendered text is unchanged.
+    """
     boundaries: list[int] = []
     marker = _QWEN_ASSISTANT_THINK_PROMPT
     marker_len = len(marker)
@@ -13348,6 +13326,29 @@ def _qwen_assistant_generation_boundaries(rendered: str) -> list[int]:
             boundaries.append(boundary)
         search_from = boundary
     return boundaries
+
+
+def _assistant_generation_boundaries(
+    rendered: str, *, enable_thinking: bool
+) -> list[int]:
+    """Char positions where an assistant generation began, for the mode the
+    request runs in. The segmented encode cuts there and nowhere else.
+
+    Thinking on: after ``<think>\n`` (see above). Thinking off: the prompt
+    carries the whole closed scaffold ``<think>\n\n</think>\n\n`` and the
+    model starts after it, so no generation ever began inside the scaffold.
+    Cutting after ``<think>\n`` there (as the tool-history encode did for
+    every request after a session's first tool call) turned the scaffold's
+    ``\n\n`` into ``\n``, ``\n`` in every history turn and in the
+    generation prompt itself: ids the chat template never produces, not the
+    ids the session's first prompt had (so that prompt stopped being a prefix
+    of the next one), and not the ids the postcommit predicts for a
+    plain-answer turn (found by scripts/audit_agent_prompt_fidelity.py,
+    2026-09-18).
+    """
+    if enable_thinking:
+        return _qwen_assistant_generation_boundaries(rendered)
+    return _qwen_closed_think_generation_boundaries(rendered)
 
 
 _COMMITTED_REASONING_FIELD = "_mtplx_committed_reasoning"
@@ -14118,14 +14119,15 @@ def _committed_token_splice_enabled() -> bool:
     return raw not in {"0", "false", "off", "no"}
 
 
-def _qwen_plain_assistant_content_boundaries(rendered: str) -> list[int]:
-    """Find Qwen no-thinking plain-text assistant generation boundaries.
+def _qwen_closed_think_generation_boundaries(rendered: str) -> list[int]:
+    """Where a NO-THINKING assistant generation began: after the closed
+    empty think scaffold.
 
     In no-thinking mode the request prompt already contains the closed empty
-    thought block. Plain assistant text starts after that whole scaffold. If a
-    postcommit snapshot splits after ``<think>\n`` instead, the newline pair is
-    tokenized differently from the next request and SessionBank misses even
-    though the rendered transcript is identical.
+    thought block, and the assistant's text or tool call starts after that
+    whole scaffold. A cut after ``<think>\n`` instead tokenizes the newline
+    pair differently from the prompt the model generated from, and
+    SessionBank misses even though the rendered transcript is identical.
     """
 
     boundaries: list[int] = []
@@ -14137,12 +14139,7 @@ def _qwen_plain_assistant_content_boundaries(rendered: str) -> list[int]:
         if marker_at < 0:
             break
         boundary = marker_at + marker_len
-        block_end = rendered.find(_QWEN_IM_END, boundary)
-        search_end = block_end if block_end >= 0 else len(rendered)
-        if (
-            0 < boundary < len(rendered)
-            and rendered.find("<tool_call>", boundary, search_end) < 0
-        ):
+        if 0 < boundary < len(rendered):
             boundaries.append(boundary)
         search_from = boundary
     return boundaries
@@ -14212,7 +14209,9 @@ def _encode_generation_compatible_tool_history(
     )
     if not rendered:
         return None
-    boundaries = _qwen_assistant_generation_boundaries(rendered)
+    boundaries = _assistant_generation_boundaries(
+        rendered, enable_thinking=enable_thinking
+    )
     if not boundaries:
         return None
     # The registry-backed detector self-guards on tail position, so it runs
@@ -14618,9 +14617,11 @@ def _encode_messages_uncached(
     # every assistant turn and the committed prefix died at the first seam
     # each request (founder-session walls 3913/4041/4444, 2026-08-21).
     # Thinking-off keeps its pinned legacy contract (plain encode — "must
-    # not split inside the empty think scaffold") except on the
-    # canonicalized path, which always segmented. Seam-less renders are
-    # reused below so this branch never adds a second template pass.
+    # not split inside the empty think scaffold"); on the canonicalized path
+    # it is segmented too, at the thinking-off boundaries (after the closed
+    # scaffold, never inside it: _assistant_generation_boundaries). Seam-less
+    # renders are reused below so this branch never adds a second template
+    # pass.
     seam_rendered: str | None = None
     # Generation seams only exist under an assistant HISTORY turn, so
     # first-turn requests never pay the extra render.
@@ -14638,7 +14639,9 @@ def _encode_messages_uncached(
             template_observability=template_observability,
         )
         if seam_rendered:
-            canon_boundaries = _qwen_assistant_generation_boundaries(seam_rendered)
+            canon_boundaries = _assistant_generation_boundaries(
+                seam_rendered, enable_thinking=enable_thinking
+            )
             if canon_boundaries:
                 # Registry-backed and tail-guarded; see
                 # _encode_generation_compatible_tool_history (audit F11 #5).
@@ -15004,17 +15007,13 @@ def _postcommit_next_turn_prefix_ids(
     # template-tools-only gate left this postcommit plain on the compact
     # OpenCode lane, so the banked prefix could never byte-match the next
     # request's encode (founder-session walls, 2026-08-21). Thinking-off
-    # keeps its exact legacy boundaries.
-    template_tools = _template_tools_for_prompt_mode(
-        tools,
-        tool_prompt_mode=tool_prompt_mode,
+    # cuts after the closed scaffold, for tool-call turns as for plain ones:
+    # the request encode does the same (_assistant_generation_boundaries), and
+    # the old cut after '<think>\n' on tool-call turns is exactly what split
+    # the scaffold's blank line in two.
+    boundaries = _assistant_generation_boundaries(
+        prefix_text, enable_thinking=enable_thinking
     )
-    boundaries: list[int] = []
-    if enable_thinking:
-        boundaries = _qwen_assistant_generation_boundaries(prefix_text)
-    elif template_tools:
-        boundaries = _tool_history_generation_boundaries(prefix_text)
-        boundaries.extend(_qwen_plain_assistant_content_boundaries(prefix_text))
     return _encode_rendered_chat_text_segmented(tokenizer, prefix_text, boundaries)
 
 

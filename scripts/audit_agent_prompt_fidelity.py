@@ -50,12 +50,6 @@ from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Iterable, Sequence
 
-# Hermetic before the server module is imported: synthetic requests never
-# enter a real request log or flight recorder, and every encode is fresh.
-os.environ["MTPLX_REQUEST_LOG_JSONL"] = "off"
-os.environ["MTPLX_FLIGHT_RECORDER"] = "off"
-os.environ["MTPLX_CHAT_ENCODE_CACHE"] = "off"
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -810,16 +804,28 @@ class _AuditSessions:
 
 
 class MtplxPath:
-    def __init__(self, pack: Path) -> None:
+    """The server's prompt path over a state that holds no model."""
+
+    def __init__(self, state: Any) -> None:
+        from mtplx.server import openai as oa
+
+        self.oa = oa
+        self.state = state
+        self.tokenizer = state.runtime.tokenizer
+        self.sessions = state.sessions
+        self.family = oa._model_family_for_state(state)
+        self.reasoning_history_mode = oa._reasoning_history_mode(state)
+        self.template_report: dict[str, Any] = {}
+
+    @classmethod
+    def for_pack(cls, pack: Path) -> "MtplxPath":
         from mtplx.artifacts import inspect_model
         from mtplx.backends.descriptors import descriptor_from_inspection, reasoning_policy_for_model
         from mtplx.runtime import _load_tokenizer_resilient
         from mtplx.server import openai as oa
 
-        self.oa = oa
-        self.pack = pack
         config = json.loads((pack / "config.json").read_text(encoding="utf-8"))
-        self.tokenizer = _load_tokenizer_resilient(pack, config)
+        tokenizer = _load_tokenizer_resilient(pack, config)
         inspection = inspect_model(pack).to_dict()
         backend_id = str(inspection.get("recommended_backend") or "qwen3_next")
         descriptor = descriptor_from_inspection(inspection)
@@ -832,28 +838,35 @@ class MtplxPath:
             args.reasoning_effort = reasoning.default_effort
         if descriptor.required_tool_prompt_mode is not None:
             args.tool_prompt_mode = descriptor.required_tool_prompt_mode
-        self.sessions = _AuditSessions()
-        self.state = SimpleNamespace(
+        state = SimpleNamespace(
             args=args,
             model_id=str(inspection.get("runtime_model") or pack.name),
             lock=Lock(),
-            runtime=SimpleNamespace(model_path=pack, mtp_enabled=True, tokenizer=self.tokenizer, backend_id=backend_id),
+            runtime=SimpleNamespace(model_path=pack, mtp_enabled=True, tokenizer=tokenizer, backend_id=backend_id),
             main_system_prompt_hash=None,
             has_foreground=lambda: False,
-            sessions=self.sessions,
+            sessions=_AuditSessions(),
         )
-        self.template_report = oa._apply_chat_template_profile(self.tokenizer, args)
-        self.state.template_hash = oa._template_hash(self.tokenizer)
-        self.state.reasoning_history_scoped_capable = oa._template_supports_scoped_reasoning(self.tokenizer)
-        self.family = oa._model_family_for_state(self.state)
-        self.reasoning_history_mode = oa._reasoning_history_mode(self.state)
+        # What ServerState does with the tokenizer at start-up (openai.py:3375).
+        template_report = oa._apply_chat_template_profile(tokenizer, args)
+        state.template_hash = oa._template_hash(tokenizer)
+        state.reasoning_history_scoped_capable = oa._template_supports_scoped_reasoning(tokenizer)
+        path = cls(state)
+        path.pack = pack
+        path.template_report = template_report
+        return path
 
     def prompt(self, messages: Sequence[dict[str, Any]], tools: list[dict[str, Any]] | None, *, lane: str,
-               thinking: bool, reasoning_effort: str | None = None, use_session: bool = False) -> dict[str, Any]:
+               thinking: bool, reasoning_effort: str | None = None, use_session: bool = False,
+               headers: dict[str, str] | None = None) -> dict[str, Any]:
+        """The prompt ids for one request, built by the calls ``chat_completions``
+        makes and in its order (mtplx/server/openai.py: resolve_request_policy at
+        :31440, _vision_extract_and_flatten :31549, _encode_messages :31570,
+        _maybe_canonicalize_committed_reasoning :31663)."""
         oa = self.oa
         state = self.state
         state.args.enable_thinking = bool(thinking)
-        headers = dict(LANES[lane]["headers"])
+        headers = dict(LANES[lane]["headers"]) if headers is None else dict(headers)
         body: dict[str, Any] = {"model": state.model_id, "messages": list(messages), "stream": True}
         if tools:
             body["tools"] = tools
@@ -913,7 +926,33 @@ class MtplxPath:
             "tool_prompt_mode": policy.template_tool_prompt_mode,
             "canonicalization": observability.get("committed_reasoning_canonicalization"),
             "observability": {k: v for k, v in observability.items() if k != "committed_reasoning_canonicalization"},
+            "policy": policy,
+            "messages_for_generation": list(messages_for_generation),
         }
+
+    def postcommit_prediction(self, served: dict[str, Any], assistant_position: int) -> list[int] | None:
+        """The prefix the postcommit banks once the assistant turn at
+        ``assistant_position`` (in the served request's canonical messages) has
+        been generated: what it predicts the NEXT request will start with
+        (mtplx/server/openai.py _postcommit_next_turn_prefix_ids)."""
+        oa = self.oa
+        state = self.state
+        policy = served["policy"]
+        history = served["messages_for_generation"][: assistant_position + 1]
+        if not history or history[-1].role != "assistant":
+            return None
+        return oa._postcommit_next_turn_prefix_ids(
+            self.tokenizer,
+            history,
+            enable_thinking=policy.thinking_enabled,
+            reasoning_effort=policy.reasoning_effort,
+            strip_assistant_reasoning_history=state.args.strip_assistant_reasoning_history,
+            scoped_reasoning_history=oa._reasoning_history_scoped_active(state),
+            preserve_reasoning_history=oa._reasoning_history_preserve_echo_active(state),
+            tools=policy.postcommit_tool_specs,
+            assistant_tool_calls=history[-1].tool_calls,
+            tool_prompt_mode=policy.postcommit_tool_prompt_mode,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1314,7 +1353,7 @@ def audit_pack(pack: Path, emit, *, sessions: list[dict[str, Any]] | None = None
                scenarios: Sequence[str] = ("stateless", "session")) -> dict[str, Any]:
     started = time.time()
     ref = Reference(pack)
-    mtplx = MtplxPath(pack)
+    mtplx = MtplxPath.for_pack(pack)
     sessions = sessions if sessions is not None else all_sessions()
     info = {
         "pack": pack.name,
@@ -1352,6 +1391,11 @@ def audit_pack(pack: Path, emit, *, sessions: list[dict[str, Any]] | None = None
         bucket["body_identical"] += int(bool(record.get("body_identical")))
         for item in record.get("mechanisms", []):
             bucket[f"m:{item['mechanism']}"] = bucket.get(f"m:{item['mechanism']}", 0) + 1
+        if record.get("next_turn_noncanonical_spots"):
+            bucket["noncanonical_spots"] = bucket.get("noncanonical_spots", 0) + int(record["next_turn_noncanonical_spots"])
+        if "postcommit_prefix_ok" in record:
+            bucket["with_postcommit"] = bucket.get("with_postcommit", 0) + 1
+            bucket["postcommit_ok"] = bucket.get("postcommit_ok", 0) + int(record["postcommit_prefix_ok"])
         if "extends_committed" in record:
             bucket["with_committed"] = bucket.get("with_committed", 0) + 1
             bucket["extends_committed"] = bucket.get("extends_committed", 0) + int(record["extends_committed"])
@@ -1374,6 +1418,16 @@ def audit_pack(pack: Path, emit, *, sessions: list[dict[str, Any]] | None = None
                             "thinking": thinking_mode, "turn": position, "messages": cut, "scenario": "stateless",
                             "tool_prompt_mode": served["tool_prompt_mode"], "reasoning_effort": served["reasoning_effort"],
                         })
+                        # Cache side of the same question: what the postcommit
+                        # banked after the previous assistant turn must be a
+                        # prefix of this request.
+                        canonical = served["messages_for_generation"]
+                        last_assistant = max((i for i, m in enumerate(canonical) if m.role == "assistant"), default=None)
+                        if last_assistant is not None:
+                            predicted = mtplx.postcommit_prediction(served, last_assistant)
+                            if predicted:
+                                record["postcommit_prefix_tokens"] = len(predicted)
+                                record["postcommit_prefix_ok"] = served["ids"][: len(predicted)] == predicted
                         emit(record)
                         tally((session["name"], lane, thinking_mode, "stateless"), record)
 
@@ -1402,17 +1456,31 @@ def _print_summary(results: list[dict[str, Any]], stream) -> None:
         print(f"   server tokenizer vs reference encoder: {info['server_tokenizer_vs_reference_encoder_disagreements']} "
               f"disagreements on {info['probe_texts']} texts; reference regex from {info['reference_pretokenizer_regex_source']}", file=stream)
         header = (f"   {'session':<21}{'lane':<10}{'think':<13}{'scenario':<25}{'turns':>5}{'ident':>6}{'expl':>5}"
-                  f"{'UNEXPL':>7}{'body=':>6}{'ext':>7}  mechanisms (turns)")
+                  f"{'UNEXPL':>7}{'body=':>6}{'cache':>7}  mechanisms (turns)")
         print(header, file=stream)
         for (session, lane, thinking, scenario), bucket in result["summary"].items():
             mechanisms = ", ".join(f"{k[2:]} {v}" for k, v in sorted(bucket.items()) if k.startswith("m:"))
+            if bucket.get("noncanonical_spots"):
+                mechanisms = f"[{bucket['noncanonical_spots']} non-canonical spots] " + mechanisms
             extends = f"{bucket['extends_committed']}/{bucket['with_committed']}" if bucket.get("with_committed") else "-"
+            if bucket.get("with_postcommit"):
+                extends = f"{bucket['postcommit_ok']}/{bucket['with_postcommit']}"
             print(f"   {session:<21}{lane:<10}{thinking:<13}{scenario:<25}{bucket['turns']:>5}{bucket['identical']:>6}"
                   f"{bucket['explained']:>5}{bucket['UNEXPLAINED']:>7}{bucket['body_identical']:>6}{extends:>7}  {mechanisms}",
                   file=stream)
 
 
+def _hermetic_environment() -> None:
+    """Run as a script only (never at import: a test process importing this
+    module must keep its own environment). Synthetic requests never enter a
+    real request log or flight recorder, and every encode is a fresh one."""
+    os.environ["MTPLX_REQUEST_LOG_JSONL"] = "off"
+    os.environ["MTPLX_FLIGHT_RECORDER"] = "off"
+    os.environ["MTPLX_CHAT_ENCODE_CACHE"] = "off"
+
+
 def main(argv: list[str] | None = None) -> int:
+    _hermetic_environment()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pack", action="append", default=[], help="Pack directory (repeatable). Default: the two shipped packs under ~/.mtplx/models that exist.")
     parser.add_argument("--out", default="-", help="JSONL output path ('-' = stdout)")
