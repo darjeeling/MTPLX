@@ -414,6 +414,25 @@ def test_unrecognised_attention_is_refused_whole_and_counted():
     assert all(type(a.rope) is nn.RoPE for a in _full_attention(other))
 
 
+def test_a_model_that_cannot_be_inspected_is_a_record_not_a_failed_load():
+    class Broken:
+        @property
+        def language_model(self):
+            raise RuntimeError("boom")
+
+    model = Broken()
+    install = configure_dense_mrope(model, _pack_config())
+    assert install is not None and not install.installed
+    assert "could not be inspected" in install.reason and "boom" in install.reason
+    assert (
+        build_request_state(
+            model, PROMPT, image_token_id=PAD, image_grids=[GRID], spatial_merge_size=2
+        )
+        is None
+    )
+    assert demotions.snapshot()["counts"]["vision_mrope_sequential_fallback"] == 1
+
+
 def test_tensor_offset_call_keeps_stock_positions_and_is_counted(monkeypatch):
     rope = nn.RoPE(ROTARY_DIMS, traditional=False, base=ROPE_THETA)
     adapter = DenseMRopeAdapter(rope, mrope_axes(SECTION, True, 8), ROLE_TRUNK)

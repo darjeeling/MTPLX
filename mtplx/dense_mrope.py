@@ -432,13 +432,63 @@ def _per_row_offsets_exact(rope: Any) -> bool:
         return False
 
 
+def _stock_rope(attn: Any) -> Any:
+    rope = getattr(attn, "rope", None)
+    return rope.inner if isinstance(rope, DenseMRopeAdapter) else rope
+
+
+def _validated_layout(
+    config: dict[str, Any], attention: Sequence[Any]
+) -> tuple[tuple[int, ...], bool, list[int]] | str:
+    """(section, interleaved, axes) when every layer can take the adapter,
+    otherwise the plain-English reason it cannot. Touches nothing."""
+
+    import mlx.nn as nn
+
+    rope_parameters = _text_config(config).get("rope_parameters")
+    section = (
+        rope_parameters.get("mrope_section")
+        if isinstance(rope_parameters, dict)
+        else None
+    )
+    if not isinstance(section, (list, tuple)) or len(section) != 3:
+        return "the config declares no three-part mrope_section"
+    section = tuple(int(x) for x in section)
+    # The reference implementations of this family are interleaved only; an
+    # absent flag means interleaved.
+    interleaved = bool(rope_parameters.get("mrope_interleaved", True))
+    if not attention:
+        return "no full-attention layers were found"
+    for attn in attention:
+        rope = _stock_rope(attn)
+        if (
+            type(rope) is not nn.RoPE
+            or bool(rope.traditional)
+            or float(rope.scale) != 1.0
+            or int(rope.dims) != 2 * sum(section)
+        ):
+            return (
+                "an attention layer does not use a plain half-split rope of "
+                f"{2 * sum(section)} dims ({type(rope).__name__})"
+            )
+    try:
+        axes = mrope_axes(section, interleaved, sum(section))
+    except ValueError as exc:
+        return str(exc)
+    if not _per_row_offsets_exact(_stock_rope(attention[0])):
+        return "this MLX build does not rope per-row offsets exactly"
+    return section, interleaved, axes
+
+
 def configure_dense_mrope(model: Any, config: dict[str, Any]) -> DenseMRopeInstall | None:
     """Install the adapters on a vision-capable dense pack, all or nothing.
 
     Returns None (and touches nothing) for other families, packs without a
     vision config, and ``MTPLX_DENSE_MROPE=0``. A dense pack whose attention
     cannot take the adapter gets a not-installed record with the reason; image
-    requests on it stay sequential and are counted.
+    requests on it stay sequential and are counted. A model load never fails
+    here: the model is only touched after every layer has been validated, and
+    anything unexpected before that point is a not-installed record too.
     """
 
     if not dense_mrope_enabled() or not isinstance(config, dict):
@@ -451,63 +501,20 @@ def configure_dense_mrope(model: Any, config: dict[str, Any]) -> DenseMRopeInsta
     if isinstance(previous, DenseMRopeInstall):
         return previous
 
-    def finish(install: DenseMRopeInstall) -> DenseMRopeInstall:
-        setattr(model, INSTALL_ATTR, install)
-        return install
-
-    rope_parameters = _text_config(config).get("rope_parameters")
-    section = (
-        rope_parameters.get("mrope_section")
-        if isinstance(rope_parameters, dict)
-        else None
-    )
-    if not isinstance(section, (list, tuple)) or len(section) != 3:
-        return finish(
-            DenseMRopeInstall(False, "the config declares no three-part mrope_section")
-        )
-    section = tuple(int(x) for x in section)
-    # The reference implementations of this family are interleaved only; an
-    # absent flag means interleaved.
-    interleaved = bool(rope_parameters.get("mrope_interleaved", True))
-
-    import mlx.nn as nn
-
-    trunk, mtp = _attention_modules(model)
-    if not trunk:
-        return finish(DenseMRopeInstall(False, "no full-attention layers were found"))
-    for attn in (*trunk, *mtp):
-        rope = getattr(attn, "rope", None)
-        if isinstance(rope, DenseMRopeAdapter):
-            rope = rope.inner
-        if (
-            type(rope) is not nn.RoPE
-            or bool(rope.traditional)
-            or float(rope.scale) != 1.0
-            or int(rope.dims) != 2 * sum(section)
-        ):
-            return finish(
-                DenseMRopeInstall(
-                    False,
-                    "an attention layer does not use a plain half-split rope of "
-                    f"{2 * sum(section)} dims ({type(rope).__name__})",
-                )
-            )
     try:
-        axes = mrope_axes(section, interleaved, sum(section))
-    except ValueError as exc:
-        return finish(DenseMRopeInstall(False, str(exc)))
-    if not _per_row_offsets_exact(trunk[0].rope):
-        return finish(
-            DenseMRopeInstall(
-                False, "this MLX build does not rope per-row offsets exactly"
-            )
-        )
-    for role, modules in ((ROLE_TRUNK, trunk), (ROLE_MTP, mtp)):
-        for attn in modules:
-            if not isinstance(attn.rope, DenseMRopeAdapter):
-                attn.rope = DenseMRopeAdapter(attn.rope, axes, role)
-    return finish(
-        DenseMRopeInstall(
+        trunk, mtp = _attention_modules(model)
+        layout = _validated_layout(config, [*trunk, *mtp] if trunk else [])
+    except Exception as exc:  # noqa: BLE001 - reported on the record, in the log and per request
+        layout = f"the model could not be inspected ({exc!r})"
+    if isinstance(layout, str):
+        install = DenseMRopeInstall(False, layout)
+    else:
+        section, interleaved, axes = layout
+        for role, modules in ((ROLE_TRUNK, trunk), (ROLE_MTP, mtp)):
+            for attn in modules:
+                if not isinstance(attn.rope, DenseMRopeAdapter):
+                    attn.rope = DenseMRopeAdapter(attn.rope, axes, role)
+        install = DenseMRopeInstall(
             True,
             "installed",
             trunk_layers=len(trunk),
@@ -515,7 +522,8 @@ def configure_dense_mrope(model: Any, config: dict[str, Any]) -> DenseMRopeInsta
             section=section,
             interleaved=interleaved,
         )
-    )
+    setattr(model, INSTALL_ATTR, install)
+    return install
 
 
 def build_request_state(
