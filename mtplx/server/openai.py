@@ -5287,6 +5287,126 @@ def _vision_session_cache_enabled() -> bool:
     }
 
 
+def _vision_session_restore_enabled() -> bool:
+    """Session resolution and the committed-id splice for image requests
+    (default on).
+
+    An image request used to skip both, so its raw re-encode parted from the
+    session's committed ids at the first assistant turn and the whole text
+    history was prefilled again (2026-09-18 Pi receipt: an image attached
+    at token 158,043 restored a 5,984-token entry and re-prefilled 154,899
+    tokens, 184 s). Both now run on the TEXT ids, before the image pads are
+    expanded. Off restores that skip exactly."""
+
+    return os.environ.get("MTPLX_VISION_SESSION_RESTORE", "1").strip().lower() not in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }
+
+
+# Session sources a vision request may still swap for the lineage of its
+# pixel-keyed bank entry (_vision_bank_session_id), once the pads are expanded.
+_VISION_LINEAGE_OVERRIDE_SOURCES = frozenset(
+    {"new", "longest_prefix", "pending_postcommit_near_prefix", "common_prefix_reuse"}
+)
+
+
+def _vision_text_canonicalization_refusal(
+    raw_ids: Sequence[int],
+    canonical_ids: Sequence[int],
+    image_pad_token_id: int | None,
+) -> str | None:
+    """Why canonicalized TEXT ids may not be served for an image request
+    (None: they may).
+
+    The committed-think substitution and the committed-id splice re-express
+    the text history in the session's own ids. For an image request that is
+    legal only BEFORE the first image placeholder: those positions carry no
+    pixel influence (causal attention). From the first placeholder on, the
+    ids must be the raw encode's, token for token, so every image keeps its
+    placeholder, its order and the text around it, and the pad layout that
+    _materialize_vision_splice expands is the raw one by construction. This
+    is a guard on the input ids only: what may be RESTORED is still decided
+    by the pixel-keyed bank view and the image-span clamp in generation.
+    """
+
+    if image_pad_token_id is None:
+        return "image_pad_token_unknown"
+    pad_id = int(image_pad_token_id)
+    first_pad = next(
+        (pos for pos, token in enumerate(raw_ids) if int(token) == pad_id), None
+    )
+    if first_pad is None:
+        return "image_placeholder_missing"
+    tail = [int(token) for token in raw_ids[first_pad:]]
+    canonical = [int(token) for token in canonical_ids]
+    head_len = len(canonical) - len(tail)
+    if head_len < 0 or canonical[head_len:] != tail:
+        return "canonicalization_crossed_first_image"
+    if pad_id in canonical[:head_len]:
+        return "canonicalization_added_image_placeholder"
+    return None
+
+
+def _vision_gate_text_canonicalization(
+    state: Any,
+    *,
+    raw_ids: Sequence[int],
+    canonicalized: tuple[list[Any], list[int]] | None,
+    canon_observability: dict[str, Any],
+    template_observability: dict[str, Any],
+    receipt: dict[str, Any],
+    session_id: str | None,
+) -> tuple[list[Any], list[int]] | None:
+    """Serve or refuse an image request's canonicalized TEXT ids, and fill
+    its ``request_vision_session_restore`` receipt.
+
+    ``canon_observability`` is the copy of ``template_observability`` the
+    committed-reasoning gate wrote into. It is adopted when the canonical
+    encode is served (or the gate stood aside by itself); on a refusal the
+    raw encode's observability stands and only the gate's record is kept,
+    marked not applied. The receipt also says what the session holds and how
+    far the served TEXT ids run along it, so with first_image_pad_position
+    and cached_tokens one request line reads "held N, shares M, restored K".
+    """
+
+    refusal = (
+        _vision_text_canonicalization_refusal(
+            raw_ids,
+            canonicalized[1],
+            getattr(_server_vision_spec(state), "image_token_id", None),
+        )
+        if canonicalized is not None
+        else None
+    )
+    if refusal is None:
+        template_observability.clear()
+        template_observability.update(canon_observability)
+    else:
+        # Guard, fail-closed: the raw encode stands, exactly as it did
+        # before image requests reached this gate.
+        canonicalized = None
+        template_observability["committed_reasoning_canonicalization"] = {
+            **(canon_observability.get("committed_reasoning_canonicalization") or {}),
+            "applied": False,
+            "refused_reason": refusal,
+        }
+        receipt["refused"] = refusal
+    receipt["canonicalized"] = canonicalized is not None
+    committed: Sequence[int] = ()
+    peek = getattr(getattr(state, "sessions", None), "peek", None)
+    if session_id is not None and callable(peek):
+        committed = tuple(getattr(peek(session_id), "committed_token_ids", ()) or ())
+    served_ids = canonicalized[1] if canonicalized is not None else raw_ids
+    receipt["session_committed_tokens"] = len(committed)
+    receipt["committed_prefix_tokens"] = int(_common_prefix_len(served_ids, committed))
+    if not committed and receipt.get("refused") is None:
+        receipt["refused"] = "no_committed_stream"
+    return canonicalized
+
+
 def _image_content_digest(raw: bytes) -> int:
     import hashlib
 
@@ -31586,10 +31706,34 @@ def create_app(state: ServerState) -> FastAPI:
         early_postcommit_handled = False
         early_postcommit_wait: dict[str, Any] | None = None
         early_cross_session_yield: dict[str, Any] | None = None
+        # Image requests (2026-09-18): prompt_ids are still the TEXT ids here
+        # (one placeholder pad per image), so the session resolution and the
+        # committed-id splice below can run for them exactly as for a text
+        # request. They used to be skipped outright, and an image attached
+        # 158k tokens into a text session re-prefilled the whole history.
+        # The receipt says whether that ran and, if not, why.
+        vision_session_restore: dict[str, Any] | None = None
+        if vision_images:
+            _vision_restore_refusal: str | None = None
+            if not _vision_session_restore_enabled():
+                _vision_restore_refusal = "kill_switch"
+            elif not _vision_session_cache_enabled():
+                _vision_restore_refusal = "vision_session_cache_disabled"
+            elif background:
+                _vision_restore_refusal = "background_request"
+            elif cache_bypass:
+                _vision_restore_refusal = "cache_bypass"
+            elif aime_visible_working:
+                _vision_restore_refusal = "aime_visible_working"
+            vision_session_restore = {
+                "enabled": _vision_restore_refusal is None,
+                "canonicalized": False,
+                "refused": _vision_restore_refusal,
+            }
         if (
             not background
             and not cache_bypass
-            and not vision_images
+            and (vision_session_restore is None or vision_session_restore["enabled"])
             and not aime_visible_working
         ):
             # Resolve the session exactly once (audit F11 P2): the
@@ -31625,7 +31769,15 @@ def create_app(state: ServerState) -> FastAPI:
             # foreground-pressure grace can no longer be tripped by the very
             # request waiting on it. Observability lands at the original
             # site below (request_observability binds later in the prologue).
-            if resolved_session_id is not None:
+            # An image request whose session came from prompt inference may
+            # still be moved onto the lineage of its pixel-keyed bank entry
+            # once the pads are expanded; its sweep and wait stay at the
+            # original site, which knows the final session, so the sweep
+            # here can never abort that lineage's own pending commit.
+            if resolved_session_id is not None and (
+                vision_session_restore is None
+                or resolved_session_source not in _VISION_LINEAGE_OVERRIDE_SOURCES
+            ):
                 early_postcommit_handled = True
                 _early_sweep = getattr(
                     getattr(state, "sessions", None),
@@ -31660,6 +31812,15 @@ def create_app(state: ServerState) -> FastAPI:
             # canonicalized encode provably matches the committed stream
             # further than the raw one; every derivation below runs on the
             # final ids exactly once.
+            # A text request hands the gate its own observability dict, as
+            # always. An image request hands it a copy: the gate replaces the
+            # dict's contents when it serves a canonical encode, and that
+            # encode can still be refused below.
+            _canon_observability = (
+                template_observability
+                if vision_session_restore is None
+                else dict(template_observability)
+            )
             _canonicalized = _maybe_canonicalize_committed_reasoning(
                 state,
                 messages=messages_for_generation,
@@ -31672,7 +31833,7 @@ def create_app(state: ServerState) -> FastAPI:
                 tools=prompt_tool_specs,
                 tool_choice=request.tool_choice,
                 tool_prompt_mode=template_tool_prompt_mode,
-                template_observability=template_observability,
+                template_observability=_canon_observability,
                 # request_observability is bound later in the prologue on
                 # some branches; the outcome rides template_observability,
                 # which merges into the request stream downstream.
@@ -31680,6 +31841,16 @@ def create_app(state: ServerState) -> FastAPI:
                 strip_tool_call_preamble_text=strip_tool_call_preamble_text,
                 session_id=resolved_session_id,
             )
+            if vision_session_restore is not None:
+                _canonicalized = _vision_gate_text_canonicalization(
+                    state,
+                    raw_ids=prompt_ids,
+                    canonicalized=_canonicalized,
+                    canon_observability=_canon_observability,
+                    template_observability=template_observability,
+                    receipt=vision_session_restore,
+                    session_id=resolved_session_id,
+                )
             if _canonicalized is not None:
                 messages_for_generation, prompt_ids = _canonicalized
         if vision_images:
@@ -31709,6 +31880,10 @@ def create_app(state: ServerState) -> FastAPI:
             )
             if _first_pad is not None:
                 template_observability["first_image_pad_position"] = int(_first_pad)
+            if vision_session_restore is not None:
+                template_observability["request_vision_session_restore"] = (
+                    vision_session_restore
+                )
         if aime_visible_working:
             prompt_ids = [
                 *prompt_ids,
@@ -31914,9 +32089,10 @@ def create_app(state: ServerState) -> FastAPI:
                 cache_miss_reason = "opencode_tool_history_cache_bypass"
                 session_restore_mode = "opencode_tool_history_bypass"
             if resolved_session_id is not None:
-                # Reuse the prologue's single resolution (F11 P2); the
-                # vision-keyed and aime arms never resolved early, so they
-                # keep the original call here.
+                # Reuse the prologue's single resolution (F11 P2). The aime
+                # arm never resolves early, nor does an image request with
+                # MTPLX_VISION_SESSION_RESTORE=0; they keep the original
+                # call here.
                 session_id, session_source = (
                     resolved_session_id,
                     resolved_session_source,
@@ -31931,9 +32107,10 @@ def create_app(state: ServerState) -> FastAPI:
                     prompt_ids=prompt_ids,
                     diagnostic_out=resolved_session_diagnostic,
                 )
-            if vision_cache_keying and session_source in {
-                "new", "longest_prefix", "pending_postcommit_near_prefix", "common_prefix_reuse"
-            }:
+            if (
+                vision_cache_keying
+                and session_source in _VISION_LINEAGE_OVERRIDE_SOURCES
+            ):
                 bank_session_id = _vision_bank_session_id(
                     state.sessions.bank, prompt_ids, vision_splice
                 )
