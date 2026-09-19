@@ -134,6 +134,19 @@ def test_adapter_matches_the_numpy_reference_on_an_image_grid():
     assert np.abs(wrong_layout - expected).max() > 1e-2
 
 
+def test_per_axis_path_with_equal_axes_is_the_stock_rope_bit_for_bit():
+    """Why text rows inside an image chunk keep the keys a text request has."""
+    rope = nn.RoPE(ROTARY_DIMS, traditional=False, base=ROPE_THETA)
+    adapter = DenseMRopeAdapter(rope, mrope_axes(SECTION, True, 8), ROLE_TRUNK)
+    run = mx.arange(37, 37 + 9, dtype=mx.int32)
+    for dtype in (mx.float32, mx.float16, mx.bfloat16):
+        for width in (ROTARY_DIMS, 64):  # all rotary, and a partial-rotary head
+            x = mx.random.normal((1, 3, 9, width)).astype(dtype)
+            per_axis = adapter._rope_axes(x, (run, run, run))
+            assert per_axis.dtype == dtype and per_axis.shape == x.shape
+            assert mx.array_equal(per_axis, rope(x, offset=37)).item()
+
+
 def test_positions_past_the_prompt_are_index_plus_delta():
     state = _state()
     assert state.delta == DELTA

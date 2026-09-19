@@ -293,7 +293,7 @@ class DenseMRopeAdapter:
         self.inner = inner
         self.axes = tuple(int(a) for a in axes)
         self.role = role
-        self._selects: dict[int, tuple[Any, Any]] = {}
+        self._selects: tuple[Any, Any] | None = None
 
     def __call__(self, x: Any, offset: Any = 0) -> Any:
         state = _STATE.get()
@@ -320,14 +320,14 @@ class DenseMRopeAdapter:
             return self.inner(x, offset=payload)
         return self._rope_axes(x, payload)
 
-    def _select_masks(self, width: int) -> tuple[Any, Any]:
-        masks = self._selects.get(width)
-        if masks is None:
+    def _select_masks(self) -> tuple[Any, Any]:
+        """Bool masks over the rotary features: which follow h, which w."""
+        if self._selects is None:
             import mlx.core as mx
 
             half = len(self.axes)
-            take_h = np.zeros(width, dtype=bool)
-            take_w = np.zeros(width, dtype=bool)
+            take_h = np.zeros(2 * half, dtype=bool)
+            take_w = np.zeros(2 * half, dtype=bool)
             for index, axis in enumerate(self.axes):
                 # Half-split pairing: frequency i rotates features i and
                 # i + half; both follow that frequency's axis.
@@ -335,17 +335,21 @@ class DenseMRopeAdapter:
                     take_h[index] = take_h[index + half] = True
                 elif axis == 2:
                     take_w[index] = take_w[index + half] = True
-            masks = (mx.array(take_h), mx.array(take_w))
-            self._selects[width] = masks
-        return masks
+            self._selects = (mx.array(take_h), mx.array(take_w))
+        return self._selects
 
     def _rope_axes(self, x: Any, positions: tuple[Any, Any, Any]) -> Any:
         import mlx.core as mx
 
         inner = self.inner
         batch, heads, length, width = x.shape
-        # One row per token, so the stock kernel takes one position per row.
-        rows = x.transpose(0, 2, 1, 3).reshape(batch * length, heads, 1, width)
+        dims = int(inner.dims)
+        # Only the rotary features move; the rest of the head passes through.
+        # Working on that slice is the same arithmetic on a quarter of the
+        # bytes (64 of 256 on the 27B). One row per token, so the stock
+        # kernel takes one position per row.
+        rotary = x if width == dims else x[..., :dims]
+        rows = rotary.transpose(0, 2, 1, 3).reshape(batch * length, heads, 1, dims)
 
         def rope_at(axis_positions: Any) -> Any:
             offsets = (
@@ -353,7 +357,7 @@ class DenseMRopeAdapter:
             )
             return mx.fast.rope(
                 rows,
-                inner.dims,
+                dims,
                 traditional=inner.traditional,
                 base=inner.base,
                 scale=inner.scale,
@@ -361,9 +365,12 @@ class DenseMRopeAdapter:
             )
 
         at_t, at_h, at_w = (rope_at(p) for p in positions)
-        take_h, take_w = self._select_masks(int(width))
+        take_h, take_w = self._select_masks()
         out = mx.where(take_w, at_w, mx.where(take_h, at_h, at_t))
-        return out.reshape(batch, length, heads, width).transpose(0, 2, 1, 3)
+        out = out.reshape(batch, length, heads, dims).transpose(0, 2, 1, 3)
+        if width == dims:
+            return out
+        return mx.concatenate([out, x[..., dims:]], axis=-1)
 
 
 @dataclass(frozen=True)
