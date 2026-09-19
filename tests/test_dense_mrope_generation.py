@@ -214,6 +214,32 @@ def test_accepted_drafts_and_a_live_history_reset_keep_grid_positions(rig, monke
     assert demotions.snapshot()["total"] == 0
 
 
+def test_final_state_keeps_the_draft_history_row_aligned(rig):
+    """The rule the next turn's restore rests on.
+
+    A restored draft history is taken as row-aligned with the prompt (row j =
+    prompt index j, so the position table can be indexed by its offset) exactly
+    when it holds one row per prefix token but the last. The state a generation
+    hands to the bank must satisfy that, with and without accepted drafts.
+    """
+    reference = _generate(rig, depth=1).tokens
+    for accept in (False, True):
+        if accept:
+            _oracle_draft_head(rig, list(PROMPT) + reference)
+        for max_tokens in (8, 9, 10):
+            out = _generate(rig, depth=3, max_tokens=max_tokens, capture_final_state=True)
+            state = out.final_state
+            assert state.safe_to_commit
+            total = len(PROMPT) + len(out.tokens)
+            assert generation._mtp_cache_offset(state.final_committed_mtp_cache) == total - 1
+            assert max(
+                int(entry.offset)
+                for entry in state.final_trunk_cache
+                if isinstance(getattr(entry, "offset", None), int)
+            ) == total
+    assert demotions.snapshot()["total"] == 0
+
+
 def test_sequential_image_request_is_what_it_was(rig):
     """dense_mrope None (kill switch, fallback): no shifted call anywhere."""
     out = _generate(rig, splice=_splice(rig, PROMPT, armed=False))
