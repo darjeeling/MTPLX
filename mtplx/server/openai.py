@@ -14067,6 +14067,30 @@ def _maybe_canonicalize_committed_reasoning(
     cp_canon = _common_prefix_len(canon_ids, committed)
     outcome["cp_canon"] = int(cp_canon)
     if cp_canon <= cp_raw:
+        # A tie here is not yet "the canonical encode is no better". When the
+        # client echoes the reasoning (OpenCode, Hermes, Pi) the raw and the
+        # canonical prompt share every byte up to the turn's body, so a seam
+        # of the model's own making inside the reasoning (or right after
+        # '</think>') stops BOTH at the same token. Judged before the splice,
+        # the substitution was dropped and the raw prompt served: on OpenCode,
+        # whose echoed turn never carries the text before a tool call, the
+        # whole body of that turn was then re-prefilled without the text the
+        # model had written. Give both the same splice and keep the canonical
+        # one only when it reaches strictly further into the committed stream.
+        canon_reach = _committed_splice_reach(state, canon_ids, committed)
+        raw_reach = _committed_splice_reach(state, prompt_ids, committed)
+        raw_best = max(int(cp_raw), raw_reach[1] if raw_reach is not None else 0)
+        if canon_reach is not None and canon_reach[1] > raw_best:
+            spliced_ids, cp_after, receipt = canon_reach
+            outcome["applied"] = True
+            outcome["token_splice"] = receipt
+            outcome["cp_spliced"] = int(cp_after)
+            outcome["canonical_won_after_splice"] = True
+            template_observability.clear()
+            template_observability.update(canon_observability)
+            _record(template_observability)
+            _record(request_observability)
+            return canon_messages, spliced_ids
         spliced = _splice_prompt_onto_committed(
             state, messages, prompt_ids, committed, cp_raw, outcome
         )
@@ -14086,6 +14110,23 @@ def _maybe_canonicalize_committed_reasoning(
     if spliced is not None:
         return spliced
     return canon_messages, canon_ids
+
+
+def _committed_splice_reach(
+    state: ServerState,
+    prompt_ids: Sequence[int],
+    committed: Sequence[int],
+) -> tuple[list[int], int, dict[str, Any]] | None:
+    """(spliced ids, common prefix with the committed stream, receipt) for a
+    prompt the splice changed; None when it is off or found nothing."""
+    if not _committed_token_splice_enabled():
+        return None
+    spliced_ids, receipt = _splice_committed_token_ids(
+        prompt_ids, committed, state.runtime.tokenizer
+    )
+    if not receipt.get("spans"):
+        return None
+    return spliced_ids, int(receipt.get("cp_after") or 0), receipt
 
 
 def _splice_prompt_onto_committed(

@@ -231,6 +231,61 @@ def test_the_audit_chain_is_the_endpoint_chain(monkeypatch, lane, thinking):
         assert captured[-1] == expected, f"turn boundary at message {cut}"
 
 
+def _opencode_turn_with_a_committed_seam(tokenizer, path, *, seam_in: str):
+    """One OpenCode turn whose committed stream carries the model's own
+    non-canonical seam (a blank line emitted as two newline tokens) in its
+    reasoning or in its visible text. Returns (messages, tools, committed)."""
+    lane = "opencode"
+    tools = audit.opencode_tools()
+    builder = audit._Builder("You are opencode.")
+    builder.user("Add a --json flag to the export command.")
+    reasoning = "Find the file.\n\nThen read it." if seam_in == "reasoning" else "Find the file, then read it."
+    visible = "I'll look first.\n\nThen edit." if seam_in == "visible_text" else "I'll look first."
+    builder.assistant(visible, reasoning=reasoning, calls=[("glob", {"pattern": "src/**/export*.ts"})])
+    builder.tool("/work/src/commands/export.ts")
+    messages = builder.messages
+    first = path.prompt(messages[:2], tools, lane=lane, thinking=True, use_session=True)
+    render = lambda upto, generation: tokenizer.apply_chat_template(  # noqa: E731
+        audit.Reference.template_messages(messages[:upto]), tokenize=False, add_generation_prompt=generation,
+        enable_thinking=True, preserve_thinking=True,
+    )
+    generated_text = render(3, False)[len(render(2, True)):]
+    assert generated_text.endswith("<|im_end|>\n")
+    generated_ids = tokenizer.encode(generated_text[: -len("<|im_end|>\n")])
+    before_seam = {"reasoning": "Find the file.", "after_think_close": "</think>", "visible_text": "look first."}[seam_in]
+    seam_at = next(
+        i for i, token in enumerate(generated_ids)
+        if token == tokenizer.BLANK_LINE and tokenizer.decode(generated_ids[:i]).endswith(before_seam)
+    )
+    generated_ids[seam_at: seam_at + 1] = [ord("\n"), ord("\n")]
+    assert tokenizer.decode(generated_ids) + "<|im_end|>\n" == generated_text
+    committed = list(first["ids"]) + generated_ids
+    path.sessions.committed[audit.LANES[lane]["headers"]["x-mtplx-session-id"]] = tuple(committed)
+    return messages, tools, committed
+
+
+@pytest.mark.parametrize("seam_in", ["reasoning", "after_think_close", "visible_text"])
+def test_a_seam_the_model_left_does_not_cost_the_committed_turn_body(seam_in):
+    # OpenCode echoes the reasoning and never the text before a tool call, so
+    # the raw prompt and the canonical one (committed think + committed body)
+    # share the reasoning and differ in the body. A seam inside the reasoning
+    # (or right after '</think>') stops BOTH at the same token; the gate used
+    # to read that tie as "the canonical encode is no better" before either
+    # had been spliced, served the raw prompt, and the turn's body was
+    # re-prefilled without the text the model had written. A seam inside the
+    # visible text never tied (the raw prompt parts earlier) and is the
+    # unchanged control.
+    tokenizer = BlankLineTokenizer()
+    path = audit.MtplxPath(_state(tokenizer))
+    messages, tools, committed = _opencode_turn_with_a_committed_seam(tokenizer, path, seam_in=seam_in)
+    served = path.prompt(messages, tools, lane="opencode", thinking=True, use_session=True)
+    assert served["ids"][: len(committed)] == committed
+    assert "I'll look first." in tokenizer.decode(served["ids"])
+    outcome = served["canonicalization"]
+    assert outcome["applied"] is True and outcome["turns_substituted"] == 1
+    assert outcome["cp_spliced"] == len(committed)
+
+
 # ---------------------------------------------------------------------------
 # The shipped packs (tokenizer and template only; skipped when not installed)
 # ---------------------------------------------------------------------------

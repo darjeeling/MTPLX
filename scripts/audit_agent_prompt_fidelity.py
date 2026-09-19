@@ -465,7 +465,7 @@ def session_pi_60() -> dict[str, Any]:
     b.assistant("Fixed cent rounding in `ledger/totals.py` with `Decimal`, and documented `src/render.py` as test-only.",
                 reasoning="One line.")
     b.user("One more thing, list the tests directory and tell me how many test files there are.")
-    b.assistant("", reasoning="List it.", calls=[("ls", {"path": "tests"})])
+    b.assistant("", reasoning="List it.", calls=[("ls", {})])
     b.tool("test_money.py\ntest_render.py\ntest_totals.py")
     b.assistant("Three test files: `test_money.py`, `test_render.py`, `test_totals.py`.", reasoning="Three entries.")
     b.user("Run them one final time with verbose output.")
@@ -474,7 +474,7 @@ def session_pi_60() -> dict[str, Any]:
     b.assistant("All three tests pass.", reasoning="Green.")
     b.user("Thanks. Anything you would still change?")
     b.assistant("", reasoning="Check the README mentions Decimal before answering.", calls=[("grep", {"pattern": "Decimal|float", "path": "README.md", "outputMode": "count"})])
-    b.tool("0")
+    b.tool("0\n\n--- full listing follows (long tool result, passed through whole) ---\n" + _numbered_file(600))
     b.assistant("I would add one README line saying amounts are `Decimal`, never float. Nothing else.", reasoning="README is silent on it; suggest one line.")
     b.user("Do it.")
     b.assistant("Adding the line.", reasoning="Append one sentence under the first heading.",
@@ -536,12 +536,24 @@ def session_hermes_oneshot() -> dict[str, Any]:
     return {"name": "hermes_oneshot", "shape": "hermes", "tools": hermes_tools(), "messages": b.messages}
 
 
+def session_no_system() -> dict[str, Any]:
+    """Tools and no system message: the server has to create the system turn
+    its contract lives in; the template creates one for the tools block."""
+    b = _Builder(None)
+    b.user("How many lines does notes.txt have?")
+    b.assistant("", reasoning="Count with wc.", calls=[("terminal", {"command": "wc -l notes.txt"})])
+    b.tool("      12 notes.txt")
+    b.assistant("12 lines.", reasoning="Report the number.")
+    b.user("And words?")
+    return {"name": "no_system", "shape": "hermes", "tools": hermes_tools(), "messages": b.messages}
+
+
 def session_hermes_loop() -> dict[str, Any]:
     b = _Builder(HERMES_SYSTEM)
     b.user("Create hello.py that prints the current ISO week number, then run it.")
     b.assistant("", calls=[("write_file", {"path": "hello.py", "content": "import datetime\n\nprint(datetime.date.today().isocalendar().week)\n"})])
     b.tool("wrote 72 bytes")
-    b.assistant("", calls=[("terminal", {"command": "python hello.py"})])
+    b.assistant(None, calls=[("terminal", {"command": "python hello.py", "background": False})])
     b.tool("38\n")
     b.assistant("`hello.py` prints the ISO week; today it prints 38.")
     b.user("Make it print the year too.")
@@ -601,7 +613,10 @@ def session_odd_whitespace() -> dict[str, Any]:
     b.assistant("", reasoning="Exact-text edit of the form feed line.",
                 calls=[("edit", {"path": "legacy.py", "edits": [{"oldText": "\treturn 0\x0c\r\n", "newText": "\treturn 0\r\n"}]})])
     b.tool("Applied 1 edit to legacy.py\r\n")
-    b.user("and show the first three lines")
+    b.messages.append({"role": "user", "content": [
+        {"type": "text", "text": "and show the first three lines\n"},
+        {"type": "text", "text": "\t(keep the CRLF)  "},
+    ]})
     return {"name": "odd_whitespace_code", "shape": "pi", "tools": pi_tools(), "messages": b.messages}
 
 
@@ -628,6 +643,7 @@ def all_sessions() -> list[dict[str, Any]]:
         session_opencode(),
         session_hermes_oneshot(),
         session_hermes_loop(),
+        session_no_system(),
         session_multilingual(),
         session_odd_whitespace(),
     ]
@@ -1373,6 +1389,12 @@ def audit_pack(pack: Path, emit, *, sessions: list[dict[str, Any]] | None = None
         if [int(t) for t in mtplx.oa._encode_rendered_chat_text(mtplx.tokenizer, text)] != ref.encode(text)
     )
     info["probe_texts"] = len(probe_texts)
+    # For information: what plain transformers (no MTPLX loader) would make of
+    # the same texts. Its Qwen2Tokenizer class rebuilds the pre-tokenizer from
+    # its own regex (mtplx/runtime.py:1324 restore_qwen3_pretokenizer).
+    info["plain_transformers_encoder_disagreements"] = sum(
+        1 for text in probe_texts if list(ref.hf.encode(text, add_special_tokens=False)) != ref.encode(text)
+    )
     # The template's own default equals the explicit switch the server passes.
     sample = sessions[0]
     info["reference_preserve_thinking_default_equals_true"] = (
@@ -1454,7 +1476,9 @@ def _print_summary(results: list[dict[str, Any]], stream) -> None:
         print(f"\n== {info['pack']}  family={info['family']}  history={info['reasoning_history_mode']}  "
               f"effort={info['launch_reasoning_effort']}  ({info['seconds']} s)", file=stream)
         print(f"   server tokenizer vs reference encoder: {info['server_tokenizer_vs_reference_encoder_disagreements']} "
-              f"disagreements on {info['probe_texts']} texts; reference regex from {info['reference_pretokenizer_regex_source']}", file=stream)
+              f"disagreements on {info['probe_texts']} texts (plain transformers: "
+              f"{info['plain_transformers_encoder_disagreements']}); reference regex from "
+              f"{info['reference_pretokenizer_regex_source']}", file=stream)
         header = (f"   {'session':<21}{'lane':<10}{'think':<13}{'scenario':<25}{'turns':>5}{'ident':>6}{'expl':>5}"
                   f"{'UNEXPL':>7}{'body=':>6}{'cache':>7}  mechanisms (turns)")
         print(header, file=stream)
