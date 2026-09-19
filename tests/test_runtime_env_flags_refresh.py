@@ -41,6 +41,10 @@ def test_refresh_reads_every_frozen_gate_from_the_given_env(clean_flags):
 
 
 def test_apply_profile_env_refreshes_the_gates_it_just_wrote(clean_flags, monkeypatch):
+    # apply_profile_env writes the WHOLE profile block into os.environ; the
+    # cleanup below only knows the four gates, so the other 38 keys used to
+    # stay exported for every later test file.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.setattr(profiles, "_profile_env_previous_state", {}, raising=False)
     profiles.apply_profile_env(
         "turbo", runtime_env_overrides={"MTPLX_QWEN4_BLOCK_VERIFY": "1", "MTPLX_QWEN4_OPDIET": "1"}

@@ -2113,6 +2113,10 @@ def test_start_hermes_live_path_writes_profile_and_handoff(
 
 
 def test_terminal_quickstart_max_uses_verified_max_session(monkeypatch):
+    # The quickstart applies the profile's env block to os.environ in-process;
+    # without isolation it left MTPLX_DROP_EVENTS=1 (and five more keys)
+    # exported for every later test file.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     calls: list[str] = []
 
     class FakeMaxSession:
