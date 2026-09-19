@@ -27,6 +27,7 @@ enclosure by the existing ``mx.compile`` graph bank.
 from __future__ import annotations
 
 import math
+import os
 from functools import lru_cache
 from typing import Literal
 
@@ -909,6 +910,208 @@ inline uint qsa_prefill_radix_bits(uint pass) {{
     )
 
 
+_SIMD_TOPK_LANES = 32
+#: Pooled blocks (context / ratio) up to which the simd selector serves
+#: ``blocks`` mode. Its cost is ten reads of the score row, so it grows with
+#: the row: on an M5 Max (kernel alone, 2,048 rows, 2026-09-18) 0.40
+#: microseconds per row against 2.43 at 4,608 blocks, 1.68 against 2.76 at
+#: 16,384, and 3.51 against 3.05 at 32,768. The network selector reads the row
+#: four times behind a fixed 2.3 microseconds of barriers, so it keeps the
+#: long rows.
+_SIMD_TOPK_MAX_BLOCKS = 24_576
+_TOPK_KERNEL_VARIANTS = ("auto", "network", "simd")
+
+_SIMD_TOPK_SOURCE = r"""
+        const uint lane = uint(thread_index_in_simdgroup);
+        const uint row = threadgroup_position_in_grid.x;
+        const int qpos = pos_start[0] + int(row);
+        const int logical_value = logical_blocks[0];
+        const uint logical = logical_value > 0
+            ? metal::min(uint(logical_value), BACKING_BLOCKS)
+            : 0u;
+        const int complete_value = (qpos + 1) / int(RATIO);
+        const uint complete = complete_value > 0 ? uint(complete_value) : 0u;
+        const uint valid_count = metal::min(logical, complete);
+        const uint k_eff = metal::min(TOP_K, valid_count);
+        const size_t score_base = (size_t)row * BACKING_BLOCKS;
+        const size_t out_base = (size_t)row * TOP_K;
+
+        const uint seg_len = (valid_count + LANES - 1u) / LANES;
+        const uint seg_start = metal::min(lane * seg_len, valid_count);
+        const uint seg_end = metal::min(seg_start + seg_len, valid_count);
+
+        uint threshold = 0u;
+        uint first_winning_tie = 0u;
+        uint ties_before = 0u;
+        uint slot = seg_start;
+        const bool selective = k_eff > 0u && k_eff < valid_count;
+        if (selective) {
+            uint rank = k_eff - 1u;       // rank 0 = the largest key
+            uint resolved = 0u;           // high bits fixed so far
+            for (uint pass = 0u; pass < DIGIT_PASSES; ++pass) {
+                const uint bits_left = 32u - resolved;
+                const uint bits = metal::min(DIGIT_BITS, bits_left);
+                const uint shift = bits_left - bits;
+                const uint digit_mask = (1u << bits) - 1u;
+                uint4 counts[DIGIT_VECS];
+                for (uint v = 0u; v < DIGIT_VECS; ++v) {
+                    counts[v] = uint4(0u);
+                }
+                for (uint block = seg_start; block < seg_end; ++block) {
+                    const float adjusted =
+                        scores[score_base + block] - float(block) * 1.0e-12f;
+                    const uint key = qsa_float_order_key(adjusted);
+                    const bool match = resolved == 0u
+                        || (key >> bits_left) == (threshold >> bits_left);
+                    const uint4 digit = uint4(match
+                        ? ((key >> shift) & digit_mask) : 0xffffu);
+                    counts[0] += uint4(digit == uint4(0u, 1u, 2u, 3u));
+                    counts[1] += uint4(digit == uint4(4u, 5u, 6u, 7u));
+                    counts[2] += uint4(digit == uint4(8u, 9u, 10u, 11u));
+                    counts[3] += uint4(digit == uint4(12u, 13u, 14u, 15u));
+                }
+                uint chosen = 0u;
+                bool found = false;
+                for (int v = int(DIGIT_VECS) - 1; v >= 0; --v) {
+                    const uint4 total = simd_sum(counts[v]);
+                    for (int e = 3; e >= 0; --e) {
+                        const uint count = total[e];
+                        if (!found) {
+                            if (rank < count) {
+                                chosen = uint(v) * 4u + uint(e);
+                                found = true;
+                            } else {
+                                rank -= count;
+                            }
+                        }
+                    }
+                }
+                threshold |= chosen << shift;
+                resolved += bits;
+            }
+            // threshold is the K-th largest 32-bit key; rank is its position
+            // among the elements that tie with it (0 = the largest block id).
+            uint local_greater = 0u;
+            uint local_ties = 0u;
+            for (uint block = seg_start; block < seg_end; ++block) {
+                const float adjusted =
+                    scores[score_base + block] - float(block) * 1.0e-12f;
+                const uint key = qsa_float_order_key(adjusted);
+                local_greater += key > threshold ? 1u : 0u;
+                local_ties += key == threshold ? 1u : 0u;
+            }
+            const uint greater = simd_sum(local_greater);
+            const uint ties = simd_sum(local_ties);
+            const uint need = k_eff - greater;
+            first_winning_tie = ties - need;
+            ties_before = simd_prefix_exclusive_sum(local_ties);
+            const uint my_ties_end = ties_before + local_ties;
+            const uint my_first = metal::max(first_winning_tie, ties_before);
+            const uint my_tie_winners = my_ties_end > my_first ? my_ties_end - my_first : 0u;
+            slot = simd_prefix_exclusive_sum(local_greater + my_tie_winners);
+        }
+        if (k_eff > 0u) {
+            uint tie_index = ties_before;
+            for (uint block = seg_start; block < seg_end; ++block) {
+                const float adjusted =
+                    scores[score_base + block] - float(block) * 1.0e-12f;
+                bool wins = true;
+                if (selective) {
+                    const uint key = qsa_float_order_key(adjusted);
+                    wins = key > threshold;
+                    if (key == threshold) {
+                        wins = tie_index >= first_winning_tie;
+                        tie_index += 1u;
+                    }
+                }
+                if (wins && slot < TOP_K) {
+                    block_ids[out_base + slot] = int(block);
+                    block_valid[out_base + slot] = true;
+                    adjusted_scores[out_base + slot] = adjusted;
+                    slot += 1u;
+                }
+            }
+        }
+        for (uint empty = k_eff + lane; empty < TOP_K; empty += LANES) {
+            block_ids[out_base + empty] = 0;
+            block_valid[out_base + empty] = false;
+            adjusted_scores[out_base + empty] = -INFINITY;
+        }
+"""
+
+
+def _prefill_topk_variant() -> str:
+    raw = (os.environ.get("MTPLX_QSA_PREFILL_TOPK_KERNEL") or "auto").strip().lower()
+    return raw if raw in _TOPK_KERNEL_VARIANTS else "auto"
+
+
+def _simd_topk_applies(mode: QSAPrefillMode, blocks: int) -> bool:
+    """Whether the simd selector serves this call.
+
+    ``blocks`` mode only (the other two outputs keep the network selector:
+    ``row_tokens`` is ordered by score, and the dense mask is off the fast
+    lane). Tensor-unit GPUs only: that is the one GPU class the 32-lane
+    simdgroup layout was run on, and the same gate the flash consumer these
+    selections feed already needs.
+    """
+
+    variant = _prefill_topk_variant()
+    if mode != "blocks" or variant == "network":
+        return False
+    if not qsa_indexer_select_nax_available():
+        return False
+    return variant == "simd" or int(blocks) <= _SIMD_TOPK_MAX_BLOCKS
+
+
+@lru_cache(maxsize=128)
+def _prefill_topk_simd_kernel(blocks: int, topk: int, ratio: int):
+    """Exact top-k of one score row on one 32-lane simdgroup.
+
+    The network selector gives a row 512 threads that share one histogram
+    through atomics, wait on a threadgroup barrier after every step, and then
+    order the winners with a 45-stage bitonic network (90 more barriers). Here
+    a row is one simdgroup and the lanes talk through simd reductions only: no
+    threadgroup memory, no barrier, no atomic.
+
+    * Every lane owns one contiguous 1/32 of the row.
+    * The K-th largest 32-bit score key is resolved four bits a scan: sixteen
+      register counters per lane (one-hot vector adds, no data-dependent
+      index), one ``simd_sum`` per uint4 of counters, eight scans.
+    * Ties at that key are broken by block id exactly as the composite key
+      does (the larger id ranks higher): the winners among the ties are the
+      LAST ``need`` of them in ascending block order.
+    * ``simd_prefix_exclusive_sum`` gives each lane its output offset and its
+      first tie index, and the lane writes its winners straight into their
+      final slots, so the row is born in ascending block order.
+
+    Same adjusted score, same order key, same winners, same slots: every
+    output element equals the network selector's (normal, ReLU, heavy-tie,
+    constant and inf / -inf / -0.0 score planes; rows that see fewer than K
+    blocks; 2,049 to 131,072 tokens).
+    """
+
+    header = (
+        _SELECT_HEADER
+        + f"""
+constant constexpr uint BACKING_BLOCKS = {blocks};
+constant constexpr uint TOP_K = {topk};
+constant constexpr uint RATIO = {ratio};
+constant constexpr uint LANES = {_SIMD_TOPK_LANES};
+constant constexpr uint DIGIT_BITS = 4;
+constant constexpr uint DIGIT_PASSES = 8;
+constant constexpr uint DIGIT_VECS = 4;
+"""
+    )
+    return mx.fast.metal_kernel(
+        name=f"mtplx_qsa_prefill_topk_blocks_simd_n{blocks}_k{topk}_r{ratio}",
+        input_names=["scores", "pos_start", "total_tokens", "logical_blocks"],
+        output_names=["block_ids", "block_valid", "adjusted_scores"],
+        header=header,
+        source=_SIMD_TOPK_SOURCE,
+        ensure_row_contiguous=True,
+    )
+
+
 def qsa_indexer_prefill_topk_metal(
     scores: mx.array,
     *,
@@ -962,6 +1165,22 @@ def qsa_indexer_prefill_topk_metal(
         output_shapes = [(rows, token_width), (rows, token_width)]
         output_dtypes = [mx.int32, mx.bool_]
 
+    pos_scalar = _as_i32_scalar(pos_start, "pos_start")
+    total_scalar = _as_i32_scalar(total_tokens, "total_tokens")
+    logical_scalar = _as_i32_scalar(
+        blocks if logical_blocks is None else logical_blocks,
+        "logical_blocks",
+    )
+    if _simd_topk_applies(mode, blocks):
+        return tuple(
+            _prefill_topk_simd_kernel(blocks, topk, ratio)(
+                inputs=[scores, pos_scalar, total_scalar, logical_scalar],
+                grid=(rows * _SIMD_TOPK_LANES, 1, 1),
+                threadgroup=(_SIMD_TOPK_LANES, 1, 1),
+                output_shapes=output_shapes,
+                output_dtypes=output_dtypes,
+            )
+        )
     kernel = _prefill_topk_kernel(
         mode,
         blocks,
@@ -969,12 +1188,6 @@ def qsa_indexer_prefill_topk_metal(
         ratio,
         width,
         kernel_output_tokens,
-    )
-    pos_scalar = _as_i32_scalar(pos_start, "pos_start")
-    total_scalar = _as_i32_scalar(total_tokens, "total_tokens")
-    logical_scalar = _as_i32_scalar(
-        blocks if logical_blocks is None else logical_blocks,
-        "logical_blocks",
     )
     outputs = kernel(
         inputs=[scores, pos_scalar, total_scalar, logical_scalar],
