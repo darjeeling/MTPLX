@@ -767,18 +767,51 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
             # surfaces as extra outputs.
             cache._mtplx_verify_rows = (qkv, q, k, v, a, b)
 
-        out, state = gated_delta_update(
-            q,
-            k,
-            v,
-            a,
-            b,
-            self.A_log,
-            self.dt_bias,
-            state,
-            mask,
-            use_kernel=not self.training,
-        )
+        capture_at = _boundary_capture_offsets(S, B, cache, mask)
+        if capture_at:
+            # Same recurrence, run in segments: the state after row p - 1 is
+            # the boundary at p. The conv tail at p is the last kernel - 1
+            # rows of the pre-conv stream before p.
+            n_keep = self.conv_kernel_size - 1
+            conv_stream = mx.concatenate([conv_state, qkv], axis=1)
+            pieces = []
+            seg_start = 0
+            for edge in (*capture_at, S):
+                piece, state = gated_delta_update(
+                    q[:, seg_start:edge],
+                    k[:, seg_start:edge],
+                    v[:, seg_start:edge],
+                    a[:, seg_start:edge],
+                    b[:, seg_start:edge],
+                    self.A_log,
+                    self.dt_bias,
+                    state,
+                    None,
+                    use_kernel=not self.training,
+                )
+                pieces.append(piece)
+                if edge < S:
+                    _record_boundary_capture(
+                        cache,
+                        edge,
+                        "gdn",
+                        (mx.contiguous(conv_stream[:, edge : edge + n_keep, :]), state),
+                    )
+                seg_start = edge
+            out = mx.concatenate(pieces, axis=1)
+        else:
+            out, state = gated_delta_update(
+                q,
+                k,
+                v,
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                state,
+                mask,
+                use_kernel=not self.training,
+            )
 
         if cache is not None:
             cache[1] = state
@@ -2120,6 +2153,91 @@ _VERIFY_CAPTURE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _COMPILED_VERIFY_PLE: contextvars.ContextVar[Optional[mx.array]] = (
     contextvars.ContextVar("qwen4_exp_compiled_verify_ple", default=None)
 )
+
+
+# In-forward boundary capture (prefill). A restore boundary at prompt position
+# p needs the recurrent state AFTER token p - 1. Until now the only way to get
+# it was to END a forward at p, so the prefill loop cut the last chunk into
+# extra forwards, and on this family every forward of 64 rows or more reads
+# nearly all 512 experts of every layer once: about 0.1 s of fixed cost per
+# forward on an M5 Max (one pass over 60 GB of expert weights), whatever its
+# width. Everything a boundary needs can be taken INSIDE one wide forward: the
+# gated-delta recurrence is sequential in the token, so running it as
+# [0, p) then [p, S) from the returned state is the same arithmetic as running
+# it once, and the conv tails and the n-gram context are slices of streams the
+# layer already holds. The offsets are rows of the CURRENT forward.
+_BOUNDARY_CAPTURE: contextvars.ContextVar[Optional[tuple]] = contextvars.ContextVar(
+    "qwen4_exp_boundary_capture", default=None
+)
+_BOUNDARY_CAPTURE_ATTR = "_mtplx_boundary_captures"
+
+
+@contextlib.contextmanager
+def boundary_capture_scope(offsets):
+    """Ask the recurrent layers of the next forward to record their state at
+    each row offset (0 < offset < rows) on their cache entry."""
+
+    cleaned = tuple(sorted({int(offset) for offset in offsets if int(offset) > 0}))
+    token = _BOUNDARY_CAPTURE.set(cleaned or None)
+    try:
+        yield
+    finally:
+        _BOUNDARY_CAPTURE.reset(token)
+
+
+def _boundary_capture_offsets(rows: int, batch: int, cache: Any, mask: Any = None) -> tuple:
+    offsets = _BOUNDARY_CAPTURE.get()
+    if not offsets or cache is None or mask is not None or int(batch) != 1:
+        return ()
+    return tuple(offset for offset in offsets if 0 < offset < int(rows))
+
+
+def _record_boundary_capture(cache: Any, offset: int, kind: str, arrays: tuple) -> None:
+    store = getattr(cache, _BOUNDARY_CAPTURE_ATTR, None)
+    if store is None:
+        store = {}
+        setattr(cache, _BOUNDARY_CAPTURE_ATTR, store)
+    store.setdefault(int(offset), {})[kind] = arrays
+
+
+def take_boundary_captures(cache: list) -> dict:
+    """Pop what the last forward captured: ``{offset: [state list or None per
+    cache entry]}``, each state list laid out exactly as that entry's
+    ``state`` (GDN: conv tail, delta state; with PLE: plus the PLE conv tail
+    and the n-gram context ids). An offset is returned only when EVERY
+    recurrent entry captured it, so a partial capture can never become a
+    boundary."""
+
+    per_entry = []
+    offsets: Optional[set] = None
+    for entry in cache:
+        store = getattr(entry, _BOUNDARY_CAPTURE_ATTR, None)
+        if store is not None:
+            setattr(entry, _BOUNDARY_CAPTURE_ATTR, None)
+        recurrent = isinstance(entry, ArraysCache)
+        per_entry.append((entry, store or {}, recurrent))
+        if recurrent:
+            slots = len(entry.state)
+            complete = {
+                offset
+                for offset, kinds in (store or {}).items()
+                if "gdn" in kinds and (slots <= 2 or "ple" in kinds)
+            }
+            offsets = complete if offsets is None else offsets & complete
+    result: dict = {}
+    for offset in sorted(offsets or ()):
+        states = []
+        for entry, store, recurrent in per_entry:
+            if not recurrent:
+                states.append(None)
+                continue
+            kinds = store[offset]
+            state = list(kinds["gdn"])
+            if len(entry.state) > 2:
+                state.extend(kinds["ple"])
+            states.append(state)
+        result[offset] = states
+    return result
 
 
 @contextlib.contextmanager
@@ -5103,13 +5221,26 @@ class PLELayer(nn.Module):
         # Depthwise dilated conv, stored [channels, kernel, 1] (mlx layout).
         self.conv_weight = mx.zeros((hc_hidden, self.conv_kernel_size, 1))
 
-    def _short_conv(self, x: mx.array, cache: Optional[ArraysCache]) -> mx.array:
+    def _short_conv(
+        self, x: mx.array, cache: Optional[ArraysCache], capture: Optional[dict] = None
+    ) -> mx.array:
         B, S, C = x.shape
         if cache is not None and cache[self.CONV_IDX] is not None:
             state = cache[self.CONV_IDX]
         else:
             state = mx.zeros((B, self.conv_state_len, C), dtype=x.dtype)
         window = mx.concatenate([state, x], axis=1)
+        if capture:
+            for edge, ngram_tail in capture.items():
+                _record_boundary_capture(
+                    cache,
+                    edge,
+                    "ple",
+                    (
+                        mx.contiguous(window[:, edge : edge + self.conv_state_len, :]),
+                        ngram_tail,
+                    ),
+                )
         if cache is not None:
             cache[self.CONV_IDX] = window[:, -self.conv_state_len :, :]
         out = mx.conv1d(
@@ -5123,6 +5254,27 @@ class PLELayer(nn.Module):
         return nn.silu(out[:, -S:, :])
 
     def __call__(self, hidden: mx.array, input_ids: mx.array, cache) -> mx.array:
+        capture = None
+        capture_at = _boundary_capture_offsets(
+            int(input_ids.shape[1]), int(input_ids.shape[0]), cache
+        )
+        if capture_at:
+            # The n-gram context at p is the last context_len ids before p:
+            # read it before the embedding call replaces the cache slot.
+            embedding = self.ple_embedding
+            context_len = int(embedding.context_len)
+            ids64 = input_ids.astype(mx.int64)
+            if cache[self.NGRAM_IDX] is not None:
+                previous = cache[self.NGRAM_IDX]
+            else:
+                previous = mx.full(
+                    (int(ids64.shape[0]), context_len), embedding.eos_id, dtype=mx.int64
+                )
+            history = mx.concatenate([previous, ids64], axis=1)
+            capture = {
+                edge: mx.contiguous(history[:, edge : edge + context_len])
+                for edge in capture_at
+            }
         emb = self.ple_embedding(input_ids, cache, self.NGRAM_IDX)
         emb = emb.astype(hidden.dtype)
         key = self.norm_key(self.key_proj(emb))
@@ -5134,7 +5286,7 @@ class PLELayer(nn.Module):
         gate = mx.sqrt(mx.maximum(mx.abs(gate), 1e-6)) * mx.sign(gate)
         gated = mx.sigmoid(gate) * value[..., None, :]
         gated = gated.reshape(*hidden.shape)
-        return gated + self._short_conv(self.norm_conv(gated), cache)
+        return gated + self._short_conv(self.norm_conv(gated), cache, capture)
 
 
 class DecoderLayer(nn.Module):
