@@ -240,6 +240,13 @@ class MTPLXRuntime:
 
         if not compile_forward_enabled() or not cache:
             return None
+        from .dense_mrope import dense_mrope_state
+
+        if dense_mrope_state() is not None:
+            # An image request roped at grid positions: the compiled trunk
+            # carries a tensor offset and cannot slice the position table,
+            # so this request stays on the eager forward.
+            return None
         # An unprimed cache (empty context / first token) has None KV leaves
         # that would crash the compiled graph. Only compile once the cache
         # holds real keys, and only for the plain growable KVCache shape the
@@ -821,6 +828,19 @@ def load(
 
         configure_split_full_attention(model)
         configure_native_mlp(model)
+        from .dense_mrope import configure_dense_mrope
+
+        # Dense Qwen3.5 / Qwen3.8 packs with a vision tower: image requests
+        # rope image tokens at their (t, h, w) grid positions. Runs after MTP
+        # injection so the draft head's attention is covered too. Text-only
+        # packs, other families and MTPLX_DENSE_MROPE=0 are left untouched.
+        dense_mrope_install = configure_dense_mrope(model, config)
+        if dense_mrope_install is not None:
+            # Not installed on a dense vision pack means every image request
+            # falls back to sequential positions (and is counted): say so.
+            (logger.info if dense_mrope_install.installed else logger.warning)(
+                "[dense-mrope] %s", dense_mrope_install
+            )
         from .lfm2_fast import is_lfm2_config, install_lfm2_fast
 
         # LFM2 (LiquidAI) dense hybrid: bit-exact decode fast-path that fuses

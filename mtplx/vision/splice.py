@@ -38,6 +38,12 @@ class VisionSplice:
     # an mrope contract; attention then keeps plain sequential rope.
     mrope_table: Any | None = None
     mrope_delta: int = 0
+    # Dense Qwen3.5 / Qwen3.8 path: the request's host-side position state
+    # (mtplx.dense_mrope.DenseMRopeState) when its image tokens are roped at
+    # grid positions. None keeps the sequential positions that path used
+    # before. It also picks the bank key scheme below, so it is decided once,
+    # where the splice is built, and never changed afterwards.
+    dense_mrope: Any | None = None
 
     @property
     def total_rows(self) -> int:
@@ -55,6 +61,41 @@ class VisionSplice:
 _BANK_KEY_FLAG = 1 << 62
 _BANK_KEY_MIX = 0x9E3779B97F4A7C15  # golden-ratio odd constant, stable mix
 _BANK_KEY_MASK = (1 << 62) - 1
+# Position-scheme salt for image rows roped at grid positions on the dense
+# path: blake2b-8 of b"dense_mrope_v1" under the 62-bit mask, written out as a
+# constant so keys stay stable across processes and on disk. Sequentially
+# roped requests keep the unsalted surrogates they always had.
+_DENSE_MROPE_KEY_SALT = 0x1B8EFCA3B1C212C2
+_GRID_MIX_T = 0x100000001B3
+_GRID_MIX_H = 0xC2B2AE3D27D4EB4F
+_GRID_MIX_W = 0x165667B19E3779F9
+
+
+def _position_scheme_salts(splice: VisionSplice, images: int) -> list[int]:
+    """Per-image key salt: 0 for sequential positions.
+
+    KV rows of an image, and of every token after it, depend on how the image
+    was roped. A request roped at grid positions therefore must never restore
+    a prefix that was roped sequentially (kill switch, fallback, an older
+    build) or the other way round, and never one built for another grid. The
+    salt folds the scheme and the image's (t, h, w) grid into the surrogate of
+    every pad row: a prefix match can then reach past an image only when the
+    text, the pixels, the scheme and the grid all agree, which is exactly when
+    the position table of that prefix is the same. Rows before the first image
+    are identical under both schemes and stay shareable.
+    """
+
+    if getattr(splice, "dense_mrope", None) is None:
+        return [0] * images
+    grids = splice.image_grids
+    salts: list[int] = []
+    for index in range(images):
+        salt = _DENSE_MROPE_KEY_SALT
+        if grids is not None and len(grids) == images:
+            t, h, w = (int(x) for x in grids[index])
+            salt ^= (t * _GRID_MIX_T) ^ (h * _GRID_MIX_H) ^ (w * _GRID_MIX_W)
+        salts.append(salt & _BANK_KEY_MASK)
+    return salts
 
 
 def vision_bank_key_ids(
@@ -68,7 +109,9 @@ def vision_bank_key_ids(
     position is remapped to a surrogate derived from its image's content
     digest and row index: the key sequence becomes a pure function of
     (text tokens, pixel content, positions). Same pixels restore exactly;
-    different pixels can never match. The model input is untouched.
+    different pixels can never match. The model input is untouched. On the
+    dense path a request roped at grid positions also folds that scheme and
+    each image's grid into its surrogates (see _position_scheme_salts).
 
     Returns None when the splice carries no content identity (legacy
     construction) or the pad layout does not match the supplied images;
@@ -84,6 +127,7 @@ def vision_bank_key_ids(
     if total_pads != sum(int(count) for count in pad_counts):
         return None
     keyed = list(prompt_ids)
+    salts = _position_scheme_salts(splice, len(digests))
     image_idx = 0
     row_in_image = 0
     for pos, token in enumerate(keyed):
@@ -93,7 +137,11 @@ def vision_bank_key_ids(
             image_idx += 1
             row_in_image = 0
         mixed = (
-            (int(digests[image_idx]) ^ (row_in_image * _BANK_KEY_MIX))
+            (
+                int(digests[image_idx])
+                ^ (row_in_image * _BANK_KEY_MIX)
+                ^ salts[image_idx]
+            )
             & _BANK_KEY_MASK
         )
         keyed[pos] = _BANK_KEY_FLAG | mixed

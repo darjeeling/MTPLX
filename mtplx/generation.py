@@ -3417,6 +3417,17 @@ def _prefill_restored_prompt_suffix(
         and _mtp_history_uses_committed_cache(mtp_history_policy)
         and restored.mtp_history_cache is not None
     )
+    if use_committed_mtp:
+        _dense_mrope = _dense_mrope_state_of(vision_splice)
+        if _dense_mrope is not None and _mtp_cache_offset(
+            restored.mtp_history_cache
+        ) != int(restored.entry.prefix_len) - 1:
+            # A full draft history holds one row per prefix token but the
+            # last. A shorter one was reset in an earlier turn: its rows were
+            # stored with the stock rope, so the rows appended now must match.
+            _dense_mrope_release_draft_head(
+                _dense_mrope, _DRAFT_HEAD_MISALIGNED_RESTORE_REASON
+            )
     # Vision suffixes: the caller pre-advanced the cursor past pads inside
     # the restored prefix; trunk chunks consume the remaining rows
     # sequentially, history windows read the same rows cursor-free.
@@ -4706,6 +4717,81 @@ def _debug_prefix_divergence(rt: MTPLXRuntime, prompt_ids: list[int], session_ba
         print(f"[mtplx] prefix-diverge diagnostic failed: {exc}", file=sys.stderr)
 
 
+def _dense_mrope_state_of(vision_splice: Any | None):
+    """The dense-path image position state a splice carries, or None.
+
+    None for text requests (no import, no work), for every family but the
+    dense Qwen3.5 / Qwen3.8 packs, and for requests that fell back to
+    sequential positions.
+    """
+    if vision_splice is None or getattr(vision_splice, "dense_mrope", None) is None:
+        return None
+    from .dense_mrope import state_of
+
+    return state_of(vision_splice)
+
+
+_DRAFT_HEAD_WINDOWED_REASON = (
+    "the draft head's history is windowed or on an explicit position mode, so "
+    "its rows are not the prompt rows the image position table indexes"
+)
+_DRAFT_HEAD_MISALIGNED_RESTORE_REASON = (
+    "the restored draft-head history is shorter than the restored prompt "
+    "prefix (a history reset in an earlier turn), so its rows keep the stock "
+    "positions they were stored with"
+)
+_DENSE_MROPE_EAGER_VERIFY_REASON = (
+    "image requests on the dense path keep the eager verifier: the compiled "
+    "verifier carries a tensor offset and the image position table is sliced "
+    "by the host offset"
+)
+_DENSE_MROPE_STOCK_DRAFT_REASON = (
+    "image requests on the dense path keep the stock draft route: the "
+    "compiled draft core carries a tensor offset and the image position table "
+    "is sliced by the host offset"
+)
+
+
+def _dense_mrope_release_draft_head(state: Any | None, reason: str | None) -> None:
+    """Put the draft head of an armed request back on the stock rope.
+
+    The adapter indexes the position table with the draft cache's own offset,
+    which is the prompt index only while that cache holds one row per
+    committed token from the start. ``reason`` None means the stock rope is
+    exactly equivalent (every row left in the cache is past the prompt, where
+    image positions are the sequence index plus one constant), so nothing is
+    counted; otherwise the request is counted once.
+    """
+    if state is None or not state.mtp_aligned:
+        return
+    state.mtp_aligned = False
+    if reason is not None:
+        _note_demotion("vision_draft_head_sequential_positions", reason)
+
+
+def _with_dense_mrope_request(fn):
+    """Arm the dense-path image positions for a whole generation.
+
+    Prefill, verify, repair, bonus, commit and copy rounds, and the draft
+    head all rope through the same per-layer adapter, so one scope around the
+    request covers every forward it runs. Text requests, and families whose
+    splice carries no dense state, call straight through.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        state = _dense_mrope_state_of(kwargs.get("vision_splice"))
+        if state is None:
+            return fn(*args, **kwargs)
+        from .dense_mrope import dense_mrope_scope
+
+        with dense_mrope_scope(state):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _vision_rope_scope_for(vision_splice: Any | None):
     """Context manager arming M-RoPE for forwards of a vision request.
 
@@ -4714,7 +4800,16 @@ def _vision_rope_scope_for(vision_splice: Any | None):
     read it via vision_rope_state() inside attention and self-slice by cache
     offset, so no per-forward plumbing is needed. Text requests and families
     without a table get a nullcontext — zero behavior change.
+
+    The dense Qwen3.5 / Qwen3.8 path carries its own host-side state on the
+    splice (mtplx.dense_mrope) and arms that instead; a splice holds one or
+    the other, never both.
     """
+    dense_mrope = _dense_mrope_state_of(vision_splice)
+    if dense_mrope is not None:
+        from .dense_mrope import dense_mrope_scope
+
+        return dense_mrope_scope(dense_mrope)
     table = getattr(vision_splice, "mrope_table", None) if vision_splice else None
     delta = int(getattr(vision_splice, "mrope_delta", 0) or 0) if vision_splice else 0
     if table is None and delta == 0:
@@ -4827,6 +4922,18 @@ def restore_or_prefill_prompt_state(
     mtp_history_window_tokens = (
         _mtp_history_last_window_tokens() if mtp_history_policy == "last_window" else 0
     )
+    _dense_mrope = _dense_mrope_state_of(vision_splice)
+    if _dense_mrope is not None:
+        # The table was built for the ids the splice was built for; refuse a
+        # prompt whose image tokens moved since (a suffix appended after the
+        # last image is fine, those rows rope at index + delta).
+        _dense_mrope.check_prompt(prompt_ids, int(vision_splice.image_pad_token_id))
+        if mtp_history_policy == "cycle":
+            # Per-cycle draft caches hold rows past the prompt only, where
+            # the stock rope is exactly the image-request rope.
+            _dense_mrope_release_draft_head(_dense_mrope, None)
+        elif mtp_history_policy != "committed" or mtp_position_mode != "cache":
+            _dense_mrope_release_draft_head(_dense_mrope, _DRAFT_HEAD_WINDOWED_REASON)
     # Dashboard prefill instrumentation. We fire `phase: "started"` before
     # any restore/prefill work runs (so the UI can flip into prefill mode
     # immediately), `phase: "chunk"` from inside the chunked path after
@@ -8266,6 +8373,7 @@ def generate_mtp1(
     )
 
 
+@_with_dense_mrope_request
 def generate_mtpk(
     rt: MTPLXRuntime,
     prompt_ids: list[int],
@@ -8427,6 +8535,15 @@ def generate_mtpk(
         )
     if draft_core not in {"stock", "device-d2", "device"}:
         raise ValueError("draft_core must be 'stock', 'device-d2', or 'device'")
+    # Dense-path image request roped at grid positions (None otherwise, text
+    # requests included). The position table is sliced by the HOST cache
+    # offset, so this request stays off every route that carries a tensor
+    # offset: the compiled draft cores here, the compiled verifier and the
+    # graph bank below.
+    _dense_mrope_request = _dense_mrope_state_of(vision_splice)
+    if _dense_mrope_request is not None and draft_core != "stock":
+        _note_demotion("vision_request_eager_draft", _DENSE_MROPE_STOCK_DRAFT_REASON)
+        draft_core = "stock"
     if not 0.0 <= adapter_ensemble_epsilon <= 1.0:
         raise ValueError("adapter_ensemble_epsilon must be in [0, 1]")
     if adapter_ensemble_min_depth < 1:
@@ -8916,6 +9033,7 @@ def generate_mtpk(
     graphbank = (
         SpecDecodeGraphBank(rt, capture_backend=verify_core_backend)
         if verify_strategy in {"graphbank", "graphbank_capture_commit"}
+        and _dense_mrope_request is None
         else None
     )
     _compiled_verify_mode = compiled_verify_mode()
@@ -8966,6 +9084,7 @@ def generate_mtpk(
             restored_tokens=int(getattr(prompt_state, "cached_tokens", 0) or 0),
         )
         if _compiled_verify_mode != "off"
+        and _dense_mrope_request is None
         and (
             verify_strategy in {"capture_commit", "graphbank_capture_commit"}
             or generic_compiled_target_prefix
@@ -8973,6 +9092,27 @@ def generate_mtpk(
         )
         else None
     )
+    if _dense_mrope_request is not None:
+        if (
+            _compiled_verify_mode != "off"
+            and (
+                verify_strategy in {"capture_commit", "graphbank_capture_commit"}
+                or generic_compiled_target_prefix
+            )
+        ) or verify_strategy in {"graphbank", "graphbank_capture_commit"}:
+            # This request would have had the compiled verifier or the graph
+            # bank; it runs the eager verifier instead, and says so.
+            _note_demotion(
+                "vision_request_eager_verify", _DENSE_MROPE_EAGER_VERIFY_REASON
+            )
+        if mtp_history_cache is not None and _mtp_cache_offset(
+            mtp_history_cache
+        ) != len(prompt_ids) - 1:
+            # Fully cached prompt: no suffix prefill ran to look at the
+            # restored draft history, so look here (same rule as there).
+            _dense_mrope_release_draft_head(
+                _dense_mrope_request, _DRAFT_HEAD_MISALIGNED_RESTORE_REASON
+            )
     if (
         qwen4_fixed_m4_compiled_verify
         and compiled_verify_bank is not None
@@ -10591,6 +10731,10 @@ def generate_mtpk(
                 mtp_history_cache = rt.make_mtp_cache()
                 mtp_history_live_resets += 1
                 mtp_history_live_appended = 0
+                # Dense-path image request: the fresh cache restarts at row
+                # 0 and will only ever hold rows past the prompt, where the
+                # stock rope is exactly the image-request rope. Not counted.
+                _dense_mrope_release_draft_head(_dense_mrope_request, None)
             mtp_cache = mtp_history_cache
             cycle_mtp_offset = _mtp_cache_offset(mtp_cache)
         else:

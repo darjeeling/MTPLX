@@ -76,6 +76,25 @@ KINDS: dict[str, str] = {
         "An image request ran on the eager verifier (the compiled verifier "
         "cannot carry the image position offsets)."
     ),
+    "vision_request_eager_draft": (
+        "An image request ran the draft head on the stock route (the compiled "
+        "draft core cannot carry the image position offsets)."
+    ),
+    "vision_mrope_sequential_fallback": (
+        "An image request on a dense Qwen pack was roped with sequential "
+        "positions because its image position table could not be built or the "
+        "model's attention could not carry it."
+    ),
+    "vision_draft_head_sequential_positions": (
+        "An image request's draft head kept sequential positions (its history "
+        "cache is windowed, reset or on an explicit position mode); only the "
+        "draft acceptance rate is affected, the verifier stays exact."
+    ),
+    "vision_mrope_tensor_offset_call": (
+        "An attention call with a tensor cache offset ran during an image "
+        "request and kept the stock positions (a route that should have been "
+        "bypassed for that request)."
+    ),
 }
 
 _COUNTS: dict[str, int] = dict.fromkeys(KINDS, 0)

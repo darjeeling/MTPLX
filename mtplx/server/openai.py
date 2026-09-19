@@ -5547,6 +5547,24 @@ def _materialize_vision_splice(
             mrope_table = _mx.array(table_np)
             _mx.eval(mrope_table)
 
+    # Dense Qwen3.5 / Qwen3.8 packs: the same table, kept on the host and
+    # armed by generation for the whole request (mtplx.dense_mrope). None for
+    # every other family, for MTPLX_DENSE_MROPE=0, and (counted in the
+    # demotion ledger) when the table cannot be built; the request then keeps
+    # sequential positions. Decided here once: the bank key scheme follows it.
+    dense_mrope = None
+    if spec.mrope_section and spec.model_type != "qwen4_exp":
+        from mtplx.dense_mrope import build_request_state
+
+        dense_mrope = build_request_state(
+            getattr(getattr(state, "runtime", None), "model", None),
+            expanded_ids,
+            image_token_id=int(spec.image_token_id),
+            image_grids=grids,
+            spatial_merge_size=int(spec.spatial_merge_size),
+            video_token_id=int(spec.video_token_id),
+        )
+
     return expanded_ids, VisionSplice(
         image_pad_token_id=int(spec.image_token_id),
         embeddings=embeddings,
@@ -5555,6 +5573,7 @@ def _materialize_vision_splice(
         image_grids=tuple(grids),
         mrope_table=mrope_table,
         mrope_delta=mrope_delta,
+        dense_mrope=dense_mrope,
     )
 
 
@@ -32003,6 +32022,15 @@ def create_app(state: ServerState) -> FastAPI:
         if vision_splice is not None:
             request_observability["request_vision_images"] = len(vision_images)
             request_observability["request_vision_rows"] = vision_splice.total_rows
+            # How the image tokens were positioned: "grid" when a position
+            # table rides the splice (Flash-Next, and the dense Qwen packs
+            # through mtplx.dense_mrope), "sequential" otherwise.
+            request_observability["request_vision_positions"] = (
+                "grid"
+                if getattr(vision_splice, "dense_mrope", None) is not None
+                or getattr(vision_splice, "mrope_table", None) is not None
+                else "sequential"
+            )
         # Receipt identity + resolved effort: request_id joins the receipt to
         # flight-recorder events (the cancellation lane already stamps it; this
         # covers the normal lane via envelope.update), and the resolved effort
