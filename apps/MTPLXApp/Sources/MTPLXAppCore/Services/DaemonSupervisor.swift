@@ -144,6 +144,9 @@ public final class DaemonSupervisor: @unchecked Sendable {
     private var process: Process?
     private var adoptedProcessID: pid_t?
     private let logStore: BoundedLogStore
+    /// Where a failed start's output is written (#504). `nil` writes nothing:
+    /// the default, so a test that fails a launch never touches the real home.
+    private let startFailureReportURL: URL?
     private let restartPolicy: DaemonRestartPolicy
     private let restartSleeper: @Sendable (TimeInterval) async -> Void
     private let initialHealthProbe: @Sendable (URL, String?) async -> HealthPayload?
@@ -187,6 +190,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
     public init(
         logStore: BoundedLogStore = BoundedLogStore(),
         restartPolicy: DaemonRestartPolicy = .default,
+        startFailureReportURL: URL? = nil,
         restartSleeper: @escaping @Sendable (TimeInterval) async -> Void = { delay in
             guard delay > 0 else { return }
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -219,6 +223,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
     ) {
         self.logStore = logStore
         self.restartPolicy = restartPolicy
+        self.startFailureReportURL = startFailureReportURL
         self.restartSleeper = restartSleeper
         self.initialHealthProbe = initialHealthProbe
         self.healthWaitProbe = healthWaitProbe
@@ -606,6 +611,13 @@ public final class DaemonSupervisor: @unchecked Sendable {
                 }
             }
             notifyStatusObserver()
+            if let startFailureReportURL, exitStatus != 0 {
+                StartFailureReport.write(
+                    detail: "daemon exited during launch with status \(exitStatus)",
+                    entries: await logStore.snapshot(),
+                    to: startFailureReportURL
+                )
+            }
             throw DaemonSupervisorError.launchFailed(
                 "daemon exited during launch with status \(exitStatus)"
             )
@@ -1510,10 +1522,20 @@ public final class DaemonSupervisor: @unchecked Sendable {
             // for the entire startup timeout.
             try Task.checkCancellation()
             if !isRunning() {
-                let tail = await logStore.snapshot().suffix(8).map(\.message).joined(separator: " | ")
+                let entries = await logStore.snapshot()
+                let tail = entries.suffix(8).map(\.message).joined(separator: " | ")
                 let detail = tail.isEmpty
                     ? "daemon exited before /health became ready"
                     : "daemon exited before /health became ready: \(tail)"
+                // The banner shows one line of this and cuts the rest off
+                // (#504). Keep the whole output where `mtplx doctor` finds it.
+                if let startFailureReportURL {
+                    StartFailureReport.write(
+                        detail: "daemon exited before /health became ready",
+                        entries: entries,
+                        to: startFailureReportURL
+                    )
+                }
                 throw DaemonSupervisorError.launchFailed(detail)
             }
             if let health = await healthWaitProbe(baseURL, apiKey), health.ok {
