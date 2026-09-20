@@ -431,8 +431,29 @@ STREAM_STALL_DEADLINE_S = _resolve_stream_stall_deadline_s(
 # fans. It never cancels a request, so it is safe to be eager here. Total time
 # to fan restore is this plus MTPLX_SMART_FAN_STALE_LEASE_S. 0 disables (the
 # probe then keeps the presence-only behaviour).
-FOREGROUND_STALL_DEADLINE_S = float(
-    os.environ.get("MTPLX_FOREGROUND_STALL_DEADLINE_S") or 180.0
+FOREGROUND_STALL_DEADLINE_DEFAULT_S = 180.0
+
+
+def _resolve_foreground_stall_deadline_s(raw: str | float | None) -> float:
+    """Seconds of a still owner heartbeat before a registered request stops
+    counting as fan activity; 0 turns the check off.
+
+    Same parsing law as the stream deadline (#448): blank, absent or
+    unreadable means the default, and "0" stays 0.
+    """
+    if raw is None:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+    text = str(raw).strip()
+    if not text:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+
+
+FOREGROUND_STALL_DEADLINE_S = _resolve_foreground_stall_deadline_s(
+    os.environ.get("MTPLX_FOREGROUND_STALL_DEADLINE_S")
 )
 
 

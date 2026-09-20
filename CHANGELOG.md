@@ -25,6 +25,19 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **A stuck request no longer holds the fans at maximum** (PR #295,
+  El-Patronum). In Smart fan mode a request holds the fans up until it
+  ends, and a safety net restores them when the server has been idle for
+  120 s with a request still holding them. A request that was stuck still
+  counted as activity, so the safety net never ran: one report had both fans
+  at maximum for about fifteen hours behind a request whose client had
+  already gone. A request now counts as activity only while the model is
+  making progress. After 180 s without any (`MTPLX_FOREGROUND_STALL_DEADLINE_S`,
+  `0` switches the check off) it stops counting, and the fans return to
+  automatic 120 s later. Nothing is cancelled. The batched serving paths now
+  report progress during prefill as well, which also stops the stream
+  watchdog from failing a healthy batched prefill that runs longer than its
+  300 s deadline.
 - **Forge builds a model that ships as one weights file** (issue #492). A
   model small enough for a single `model.safetensors` has no
   `model.safetensors.index.json`. `mtplx inspect` read the file's header
