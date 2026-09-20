@@ -505,8 +505,23 @@ def _metal_memory_limit_bytes(rt: Any) -> int:
 #: armed from 16K as the lane stamps it.  128 GB M5 Max, cold prompts,
 #: 2026-09-18: process peak 98.8 GB at 64K and 100.0 GB at 128K from 88.3 GB
 #: live, with 1.9 and 3.7 GB of KV growth, so 8.0 to 8.6 GB.  The 2,048-row plan
-#: needs about 1.6 GB less.  Charged linearly in the width.
+#: needs about 1.6 GB less.  Charged linearly in the width.  Since 2026-09-20
+#: this flat figure is only the fallback for a runtime whose geometry cannot
+#: be read: the three things it is made of are charged one by one below.
 _WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS = 8 * 2**30
+#: What one prefill forward holds at once, per row: the expert gather and its
+#: intermediates, the widened streams, the GDN tensors.  Read off Friday's
+#: chunk trace as process peak minus active memory on the FIRST wide chunk of
+#: a request, where nothing else has grown yet: 1.3 GB at 2,972 rows and
+#: 1.8 GB at 4,096, so 0.44 MB a row.  Charged at 0.5 MiB.
+_WIDE_PREFILL_FORWARD_BYTES_PER_ROW = 512 * 1024
+#: Growth that is neither KV nor width: eight boundary snapshots (115 MB each
+#: on Flash-Next: 36 conv tails and float32 delta states) and allocator slack.
+_WIDE_PREFILL_FIXED_BYTES = 2**30
+#: Below the sparse crossover the eager indexer holds, per row and key: a
+#: float32 score for each of its 4 heads on every 4-token block, the reduced
+#: score, the argpartition ids and the bool mask.
+_WIDE_PREFILL_DENSE_INDEXER_BYTES_PER_ROW_KEY = 7
 #: The line the fixed-M4 lane's own live gate holds (its PRESSURE_FRACTION).
 _WIDE_PREFILL_PRESSURE_FRACTION = 0.97
 _WIDE_PREFILL_REFUSED_REASON = (
@@ -543,6 +558,147 @@ def _prefill_chunk_env_is_pinned() -> bool:
     return False
 
 
+def _wide_prefill_flat_bill() -> bool:
+    """``MTPLX_QWEN4_PREFILL_WIDE_BILL=flat`` restores Friday's charge of a
+    flat 8 GiB per 4,096 rows on top of the KV growth (the rollback for the
+    itemized bill)."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_WIDE_BILL") or "").strip().lower()
+    return raw == "flat"
+
+
+def _qwen4_prefill_geometry(rt: Any) -> dict[str, int] | None:
+    """The few model dimensions the wide-chunk memory bill is made of."""
+
+    model = getattr(rt, "model", None)
+    text = getattr(model, "language_model", model)
+    args = getattr(text, "args", None)
+    if args is None:
+        args = getattr(getattr(text, "model", None), "args", None)
+    layer_types = list(getattr(args, "layer_types", None) or ())
+    heads = int(getattr(args, "num_attention_heads", 0) or 0)
+    if not layer_types or heads <= 0:
+        return None
+    n_gdn = sum(1 for kind in layer_types if kind == "linear_attention")
+    n_qsa = len(layer_types) - n_gdn
+    conv_dim = 2 * int(getattr(args, "linear_num_key_heads", 0) or 0) * int(
+        getattr(args, "linear_key_head_dim", 0) or 0
+    ) + int(getattr(args, "linear_num_value_heads", 0) or 0) * int(
+        getattr(args, "linear_value_head_dim", 0) or 0
+    )
+    stream = int(getattr(args, "hidden_size", 0) or 0) * int(
+        getattr(args, "hc_count", 0) or 1
+    )
+    ple_layers = len(list(getattr(args, "ple_layer_ids", None) or ()))
+    if n_qsa <= 0 or conv_dim <= 0:
+        return None
+    return {
+        "heads": heads,
+        "n_qsa": n_qsa,
+        "hidden": int(getattr(args, "hidden_size", 0) or 0),
+        # bf16 bytes of pre-conv stream one row keeps alive across all the
+        # recurrent layers when the chunk eval does not name their states.
+        "pinned_bytes_per_row": 2 * (n_gdn * conv_dim + ple_layers * stream),
+    }
+
+
+def _qwen4_dense_attention_keys(rows: int, prompt_tokens: int) -> int:
+    """The longest key length a DENSE forward of ``rows`` rows can see.
+
+    The sparse lane serves a forward whose earliest query has the crossover's
+    worth of history, so a dense forward has less than that and sees fewer
+    than ``crossover + rows`` keys.  A Mac whose sparse lane is off stays dense
+    at every length.
+    """
+
+    prompt_tokens = max(0, int(prompt_tokens))
+    try:
+        from mtplx.models.qwen4_exp import _qsa_prefill_enabled, _qsa_prefill_flash_floor
+
+        if not _qsa_prefill_enabled():
+            return prompt_tokens
+        return min(prompt_tokens, int(_qsa_prefill_flash_floor(int(rows))) + int(rows))
+    except Exception:
+        return prompt_tokens
+
+
+def _qwen4_wide_prefill_need(
+    rt: Any, *, rows: int, prompt_tokens: int, per_token: int
+) -> dict[str, int]:
+    """The bill for prefilling ``prompt_tokens`` in ``rows``-row forwards.
+
+    Friday's flat 8 GiB was three things, none of which grows with the prompt:
+    the pre-conv streams the recurrent states kept alive (3.1 GB at 4,096
+    rows, gone now that the chunk eval names them), the score matrix stock
+    attention materializes below the sparse crossover (24 heads x rows x keys
+    in bf16: 3.2 GB at 4,096 rows and 16K keys), and the forward's own
+    intermediates (1.8 GB).  Each is charged for what it is, so a lower
+    crossover or a narrower rung is billed less and a Mac without the sparse
+    lane is billed the whole dense matrix.
+
+    The score matrix and the expert intermediates belong to different blocks
+    of a layer and the dense forwards run while the KV is still short, so the
+    bill is the larger of two moments, not their sum: the last dense forward
+    (its KV so far, the score matrix, half the forward's own transient for
+    what may still be in flight) and the last forward of the prompt (all of
+    the KV, the forward's transient).  Friday's forced 128K trace is the
+    receipt: the process peak was set in the 12K to 16K chunk, 4.4 GB over
+    active memory, and did not rise again while the KV grew by 3.3 GB more.
+    """
+
+    rows = int(rows)
+    prompt_tokens = max(0, int(prompt_tokens))
+    geometry = None if _wide_prefill_flat_bill() else _qwen4_prefill_geometry(rt)
+    per_token = max(0, int(per_token))
+    if geometry is None:
+        kv = prompt_tokens * per_token
+        transient = (_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS * rows) // 4096
+        return {"kv_bytes": kv, "transient_bytes": transient, "need_bytes": kv + transient}
+    if bool(getattr(rt, "mtp_enabled", False)):
+        # The draft head's own cache (one more layer of the same geometry)
+        # and the committed history's hidden row.  128K cold on a 128 GB M5
+        # Max, 2026-09-20: active memory grew 33.7 KB a token between 12K and
+        # 115K where the trunk's own geometry says 28.4; this charges 35.9.
+        per_token += per_token // max(1, geometry["n_qsa"]) + 2 * geometry["hidden"]
+    kv = prompt_tokens * per_token
+    forward = _WIDE_PREFILL_FORWARD_BYTES_PER_ROW * rows
+    keys = _qwen4_dense_attention_keys(rows, prompt_tokens)
+    dense = rows * keys * (
+        2 * geometry["heads"] + _WIDE_PREFILL_DENSE_INDEXER_BYTES_PER_ROW_KEY
+    )
+    at_last_dense_forward = keys * per_token + dense + forward // 2
+    at_last_forward = kv + forward
+    pinned = (
+        0
+        if _prefill_eval_recurrent_state_enabled()
+        else geometry["pinned_bytes_per_row"] * rows
+    )
+    need = max(at_last_dense_forward, at_last_forward) + pinned + _WIDE_PREFILL_FIXED_BYTES
+    return {
+        "kv_bytes": int(kv),
+        "forward_bytes": int(forward),
+        "dense_attention_bytes": int(dense),
+        "dense_attention_keys": int(keys),
+        "pinned_stream_bytes": int(pinned),
+        "fixed_bytes": int(_WIDE_PREFILL_FIXED_BYTES),
+        "transient_bytes": int(need - kv),
+        "need_bytes": int(need),
+    }
+
+
+def _wide_prefill_rungs(wide: int) -> list[int]:
+    """Widths to try, widest first: the stamped width, then the powers of two
+    below it down to 4,096.  2,048 is the refusal, not a rung."""
+
+    rungs = [int(wide)]
+    step = 1 << (int(wide) - 1).bit_length()
+    while step > 4096:
+        step //= 2
+        if step < wide:
+            rungs.append(step)
+    return rungs
+
+
 def qwen4_wide_prefill_chunk_tokens(
     rt: Any, *, prompt_tokens: int, receipt: dict | None = None
 ) -> int | None:
@@ -556,14 +712,16 @@ def qwen4_wide_prefill_chunk_tokens(
     them holds 1,125 tok/s from 16K of history where the masked dense lane has
     fallen to 700.
 
-    Per request and never sticky: the width is granted only while live
-    allocator bytes, the prompt's own KV growth and the wider forward's
-    whole transient stay under 0.97 of the Metal limit
-    (``MTPLX_QWEN4_PREFILL_WIDE_PRESSURE``).  A refusal is the 2,048-row
-    plan, which is today's behaviour, so the gate can only ever give memory
-    back.  An operator who moves the ``MTPLX_PREFILL_CHUNK_SIZE`` knobs off
-    their profile defaults is obeyed here, and ``--prefill-chunk-tokens``
-    never reaches this function.
+    Per request and never sticky: a width is granted only while live
+    allocator bytes, the prompt's own KV growth and that width's itemized
+    transient (``_qwen4_wide_prefill_need``) stay under 0.97 of the Metal
+    limit (``MTPLX_QWEN4_PREFILL_WIDE_PRESSURE``).  The stamped width is
+    tried first, then the powers of two below it down to 4,096, so a stamp
+    of 8,192 degrades to 4,096 before it degrades to a refusal.  A refusal
+    is the 2,048-row plan, which is what shipped through 2.11.3, so the gate
+    can only ever give memory back.  An operator who moves the
+    ``MTPLX_PREFILL_CHUNK_SIZE`` knobs off their profile defaults is obeyed
+    here, and ``--prefill-chunk-tokens`` never reaches this function.
     """
 
     wide = _env_int("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", 0)
@@ -576,36 +734,50 @@ def qwen4_wide_prefill_chunk_tokens(
     if limit <= 0:
         return wide
     per_token = _qwen4_fixed_m4_promotion_bytes_per_token(rt)
-    transient = (_WIDE_PREFILL_TRANSIENT_BYTES_PER_4096_ROWS * wide) // 4096
-    need = prompt_tokens * max(0, per_token) + transient
-    live = _mlx_live_memory_bytes()
     line = int(limit * _wide_prefill_pressure_fraction())
-    if live + need > line:
-        _mlx_release_allocator_cache()
-        live = _mlx_live_memory_bytes()
-    granted = live + need <= line
+    live = _mlx_live_memory_bytes()
+    released = False
+    granted: int | None = None
+    bill: dict[str, int] = {}
+    # A rung the prompt cannot fill buys nothing over the next one down.
+    rungs = [rung for rung in _wide_prefill_rungs(wide) if rung < 2 * prompt_tokens]
+    for rung in rungs or [wide]:
+        bill = _qwen4_wide_prefill_need(
+            rt, rows=rung, prompt_tokens=prompt_tokens, per_token=per_token
+        )
+        if live + bill["need_bytes"] > line and not released:
+            # The allocator cache is free memory the allocator is holding.
+            _mlx_release_allocator_cache()
+            live = _mlx_live_memory_bytes()
+            released = True
+        if live + bill["need_bytes"] <= line:
+            granted = rung
+            break
     if receipt is not None:
         receipt.update(
             wide_chunk_tokens=wide,
-            granted=bool(granted),
+            granted=granted is not None,
+            granted_chunk_tokens=int(granted or 0),
             live_bytes=int(live),
-            need_bytes=int(need),
             threshold_bytes=int(line),
+            **bill,
         )
-    if not granted:
+    if granted is None:
         _note_demotion("qwen4_wide_prefill_chunk_refused", _WIDE_PREFILL_REFUSED_REASON)
         try:
             print(
                 f"[qwen4-prefill] {wide}-row chunk not granted for this request, "
                 f"2,048-row plan: prompt {prompt_tokens} tokens, live "
-                f"{live / 1e9:.1f} GB + need {need / 1e9:.1f} GB over the "
+                f"{live / 1e9:.1f} GB + need {bill['need_bytes'] / 1e9:.1f} GB "
+                f"(KV {bill['kv_bytes'] / 1e9:.1f}, transient "
+                f"{bill['transient_bytes'] / 1e9:.1f}) over the "
                 f"{line / 1e9:.1f} GB line",
                 file=sys.stderr,
                 flush=True,
             )
         except Exception:
             pass
-    return wide if granted else None
+    return granted
 
 
 _FIXED_M4_RETIRED_SKIP_REASON = (
