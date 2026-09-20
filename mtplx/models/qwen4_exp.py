@@ -2210,6 +2210,78 @@ def _record_boundary_capture(cache: Any, offset: int, kind: str, arrays: tuple) 
     store.setdefault(int(offset), {})[kind] = arrays
 
 
+# Mid-loop evals in a wide prefill forward. One eval at the end of a forward
+# puts every root at the END of MLX's tape, so the 3-row conv tail each
+# recurrent layer stores (a lazy slice of its [rows + 3, 10,240] pre-conv
+# stream) is materialized last and all 37 streams stay alive to the end of the
+# forward: 3.1 GB at 4,096 rows on Flash-Next, on top of the forward's own
+# intermediates. Measured 2026-09-20 on a 128 GB M5 Max: naming the states in
+# the chunk's eval took 3.0 GB off ACTIVE memory between chunks and nothing
+# off the PEAK (128K cold, 4,096-row chunks: process peak 100.8 GB, 4.8 GB
+# over active memory, against a 100.0 GB line). Scheduling the stream and the
+# states every few layers lets each stream die as soon as its layer is done.
+# Same graph, same kernels, same inputs to every kernel: only when work is
+# handed to the GPU changes, so every output bit is unchanged (the test
+# compares bits). It also hands the GPU its first layers while Python is
+# still building the last ones.
+_PREFILL_MIDLOOP_MIN_ROWS = 1024
+_PREFILL_MIDLOOP_DEFAULT_LAYERS = 4
+
+
+def _prefill_midloop_eval_layers(rows: int) -> int:
+    """Layers between mid-loop evals of a prefill forward; 0 means none.
+
+    ``MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL`` is that number of layers (default 4,
+    one attention group of this family); ``0`` restores the single eval at
+    the end. Decode, verify and narrow forwards never take it.
+    """
+
+    if int(rows) < _PREFILL_MIDLOOP_MIN_ROWS:
+        return 0
+    if current_attention_phase() != "prefill":
+        return 0
+    return prefill_midloop_eval_setting()
+
+
+def prefill_midloop_eval_setting() -> int:
+    """The switch alone (the wide-chunk memory gate bills by it)."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL") or "").strip().lower()
+    if not raw:
+        return _PREFILL_MIDLOOP_DEFAULT_LAYERS
+    if raw in {"off", "false", "no"}:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _PREFILL_MIDLOOP_DEFAULT_LAYERS
+
+
+def _midloop_state_arrays(entries) -> list:
+    """The lazy arrays a finished layer group leaves on its cache entries:
+    the recurrent states and any in-forward boundary captures. KV entries are
+    consumed by their own layer's attention and need no naming."""
+
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, mx.array):
+            found.append(node)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+
+    for entry in entries:
+        if not isinstance(entry, ArraysCache):
+            continue
+        walk(getattr(entry, "cache", None))
+        walk(getattr(entry, _BOUNDARY_CAPTURE_ATTR, None))
+    return found
+
+
 def take_boundary_captures(cache: list) -> dict:
     """Pop what the last forward captured: ``{offset: [state list or None per
     cache entry]}``, each state list laid out exactly as that entry's
@@ -5543,7 +5615,9 @@ class Qwen4ExpTextModel(nn.Module):
             h = self._decode_layers_compiled(h, inputs, cache)
         else:
             capture = _VERIFY_CAPTURE.get()
-            for layer, c in zip(self.layers, cache):
+            midloop = _prefill_midloop_eval_layers(int(h.shape[1]))
+            last = len(self.layers) - 1
+            for index, (layer, c) in enumerate(zip(self.layers, cache)):
                 if (
                     capture
                     and c is not None
@@ -5551,6 +5625,10 @@ class Qwen4ExpTextModel(nn.Module):
                 ):
                     c._mtplx_verify_ple = (h, inputs)
                 h = layer(h, input_ids=inputs, ssm_mask=ssm_mask, cache=c)
+                if midloop and index < last and (index + 1) % midloop == 0:
+                    mx.async_eval(
+                        h, *_midloop_state_arrays(cache[index + 1 - midloop : index + 1])
+                    )
         # The MTP head consumes the pre-mixer widened stream; keep the last
         # one reachable (lazy ref, freed on the next step).
         self._last_widened = h
