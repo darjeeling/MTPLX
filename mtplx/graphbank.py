@@ -2284,15 +2284,32 @@ class CompiledVerifyBank:
             else:
                 state_in.extend(entry.cache[:n_leaves])
 
+        # Host split of the replay (four clock reads per round): the n-gram row
+        # gather, the input eval, the graph replay and the encode. The verify
+        # forward is most of a decode round and it is one opaque host call
+        # otherwise; the request log carries these as compiled_verify
+        # fixed_m4_host_s so a slow round can be read, not guessed.
+        host_split = self.stats.setdefault(
+            "fixed_m4_host_s",
+            {"aux": 0.0, "input_eval": 0.0, "replay": 0.0, "encode": 0.0},
+        )
+        clock = time.perf_counter
+        t0 = clock()
         compiled_aux = dispatch["prepare_aux"](
             input_ids,
             host_input_ids,
             completion_tokens,
             committed_count,
         )
+        t1 = clock()
         if boundary in ("both", "pre"):
             mx.async_eval(compiled_aux, *state_in)
+        t2 = clock()
         outputs = dispatch["fn"](input_ids, compiled_aux, *state_in)
+        t3 = clock()
+        host_split["aux"] += t1 - t0
+        host_split["input_eval"] += t2 - t1
+        host_split["replay"] += t3 - t2
 
         capture_end = 2 + dispatch["capture_leaves"]
         logits, hidden = outputs[:2]
@@ -2333,6 +2350,7 @@ class CompiledVerifyBank:
             state_in = None
             self._held_state_refs.clear()
             mx.async_eval(*outputs)
+        host_split["encode"] += clock() - t3
 
         if _FIXED_M4_DONATION_PROBE:
             self._probe_fixed_m4_donation(dispatch)
