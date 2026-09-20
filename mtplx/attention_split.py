@@ -35,6 +35,28 @@ def _count_gqa_packed_route_bail(reason: str) -> None:
     )
 
 
+#: The positive receipt next to the bail counts above (issue #506): how often
+#: the packed route ACCEPTED a verify window, keyed ``q<rows>_cap<bucket>``.
+#: Read both the same way. They are cumulative since boot, and they tick in
+#: Python, so inside the compiled verifier they count graph TRACES, not calls:
+#: one trace per (window, capacity bucket), and the compiled graph then runs
+#: the kernel on every call without coming back here. Warm-up traces small
+#: capacities, so ``capacity_below_threshold`` on a fresh daemon is warm-up,
+#: not the first request. Above the compiled-verify context fence the verifier
+#: runs eagerly and both counters count calls.
+gqa_packed_route_engaged_counts: dict[str, int] = {}
+
+
+def _count_gqa_packed_route_engaged(q_len: int, capacity: int) -> None:
+    # An eager cache grows 256 rows at a time; a power-of-two bucket keeps the
+    # key set small over a long session.
+    bucket = 1 << max(0, int(capacity).bit_length() - 1)
+    key = f"q{int(q_len)}_cap{bucket}"
+    gqa_packed_route_engaged_counts[key] = (
+        gqa_packed_route_engaged_counts.get(key, 0) + 1
+    )
+
+
 def _env_index_set(name: str) -> set[int]:
     raw = os.environ.get(name, "")
     out: set[int] = set()
@@ -485,6 +507,9 @@ def _install_split_attention_hook(attn: Any) -> bool:
             if output is not None:
                 self._mtplx_gqa_packed_sdpa_calls = (
                     int(getattr(self, "_mtplx_gqa_packed_sdpa_calls", 0)) + 1
+                )
+                _count_gqa_packed_route_engaged(
+                    int(queries.shape[2]), int(cache.keys.shape[2])
                 )
                 if _env_enabled("MTPLX_GQA_PACKED_SDPA_TRACE") and (
                     self._mtplx_gqa_packed_sdpa_calls <= 2

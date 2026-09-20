@@ -15325,11 +15325,19 @@ def _record_request_metrics(state: "ServerState", record: dict[str, Any]) -> Non
         # silently unless its TRACE env is set — the 147.4k decode cliff hid
         # behind that silence. Cumulative-since-boot module counters; a delta
         # between consecutive rows isolates one request.
-        from ..attention_split import gqa_packed_route_bail_counts
+        from ..attention_split import (
+            gqa_packed_route_bail_counts,
+            gqa_packed_route_engaged_counts,
+        )
         from ..kernels.sdpa_gqa_packed import gqa_packed_bail_counts
 
         record.setdefault(
             "gqa_packed_route_bail_counts", dict(gqa_packed_route_bail_counts)
+        )
+        # The accepted half (#506), same cumulative-since-boot reading.
+        record.setdefault(
+            "gqa_packed_route_engaged_counts",
+            dict(gqa_packed_route_engaged_counts),
         )
         record.setdefault(
             "gqa_packed_kernel_bail_counts", dict(gqa_packed_bail_counts)
@@ -17483,6 +17491,17 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
             flash_dispatches[attr_name] = dict(value)
     if flash_dispatches:
         nax["flash_dispatch_counters"] = flash_dispatches
+    # The same positive receipt for the packed-GQA verify route, which is the
+    # 27B's long-context verify kernel on every chip before the M5 (#506).
+    # Without it "declined 96 times" could not be told from "declined 96
+    # times and accepted every verify window since". See the counter's note
+    # in attention_split: inside the compiled verifier both count traces.
+    try:
+        from mtplx.attention_split import gqa_packed_route_engaged_counts
+
+        nax["gqa_packed_engaged_counters"] = dict(gqa_packed_route_engaged_counts)
+    except BaseException:
+        pass
 
     # Nothing goes slow in silence: every demotion off a fast lane, with a
     # count and the last plain-English reason (mtplx/demotions.py).
