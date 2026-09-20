@@ -20,6 +20,9 @@ What these tests pin, on the tiny Flash-Next model and the real prefill loops:
   every leaf of every record is bit-identical to the ladder's.  The capture
   adds no arithmetic of its own; what can differ on the full model is the
   GEMM rounding of a narrower forward, the class of every chunk-layout change;
+* the chunk eval names the recurrent states, which frees the chunk's pre-conv
+  streams (3.1 GB at 4,096 rows on Flash-Next), and the rollback switch
+  restores the old eval set;
 * with the switch off, a family without the hooks, or an image request, the
   loops run the ladder exactly as before; a missed capture is counted.
 """
@@ -69,6 +72,7 @@ def _default_layout(monkeypatch):
         "MTPLX_GDN_BOUNDARY_TAIL_INTERVAL",
         "MTPLX_GDN_BOUNDARY_MAX",
         "MTPLX_GDN_BOUNDARY_CAPTURE",
+        "MTPLX_PREFILL_EVAL_RECURRENT_STATE",
         "MTPLX_PREFILL_CHUNK_TRACE",
         SWITCH,
     ):
@@ -512,6 +516,67 @@ def _is_reference_gpu() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# The chunk eval names the recurrent states (memory, not arithmetic)
+# ---------------------------------------------------------------------------
+
+
+def _lazy_recurrent_entry(rows: int = 4096, width: int = 1024):
+    """A recurrent cache entry left the way a GDN layer leaves it: a lazy
+    3-row copy whose parent is the chunk's whole pre-conv stream."""
+
+    import mlx_lm.models.cache as cache_module
+
+    chunk = mx.ones((1, rows, width), dtype=mx.float32) * 0.5
+    mx.eval(chunk)
+    parent = mx.concatenate([mx.zeros((1, 3, width), dtype=mx.float32), chunk], axis=1)
+    entry = cache_module.ArraysCache(size=2)
+    entry[0] = mx.contiguous(parent[:, -3:, :])
+    entry[1] = mx.zeros((1, 2, 2, 2), dtype=mx.float32)
+    hidden = parent.sum()
+    return entry, hidden, int(parent.nbytes)
+
+
+@pytest.mark.parametrize("named", (True, False))
+def test_the_chunk_eval_frees_the_pre_conv_stream(named, monkeypatch):
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        if not named:
+            monkeypatch.setenv("MTPLX_PREFILL_EVAL_RECURRENT_STATE", "0")
+        mx.clear_cache()
+        base = mx.get_active_memory()
+        entry, hidden, parent_bytes = _lazy_recurrent_entry()
+        assert not _is_trimmable(entry)
+        generation._eval_prefill_chunk(None, hidden, [entry])
+        held = mx.get_active_memory() - base
+        if named:
+            assert held < parent_bytes // 8
+        else:
+            # The rollback switch restores the old eval set, and with it the
+            # pinned parent: this is the 3.1 GB at 4,096 rows on Flash-Next.
+            assert held >= parent_bytes
+        del entry, hidden
+    finally:
+        mx.set_default_device(previous_device)
+
+
+def test_a_cache_only_chunk_still_evaluates_the_whole_cache(monkeypatch):
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        calls: list[int] = []
+        real = generation._eval_cache_roots
+        monkeypatch.setattr(
+            generation, "_eval_cache_roots", lambda cache: (calls.append(1), real(cache))
+        )
+        entry, _hidden, _bytes = _lazy_recurrent_entry(rows=8, width=8)
+        generation._eval_prefill_chunk(None, None, [entry])
+        assert calls == [1]
+    finally:
+        mx.set_default_device(previous_device)
+
+
+# ---------------------------------------------------------------------------
 # A model without the hooks, an image request, a missed capture
 # ---------------------------------------------------------------------------
 
@@ -635,3 +700,24 @@ def test_capturing_changes_nothing_about_a_warm_suffix(tiny, monkeypatch):
     assert np.array_equal(np.array(plain_logits), np.array(logits))
     assert np.array_equal(np.array(plain_hidden), np.array(hidden))
     _assert_same_leaves(_cache_leaves(plain_cache), _cache_leaves(cache))
+
+
+def test_only_the_recurrent_containers_are_named_in_the_chunk_eval(tiny):
+    """Attention entries and unknown containers are left alone: reading an
+    unknown container's ``state`` can itself be work."""
+
+    class _Opaque:
+        def is_trimmable(self):
+            return False
+
+        @property
+        def state(self):  # pragma: no cover - must never be read
+            raise AssertionError("an unknown container's state was read")
+
+    cache = _TinyRuntime(tiny).make_cache()
+    mx.eval(tiny.model(mx.array([_prompt(12)]), cache))
+    recurrent = [entry for entry in cache if not _is_trimmable(entry)]
+    leaves = generation._recurrent_state_leaves([*cache, _Opaque(), None])
+    expected = [leaf for entry in recurrent for leaf in entry.cache if leaf is not None]
+    assert len(leaves) == len(expected) and len(leaves) >= 2 * len(recurrent)
+    assert all(a is b for a, b in zip(leaves, expected))

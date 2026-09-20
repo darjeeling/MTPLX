@@ -4687,6 +4687,45 @@ def _prefill_boundary_plan(
     return plain, interior
 
 
+def _prefill_eval_recurrent_state_enabled() -> bool:
+    """``MTPLX_PREFILL_EVAL_RECURRENT_STATE=0`` restores the old eval set."""
+
+    return not _env_falsey("MTPLX_PREFILL_EVAL_RECURRENT_STATE")
+
+
+def _recurrent_state_leaves(cache: list[Any] | None) -> list[mx.array]:
+    """The recurrent entries' state arrays, to be named in the chunk's eval.
+
+    A GDN layer leaves ``cache[0] = contiguous(pre_conv_stream[:, -3:, :])``
+    behind.  The prefill loops evaluated only the chunk's hidden states, so
+    that 3-row copy stayed LAZY and kept its parent alive: the whole chunk's
+    pre-conv stream, ``[1, rows + 3, conv_dim]``.  On Flash-Next that is
+    84 MB per GDN layer at 4,096 rows, 3.1 GB over 36 layers and the PLE
+    window (1.5 GB at 2,048 rows, 6.2 GB at 8,192), held until the NEXT
+    chunk's graph reaches that layer, so nearly all of it sits under the next
+    chunk's first attention layer and under the MTP-history pass.  Naming the
+    states in the same eval runs the copies while their parents are being
+    freed anyway.  Same graph, same kernels, a larger eval set: bit-identical.
+    """
+
+    if not cache or not _prefill_eval_recurrent_state_enabled():
+        return []
+    from .cache_state import _is_trimmable
+
+    leaves: list[mx.array] = []
+    for entry in cache:
+        if entry is None or _is_trimmable(entry):
+            continue
+        # The recurrent containers (mlx-lm's ArraysCache and the owned
+        # variant) hold their leaves in a plain ``cache`` list.  Anything
+        # else that refuses to trim is left alone: reading an unknown
+        # container's ``state`` property can itself be work.
+        slots = getattr(entry, "cache", None)
+        if isinstance(slots, list):
+            leaves.extend(leaf for leaf in slots if isinstance(leaf, mx.array))
+    return leaves
+
+
 def _boundary_snapshot_from_capture(
     cache: list[Any], states: list[Any]
 ) -> CacheSnapshot | None:
@@ -4786,15 +4825,16 @@ def _eval_prefill_chunk(
 ) -> None:
     """The one blocking eval of a prefill chunk's trunk forward.
 
-    Roots: whatever the forward returned and the in-forward boundary captures
-    (they are slices of streams this eval is about to free).  A cache-only
+    Roots: whatever the forward returned, the in-forward boundary captures
+    (they are slices of streams this eval is about to free), and the
+    recurrent entries' states (see ``_recurrent_state_leaves``).  A cache-only
     forward returns nothing, so the whole cache is the root set, as before.
     """
 
     roots = [value for value in (logits_chunk, hidden_chunk) if value is not None]
     extra = _tree_mx_arrays(captured) if captured else []
     if roots:
-        _eval(*roots, *extra, _caller_depth=2)
+        _eval(*roots, *extra, *_recurrent_state_leaves(cache), _caller_depth=2)
         return
     if extra:
         _eval(*extra, _caller_depth=2)
