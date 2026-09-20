@@ -925,6 +925,26 @@ class SessionBank:
         def live_ref_entry(reason: str, nbytes: int) -> SessionBankEntry | None:
             if not keep_live_ref or not cache:
                 return None
+            # The draft head's committed history (#499). A caller hands it
+            # over either as a live reference or as a snapshot, and the
+            # server's generation-final commit always uses the snapshot.
+            # The lease used to drop that snapshot while keeping its epoch,
+            # so with MTP on it could never be restored: the restore took
+            # the trunk reference, found no history and failed with
+            # no_snapshot_coverage, and the idle-lane spill wrote an SSD
+            # copy that _restore_cold refuses (ssd_missing_mtp_history).
+            # Every turn past the per-session budget then prefilled cold
+            # (570 s at 150K tokens in the report). The history is one
+            # attention layer, small next to the trunk that made the
+            # snapshot oversized, and trunk reference plus history
+            # snapshot is the pairing every durable generation-final
+            # entry already restores with. A live reference, when the
+            # caller gave one, serves instead and no copy is held.
+            kept_mtp_history = (
+                None
+                if mtp_history_cache_ref is not None
+                else _clone_tree(mtp_history_snapshot)
+            )
             entry = SessionBankEntry(
                 token_ids=tokens,
                 token_hash=token_prefix_hash(tokens),
@@ -946,6 +966,7 @@ class SessionBank:
                 lease_aux_nbytes=(
                     _tree_nbytes(logits)
                     + _tree_nbytes(hidden)
+                    + _tree_nbytes(kept_mtp_history)
                     + sum(
                         _snapshot_nbytes(r[1]) + _tree_nbytes(r[2])
                         for r in normalized_boundaries
@@ -956,7 +977,7 @@ class SessionBank:
                 mtp_history_policy=mtp_history_policy,
                 draft_head_identity=draft_head_identity,
                 policy_fingerprint=policy_fingerprint,
-                mtp_history_snapshot=None,
+                mtp_history_snapshot=kept_mtp_history,
                 snapshot_epoch=int(snapshot_epoch),
                 mtp_snapshot_epoch=(
                     int(mtp_snapshot_epoch)
@@ -964,6 +985,7 @@ class SessionBank:
                     else (
                         int(snapshot_epoch)
                         if mtp_history_cache_ref is not None
+                        or kept_mtp_history is not None
                         else None
                     )
                 ),
@@ -2550,10 +2572,12 @@ class SessionBank:
             return False
         try:
             snapshot = snapshot_cache_lazy_hybrid(entry.cache_ref)
+            # Either form of the draft history goes to disk: without it a
+            # committed-policy restore refuses the record (#499).
             mtp_snapshot = (
                 snapshot_cache_lazy_hybrid(entry.mtp_history_cache_ref)
                 if entry.mtp_history_cache_ref is not None
-                else None
+                else entry.mtp_history_snapshot
             )
         except RuntimeError as exc:
             # e.g. the paged long-context guard refuses to materialize
