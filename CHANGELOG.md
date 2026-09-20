@@ -6,6 +6,16 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ## [Unreleased] (2.11.4)
 
+### Added
+
+- **Remove a downloaded model from the app** (PR #377, Philip John
+  Basile). The model picker has a Remove action with a confirmation. It
+  runs `mtplx remove` for exactly the entry shown, only inside the primary
+  model folder from Settings (additional model folders stay read-only), and
+  it refuses the model the server is currently serving. When the command
+  refuses, the app shows its reason instead of an exit code. The new
+  strings are in all thirteen languages.
+
 ### Changed
 
 - **Request captures hold no content by default** (PR #356, Philip John
@@ -25,6 +35,25 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **Saving a long session to SSD no longer holds up the next request**
+  (issue #505, reported by peterloron). On a 64 GB Mac with the 27B at about
+  104K tokens, the background job that writes a session to the SSD cache
+  held the model for more than 500 s while a request waited behind it, and
+  the stream watchdog ended that request at 300 s. The job was meant to give
+  way to a waiting request, but it only looked between pieces of work whose
+  size nothing limited. Each piece is now at most 32 MiB and the job looks
+  after every one, including while it reads a restored session's boundary
+  records. The files on disk are byte for byte the same. `/health` reports
+  `encode_units`, `encode_slow_units` and `encode_longest_unit_s` for the SSD
+  cache, and any piece slower than 1 s is logged with what it was.
+- **`mtplx remove` acts on the entry you named.** A folder in the model
+  cache whose name spells one of the public aliases resolved to the
+  first-party model's folder instead, so `mtplx models` could print a
+  delete command for one entry that would have removed another. An exact
+  folder name now wins. When two copies of a model sit in two model
+  folders, the refusal says to choose one with `--cache-dir`; a typed
+  `--cache-dir` now does that even when the other folder comes from
+  `MTPLX_MODEL_DIRS` or the config file.
 - **A stuck request no longer holds the fans at maximum** (PR #295,
   El-Patronum). In Smart fan mode a request holds the fans up until it
   ends, and a safety net restores them when the server has been idle for
