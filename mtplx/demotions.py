@@ -68,6 +68,11 @@ KINDS: dict[str, str] = {
         "A tensor-unit attention route bailed because this GPU has no tensor "
         "units (needs GPU generation 17 and macOS 26.2)."
     ),
+    "inforward_boundary_capture_missed": (
+        "A prefill forward was asked to record a restore boundary inside it "
+        "and did not bank one, so a later turn of that session restores from "
+        "an earlier boundary and re-prefills more."
+    ),
     "gdn_blocked_prefill_not_engaged": (
         "The blocked GDN prefill kernel was requested but a prefill-sized call "
         "ran the stock path."

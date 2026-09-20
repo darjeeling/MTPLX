@@ -673,6 +673,10 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
 
         if mask is not None:
             qkv = mx.where(mask[..., None], qkv, 0)
+        # The pre-conv stream [conv tail, this forward's rows]: built by the
+        # stock branch below, and only on demand by a boundary capture when a
+        # fused branch served the conv.
+        conv_input = None
         if self._fused_step_applies(B, S, mask, cache):
             # One-dispatch GDN step: conv+silu+l2norm + g/beta + delta +
             # gated norm in a single kernel between the two library GEMVs.
@@ -771,9 +775,15 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
         if capture_at:
             # Same recurrence, run in segments: the state after row p - 1 is
             # the boundary at p. The conv tail at p is the last kernel - 1
-            # rows of the pre-conv stream before p.
+            # rows of the pre-conv stream before p. The stock branch already
+            # built that stream; a second concatenate would be a second copy
+            # of the chunk's widest GDN tensor.
             n_keep = self.conv_kernel_size - 1
-            conv_stream = mx.concatenate([conv_state, qkv], axis=1)
+            conv_stream = (
+                conv_input
+                if conv_input is not None
+                else mx.concatenate([conv_state, qkv], axis=1)
+            )
             pieces = []
             seg_start = 0
             for edge in (*capture_at, S):
@@ -2155,6 +2165,47 @@ _COMPILED_VERIFY_PLE: contextvars.ContextVar[Optional[mx.array]] = (
 )
 
 
+# Cache-only history append for the draft head (prefill). Appending prompt
+# history to the draft head ran its whole decoder layer over every chunk --
+# block selection, attention, the routed experts, both hyper-connection
+# writes -- and the prefill loop then threw the output away: it evaluates it
+# and returns the elapsed time. The only thing the pass leaves behind is the
+# head's QSA cache (keys, values, raw indexer keys, pooled blocks and their
+# float32 mirror), and those are written before any of that work starts.
+# Tonight's traces: 0.09 to 0.12 s per 4,096-row chunk, 3.26 s of a 103.8 s
+# 128K prefill, 1.48 s of 50.6 s at 64K, 0.35 s of 11.4 s at 16K.
+# Armed, Attention and the indexer return right after their cache writes, so
+# the writes are the same lines of code on the same inputs and the rest is
+# never built. Every cache leaf is bit-identical (the test compares bits).
+_QSA_HISTORY_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "qwen4_exp_qsa_history_only", default=False
+)
+
+
+def _mtp_history_cache_only_enabled() -> bool:
+    """``MTPLX_QWEN4_MTP_HISTORY_CACHE_ONLY=0`` restores the full layer pass."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_MTP_HISTORY_CACHE_ONLY") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _qsa_cache_arrays(cache: "QSACache") -> list:
+    """Every array a history append leaves on a QSA cache entry."""
+
+    kv = cache.kv
+    return [
+        value
+        for value in (
+            getattr(kv, "keys", None),
+            getattr(kv, "values", None),
+            cache.raw_keys,
+            cache.pooled,
+            cache.pooled_f32_t,
+        )
+        if isinstance(value, mx.array)
+    ]
+
+
 # In-forward boundary capture (prefill). A restore boundary at prompt position
 # p needs the recurrent state AFTER token p - 1. Until now the only way to get
 # it was to END a forward at p, so the prefill loop cut the last chunk into
@@ -2198,6 +2249,78 @@ def _record_boundary_capture(cache: Any, offset: int, kind: str, arrays: tuple) 
         store = {}
         setattr(cache, _BOUNDARY_CAPTURE_ATTR, store)
     store.setdefault(int(offset), {})[kind] = arrays
+
+
+# Mid-loop evals in a wide prefill forward. One eval at the end of a forward
+# puts every root at the END of MLX's tape, so the 3-row conv tail each
+# recurrent layer stores (a lazy slice of its [rows + 3, 10,240] pre-conv
+# stream) is materialized last and all 37 streams stay alive to the end of the
+# forward: 3.1 GB at 4,096 rows on Flash-Next, on top of the forward's own
+# intermediates. Measured 2026-09-20 on a 128 GB M5 Max: naming the states in
+# the chunk's eval took 3.0 GB off ACTIVE memory between chunks and nothing
+# off the PEAK (128K cold, 4,096-row chunks: process peak 100.8 GB, 4.8 GB
+# over active memory, against a 100.0 GB line). Scheduling the stream and the
+# states every few layers lets each stream die as soon as its layer is done.
+# Same graph, same kernels, same inputs to every kernel: only when work is
+# handed to the GPU changes, so every output bit is unchanged (the test
+# compares bits). It also hands the GPU its first layers while Python is
+# still building the last ones.
+_PREFILL_MIDLOOP_MIN_ROWS = 1024
+_PREFILL_MIDLOOP_DEFAULT_LAYERS = 4
+
+
+def _prefill_midloop_eval_layers(rows: int) -> int:
+    """Layers between mid-loop evals of a prefill forward; 0 means none.
+
+    ``MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL`` is that number of layers (default 4,
+    one attention group of this family); ``0`` restores the single eval at
+    the end. Decode, verify and narrow forwards never take it.
+    """
+
+    if int(rows) < _PREFILL_MIDLOOP_MIN_ROWS:
+        return 0
+    if current_attention_phase() != "prefill":
+        return 0
+    return prefill_midloop_eval_setting()
+
+
+def prefill_midloop_eval_setting() -> int:
+    """The switch alone (the wide-chunk memory gate bills by it)."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL") or "").strip().lower()
+    if not raw:
+        return _PREFILL_MIDLOOP_DEFAULT_LAYERS
+    if raw in {"off", "false", "no"}:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _PREFILL_MIDLOOP_DEFAULT_LAYERS
+
+
+def _midloop_state_arrays(entries) -> list:
+    """The lazy arrays a finished layer group leaves on its cache entries:
+    the recurrent states and any in-forward boundary captures. KV entries are
+    consumed by their own layer's attention and need no naming."""
+
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, mx.array):
+            found.append(node)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+
+    for entry in entries:
+        if not isinstance(entry, ArraysCache):
+            continue
+        walk(getattr(entry, "cache", None))
+        walk(getattr(entry, _BOUNDARY_CAPTURE_ATTR, None))
+    return found
 
 
 def take_boundary_captures(cache: list) -> dict:
@@ -3567,6 +3690,10 @@ class QSAIndexer(nn.Module):
 
         cache.write_raw(k)
         pooled = self._extend_pooled(cache, T)
+        if _QSA_HISTORY_ONLY.get():
+            # Draft-head history append: the keys and the pooled blocks are
+            # in the cache; nobody will read a selection.
+            return None
         nb_total = 0 if pooled is None else pooled.shape[1]
 
         # Per-query complete-block counts. If every visible prefix fits inside
@@ -4007,6 +4134,10 @@ class Attention(nn.Module):
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
         k, v = cache.kv.update_and_fetch(k, v)
+        if _QSA_HISTORY_ONLY.get():
+            # Draft-head history append: the cache holds this chunk now, and
+            # the caller evaluates the cache arrays instead of an output.
+            return None
         T = k.shape[2]
 
         if vrope is not None and not vision_qsa_enabled():
@@ -5496,6 +5627,21 @@ class Qwen4ExpTextModel(nn.Module):
             ),
         )
 
+    # ---- in-forward restore boundaries ------------------------------------
+    # The prefill loop finds these two by walking the model chain (the same
+    # way it finds the PLE lookahead), so a family without them keeps the
+    # tail ladder and nothing here is imported by name.
+
+    def boundary_capture_scope(self, offsets):
+        """Record the recurrent state at each row offset of the next forward."""
+
+        return boundary_capture_scope(offsets)
+
+    def take_boundary_captures(self, cache):
+        """What the last forward recorded, keyed by row offset."""
+
+        return take_boundary_captures(cache)
+
     def __call__(self, inputs, cache=None, input_embeddings=None):
         if qwen4_opdiet_enabled("rope"):
             with _rope_table_scope():
@@ -5526,7 +5672,9 @@ class Qwen4ExpTextModel(nn.Module):
             h = self._decode_layers_compiled(h, inputs, cache)
         else:
             capture = _VERIFY_CAPTURE.get()
-            for layer, c in zip(self.layers, cache):
+            midloop = _prefill_midloop_eval_layers(int(h.shape[1]))
+            last = len(self.layers) - 1
+            for index, (layer, c) in enumerate(zip(self.layers, cache)):
                 if (
                     capture
                     and c is not None
@@ -5534,6 +5682,10 @@ class Qwen4ExpTextModel(nn.Module):
                 ):
                     c._mtplx_verify_ple = (h, inputs)
                 h = layer(h, input_ids=inputs, ssm_mask=ssm_mask, cache=c)
+                if midloop and index < last and (index + 1) % midloop == 0:
+                    mx.async_eval(
+                        h, *_midloop_state_arrays(cache[index + 1 - midloop : index + 1])
+                    )
         # The MTP head consumes the pre-mixer widened stream; keep the last
         # one reachable (lazy ref, freed on the next step).
         self._last_widened = h
@@ -5994,11 +6146,33 @@ class Qwen4ExpMTP(nn.Module):
         tok_emb: mx.array,
         cache,
     ) -> mx.array:
-        """History/prefill phase route; it may carry S>1 and stays eager."""
+        """History/prefill phase route; it may carry S>1 and stays eager.
+
+        In a prefill loop the caller keeps nothing but the cache, so only the
+        cache is computed (see ``_QSA_HISTORY_ONLY``) and the cache arrays are
+        what comes back to be evaluated. Every other caller, and the rollback
+        switch, get the whole layer and its output as before.
+        """
 
         h = self._prepare_inputs_eager(widened, tok_emb)
         layer_cache = cache[0] if cache is not None else None
-        return self.layers[0](h, input_ids=None, ssm_mask=None, cache=layer_cache)
+        layer = self.layers[0]
+        if (
+            isinstance(layer_cache, QSACache)
+            and not getattr(layer_cache, "fixed_capacity", False)
+            and not layer.is_linear
+            and "ple" not in layer
+            and current_attention_phase() == "prefill"
+            and _mtp_history_cache_only_enabled()
+        ):
+            mixed, _hyper, _inject = layer.attn_hyper_connection(h)
+            token = _QSA_HISTORY_ONLY.set(True)
+            try:
+                layer.self_attn(mixed, layer_cache)
+            finally:
+                _QSA_HISTORY_ONLY.reset(token)
+            return _qsa_cache_arrays(layer_cache)
+        return layer(h, input_ids=None, ssm_mask=None, cache=layer_cache)
 
     def __call__(self, widened: mx.array, tok_emb: mx.array, cache) -> mx.array:
         return self.hyper_connection_mixer(self.fuse_and_run(widened, tok_emb, cache))
