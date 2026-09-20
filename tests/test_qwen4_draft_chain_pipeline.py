@@ -183,3 +183,49 @@ def test_the_bank_never_lets_a_prefetch_failure_reach_the_decode_loop():
     assert "except Exception as error:" in body
     assert 'self.stats["fixed_m4_aux_prefetch_error"]' in body
     assert body.index("except Exception") < body.index("return 0", body.index("except Exception"))
+
+
+# --------------------------------------------------------------------------
+# The warm pass reads only the maps that are not already in core
+# --------------------------------------------------------------------------
+
+
+def test_the_warm_pass_reads_only_the_named_maps(sidecar, monkeypatch):
+    import os as _os
+
+    reads: list[tuple[int, int]] = []
+    real_pread = _os.pread
+
+    def counting_pread(fd, length, offset):
+        reads.append((length, offset))
+        return real_pread(fd, length, offset)
+
+    monkeypatch.setattr(_os, "pread", counting_pread)
+    rows = np.arange(0, 640, 5, dtype=np.int64)
+    sidecar._warm(rows)
+    every_map = len(reads)
+    assert every_map == 3 * len(rows)
+    reads.clear()
+    sidecar._warm(rows, only=["weight"])
+    assert len(reads) == len(rows)
+    assert {length for length, _ in reads} == {sidecar._row_meta[0][1]}
+    reads.clear()
+    sidecar._warm(rows, only=["scales", "biases"])
+    assert len(reads) == 2 * len(rows)
+
+
+def test_cold_map_names_reports_per_map_and_declines_when_unknown(monkeypatch):
+    from mtplx import ple_row_gather as row_gather
+
+    answers = {"weight": 0.31, "scales": 1.0, "biases": 0.995}
+    monkeypatch.setattr(
+        row_gather,
+        "resident_fraction",
+        lambda memmap, rows, sample=256: answers[memmap],
+    )
+    maps = {name: name for name in answers}
+    assert row_gather.cold_map_names(maps, [1, 2, 3]) == ["weight"]
+    answers["weight"] = 1.0
+    assert row_gather.cold_map_names(maps, [1, 2, 3]) == []
+    answers["scales"] = None
+    assert row_gather.cold_map_names(maps, [1, 2, 3]) is None
