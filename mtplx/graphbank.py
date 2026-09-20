@@ -2415,13 +2415,20 @@ class CompiledVerifyBank:
         moves = self.stats.setdefault("fixed_m4_leaf_moves", {})
         moved_bytes = self.stats.setdefault("fixed_m4_leaf_moved_bytes", {})
         for index, (name, leaf) in enumerate(leaves):
-            if leaf is None or leaf.size == 0:
+            # Scalars (the logical offset) are rebuilt every round by design
+            # and cannot be viewed as bytes; only buffers are of interest.
+            if leaf is None or leaf.ndim == 0 or leaf.nbytes < 4096:
                 current.append(None)
                 continue
-            flat = leaf.view(mx.uint8) if leaf.dtype != mx.uint8 else leaf
-            address = int(
-                np.asarray(flat, copy=False).__array_interface__["data"][0]
-            )
+            try:
+                flat = leaf.view(mx.uint8) if leaf.dtype != mx.uint8 else leaf
+                address = int(
+                    np.asarray(flat, copy=False).__array_interface__["data"][0]
+                )
+            except Exception as exc:  # noqa: BLE001 - an instrument never fails a round
+                self.stats["fixed_m4_leaf_probe_error"] = f"{name}: {exc}"
+                current.append(None)
+                continue
             current.append(address)
             if (
                 previous is not None
