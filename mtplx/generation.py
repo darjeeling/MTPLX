@@ -11759,6 +11759,13 @@ def generate_mtpk(
             and mtp_cache is not None
         ):
             _sc_started = time.perf_counter()
+            _sc_pipeline = _qwen4_sampled_chain.pipeline_enabled()
+            # Only the fixed-M4 replay opens with a host row gather to warm.
+            _sc_prefetch = (
+                getattr(compiled_verify_bank, "prefetch_fixed_m4_aux", None)
+                if _sc_pipeline and qwen4_fixed_m4_compiled_verify
+                else None
+            )
             _sc_uniforms = [float(rng.random()) for _ in range(cycle_depth)]
             _sc_tok = mx.array([[int(next_token)]])
             _sc_hidden = draft_hidden
@@ -11793,14 +11800,32 @@ def generate_mtpk(
                 _sc_tok = _sc_token.reshape(1, 1).astype(mx.int32)
                 _sc_hidden = _sc_hidden_next[:, -1:, :]
                 _sc_hiddens.append(_sc_hidden)
-            _eval(
-                *[_sc_array for _sc_s in _sc_supports for _sc_array in _sc_s],
-                *_sc_predicted,
-                _sc_hidden,
-            )
+                if _sc_pipeline:
+                    # Hand this depth to the GPU now; the next depth is built
+                    # while it runs.
+                    mx.async_eval(*_sc_support, _sc_token, _sc_hidden)
+            _sc_window = [int(next_token)]
+            if _sc_pipeline:
+                # The verify window opens with the primary, known already:
+                # warm its n-gram rows under the GPU's draft steps.
+                if _sc_prefetch is not None:
+                    _sc_prefetch(
+                        _sc_window,
+                        completion_tokens=tokens,
+                        committed_count=len(tokens) - 1,
+                    )
+            else:
+                _eval(
+                    *[_sc_array for _sc_s in _sc_supports for _sc_array in _sc_s],
+                    *_sc_predicted,
+                    _sc_hidden,
+                )
             _sc_source = int(next_token)
             _sc_cut = False
             for _sc_depth in range(cycle_depth):
+                if _sc_pipeline:
+                    # Wait for this depth only; later depths keep running.
+                    _eval(*_sc_supports[_sc_depth], _sc_predicted[_sc_depth])
                 _sc_local, _sc_vals, _sc_probs = _sc_supports[_sc_depth]
                 _sc_q = _qwen4_sampled_chain.host_distribution(
                     _sampled_chain_plan,
@@ -11841,6 +11866,13 @@ def generate_mtpk(
                 next_token = _sc_host_token
                 _sc_source = int(_sc_host_token)
                 _sampled_chain_next_depth = _sc_depth + 1
+                if _sc_pipeline and _sc_prefetch is not None:
+                    _sc_window.append(int(_sc_host_token))
+                    _sc_prefetch(
+                        _sc_window,
+                        completion_tokens=tokens,
+                        committed_count=len(tokens) - 1,
+                    )
                 if _sc_host_token != int(_sc_predicted[_sc_depth].item()):
                     # Every later forward consumed the device's token, not
                     # this one: drop their MTP-cache rows and finish serially.
@@ -11850,6 +11882,8 @@ def generate_mtpk(
                         )
                     _sc_cut = True
                     break
+            if _sc_pipeline and not _sc_cut:
+                _eval(_sc_hidden)
             if _sc_cut:
                 _sampled_chain_cuts += 1
                 event["sampled_chain_cut_depth"] = _sampled_chain_next_depth + 1

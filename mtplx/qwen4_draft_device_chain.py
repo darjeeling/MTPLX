@@ -80,6 +80,29 @@ def is_enabled(env: Any | None = None) -> bool:
     return str(source.get(_ENV_VAR, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+_PIPELINE_ENV_VAR = "MTPLX_QWEN4_DRAFT_CHAIN_PIPELINE"
+
+
+def pipeline_enabled(env: Any | None = None) -> bool:
+    """Overlap the chain's host work with its GPU work (default on).
+
+    The chain builds every depth lazily and evaluates once, so the GPU waits
+    for the host to build all the depths, and the host then waits for the GPU
+    to run them.  Metal timeline, 2026-09-20, Flash-Next at 4K: 2.3 ms of GPU
+    idle between the verify and the draft, 5.5 ms between the draft and the
+    next verify, 20% of a 38.5 ms round.  With this on, each depth is handed
+    to the GPU as soon as it is built, and the host reads depth d (and warms
+    the verify window's n-gram rows for it) while the GPU runs depth d+1.
+    The arrays, the uniforms and the host arithmetic are the same, so tokens,
+    proposals and the generator stream do not change.
+    ``MTPLX_QWEN4_DRAFT_CHAIN_PIPELINE=0`` restores the single evaluation.
+    """
+
+    source = os.environ if env is None else env
+    raw = str(source.get(_PIPELINE_ENV_VAR, "1")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 @dataclass(frozen=True)
 class SampledChainPlan:
     """Request-bound view of the FR-Spec head's compact draft row."""

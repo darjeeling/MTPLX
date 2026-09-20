@@ -112,13 +112,35 @@ def _prepare_compiled_verify_aux(self: Any, input_ids, cache) -> mx.array:
 class _FixedM4SidecarAux:
     """Construction-bound host row gather for the physical-M4 verifier."""
 
-    __slots__ = ("_gather", "_output_dim", "_prompt_tail", "_rows")
+    __slots__ = ("_gather", "_output_dim", "_prefetch", "_prompt_tail", "_rows")
 
-    def __init__(self, *, prompt_tail, rows, gather, output_dim):
+    def __init__(self, *, prompt_tail, rows, gather, output_dim, prefetch=None):
         self._prompt_tail = prompt_tail
         self._rows = rows
         self._gather = gather
         self._output_dim = output_dim
+        self._prefetch = prefetch
+
+    def prefetch(self, host_input_prefix, completion_tokens, committed_count) -> int:
+        """Warm the sidecar's hot rows for the first tokens of the next window.
+
+        A position's rows depend only on that token and the two before it, so
+        the rows of a window PREFIX are the first rows of the whole window.
+        The draft loop knows the prefix one token at a time while the GPU is
+        still drafting; the gather in ``__call__`` then reads warm rows.
+        """
+
+        if self._prefetch is None or not host_input_prefix:
+            return 0
+        ids_np = np.asarray((tuple(host_input_prefix),), dtype=np.int64)
+        previous = _fixed_m4_previous_tokens(
+            self._prompt_tail,
+            completion_tokens,
+            committed_count,
+        )
+        prev_np = np.asarray((previous,), dtype=np.int64)
+        rows, _new_history = self._rows(ids_np, prev_np)
+        return int(self._prefetch(rows.reshape(-1)))
 
     def __call__(
         self,
@@ -238,6 +260,7 @@ def _build_fixed_m4_compiled_verify_aux(self: Any, cache, prompt_ids):
         rows=rows,
         gather=sidecar.gather_np,
         output_dim=int(inner.args.ple_embed_dim),
+        prefetch=getattr(sidecar, "prefetch_rows_np", None),
     )
 
 

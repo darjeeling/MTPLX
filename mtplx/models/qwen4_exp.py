@@ -4657,6 +4657,36 @@ class _SidecarGather:
             for j, name in enumerate(names)
         }
 
+    def prefetch_rows_np(self, flat) -> int:
+        """Pull rows into the hot-row cache ahead of the gather that needs them.
+
+        Owner-thread only, like every other touch of the cache.  The decode
+        loop calls this while the GPU is busy with the draft steps, for the
+        verify window tokens it already knows; the verify's own gather then
+        finds the rows hot.  Bytes are never produced here, so the gather's
+        result cannot differ: it reads the same cache entries or, on a miss,
+        the same maps.  Returns the rows that had to be read (0 when the hot
+        cache is off or the request is too large for it).
+        """
+        import numpy as np
+
+        flat = np.asarray(flat, dtype=np.int64).reshape(-1)
+        if not self._hot_cap_rows or not 0 < flat.size <= self._HOT_PATH_MAX_ROWS:
+            return 0
+        misses_before = self.hot_misses
+        hits_before = self.hot_hits
+        # The same map tuple `gather_np` asks for: a cached row is a tuple in
+        # that order, so the two callers must never disagree about it.
+        names = ("weight",) if self.bits == 0 else ("weight", "scales", "biases")
+        self._rows_matrices(flat, names)
+        fetched = self.hot_misses - misses_before
+        # The verify's gather is the receipt reader; keep its hit/miss ledger
+        # a statement about gathers, and count prefetch work on its own.
+        self.hot_misses = misses_before
+        self.hot_hits = hits_before
+        self.prefetched_rows = getattr(self, "prefetched_rows", 0) + fetched
+        return fetched
+
     def gather_raw_np(self, flat) -> tuple[mx.array, mx.array, mx.array]:
         """Gather the exact packed q4 row payload without dequantizing it."""
 
