@@ -561,20 +561,49 @@ def _validate_topk(
     return rows, blocks, topk, width
 
 
+#: The score plane's width (pooled blocks, context // ratio) is different for
+#: every prefill chunk of every prompt.  Baked into the kernel source it made
+#: every chunk compile a fresh Metal pipeline: 40 ms for the simd selector and
+#: 56 ms for the network one on an M5 Max (2026-09-20, tiny score planes, so
+#: all of it is the compiler), with the GPU idle behind the encoder.  A 128K
+#: cold prompt at 2,048-row chunks paid it 56 times and every warm agent turn
+#: past the sparse crossover paid it on its first forward.  The kernels use
+#: the width in two places only, the row stride and a clamp, so it is read at
+#: run time from the score plane's own shape: same integer arithmetic, same
+#: outputs.
+_RUNTIME_BLOCKS_PREAMBLE = """
+        const uint BACKING_BLOCKS = uint(scores_shape[1]);
+"""
+
+
+def _topk_static_blocks() -> bool:
+    """``MTPLX_QSA_PREFILL_TOPK_STATIC_BLOCKS=1``: bake the block count into
+    the selector source again (one compile per distinct count; rollback)."""
+
+    raw = (os.environ.get("MTPLX_QSA_PREFILL_TOPK_STATIC_BLOCKS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _blocks_constant(static_blocks: int) -> str:
+    if static_blocks > 0:
+        return f"constant constexpr uint BACKING_BLOCKS = {int(static_blocks)};"
+    return "// BACKING_BLOCKS is read from scores_shape at run time."
+
+
 @lru_cache(maxsize=128)
 def _prefill_topk_kernel(
     mode: QSAPrefillMode,
-    blocks: int,
     topk: int,
     ratio: int,
     width: int,
     output_tokens: int,
+    static_blocks: int = 0,
 ):
     output_names, epilogue = _epilogue(mode)
     header = (
         _SELECT_HEADER
         + f"""
-constant constexpr uint BACKING_BLOCKS = {blocks};
+{_blocks_constant(static_blocks)}
 constant constexpr uint TOP_K = {topk};
 constant constexpr uint RATIO = {ratio};
 constant constexpr uint WIDTH = {width};
@@ -601,7 +630,8 @@ inline uint qsa_prefill_radix_bits(uint pass) {{
     )
 
     source = (
-        r"""
+        ("" if static_blocks > 0 else _RUNTIME_BLOCKS_PREAMBLE)
+        + r"""
         const uint row = threadgroup_position_in_grid.x;
         const uint lane = thread_position_in_threadgroup.x;
         const int qpos = pos_start[0] + int(row);
@@ -899,8 +929,9 @@ inline uint qsa_prefill_radix_bits(uint pass) {{
 
     return mx.fast.metal_kernel(
         name=(
-            f"mtplx_qsa_prefill_topk_{mode}_n{blocks}_k{topk}_r{ratio}_"
-            f"w{width}_t{output_tokens}"
+            f"mtplx_qsa_prefill_topk_{mode}_"
+            + (f"n{static_blocks}" if static_blocks > 0 else "nrt")
+            + f"_k{topk}_r{ratio}_w{width}_t{output_tokens}"
         ),
         input_names=["scores", "pos_start", "total_tokens", "logical_blocks"],
         output_names=output_names,
@@ -1064,7 +1095,7 @@ def _simd_topk_applies(mode: QSAPrefillMode, blocks: int) -> bool:
 
 
 @lru_cache(maxsize=128)
-def _prefill_topk_simd_kernel(blocks: int, topk: int, ratio: int):
+def _prefill_topk_simd_kernel(topk: int, ratio: int, static_blocks: int = 0):
     """Exact top-k of one score row on one 32-lane simdgroup.
 
     The network selector gives a row 512 threads that share one histogram
@@ -1093,7 +1124,7 @@ def _prefill_topk_simd_kernel(blocks: int, topk: int, ratio: int):
     header = (
         _SELECT_HEADER
         + f"""
-constant constexpr uint BACKING_BLOCKS = {blocks};
+{_blocks_constant(static_blocks)}
 constant constexpr uint TOP_K = {topk};
 constant constexpr uint RATIO = {ratio};
 constant constexpr uint LANES = {_SIMD_TOPK_LANES};
@@ -1103,11 +1134,17 @@ constant constexpr uint DIGIT_VECS = 4;
 """
     )
     return mx.fast.metal_kernel(
-        name=f"mtplx_qsa_prefill_topk_blocks_simd_n{blocks}_k{topk}_r{ratio}",
+        name=(
+            "mtplx_qsa_prefill_topk_blocks_simd_"
+            + (f"n{static_blocks}" if static_blocks > 0 else "nrt")
+            + f"_k{topk}_r{ratio}"
+        ),
         input_names=["scores", "pos_start", "total_tokens", "logical_blocks"],
         output_names=["block_ids", "block_valid", "adjusted_scores"],
         header=header,
-        source=_SIMD_TOPK_SOURCE,
+        source=(
+            ("" if static_blocks > 0 else _RUNTIME_BLOCKS_PREAMBLE) + _SIMD_TOPK_SOURCE
+        ),
         ensure_row_contiguous=True,
     )
 
@@ -1171,9 +1208,10 @@ def qsa_indexer_prefill_topk_metal(
         blocks if logical_blocks is None else logical_blocks,
         "logical_blocks",
     )
+    static_blocks = blocks if _topk_static_blocks() else 0
     if _simd_topk_applies(mode, blocks):
         return tuple(
-            _prefill_topk_simd_kernel(blocks, topk, ratio)(
+            _prefill_topk_simd_kernel(topk, ratio, static_blocks)(
                 inputs=[scores, pos_scalar, total_scalar, logical_scalar],
                 grid=(rows * _SIMD_TOPK_LANES, 1, 1),
                 threadgroup=(_SIMD_TOPK_LANES, 1, 1),
@@ -1183,11 +1221,11 @@ def qsa_indexer_prefill_topk_metal(
         )
     kernel = _prefill_topk_kernel(
         mode,
-        blocks,
         topk,
         ratio,
         width,
         kernel_output_tokens,
+        static_blocks,
     )
     outputs = kernel(
         inputs=[scores, pos_scalar, total_scalar, logical_scalar],
