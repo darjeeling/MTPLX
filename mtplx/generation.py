@@ -10193,7 +10193,8 @@ def generate_mtpk(
     # ---- context-copy (prompt-lookup) drafting: always on (kill switch
     # MTPLX_CONTEXT_COPY=0); any temperature, no repetition penalties, on
     # capture-commit verify strategies ----
-    from .context_copy import (NgramIndex, block_for_ext,
+    from .context_copy import (JoinedTokens as _JoinedTokens, NgramIndex,
+                               block_for_ext,
                                context_copy_batched_enabled,
                                context_copy_block_k,
                                context_copy_enabled, context_copy_min_ext,
@@ -10810,7 +10811,7 @@ def generate_mtpk(
             if _cc_src_idx is None and len(tokens) >= ccopy_suspend_until:
                 ccopy_probes += 1
                 _cc_pos, _cc_ext = ccopy_index.find(
-                    prompt_ids + tokens, max_pos=len(prompt_ids)
+                    _JoinedTokens(prompt_ids, tokens), max_pos=len(prompt_ids)
                 )
                 if (
                     _cc_pos is not None
@@ -10832,7 +10833,7 @@ def generate_mtpk(
                     }
         # ---- context-copy round: verbatim block from context, no MTP compute this cycle ----
         if ccopy_active and _ccopy_capture_lane and cycle_depth >= 1 and len(tokens) >= ccopy_suspend_until:
-            _cc_hist = prompt_ids + tokens
+            _cc_hist = _JoinedTokens(prompt_ids, tokens)
             ccopy_probes += 1
             # Prompt-only contract: candidates whose continuation starts at the
             # prompt edge are dropped inside find() (the best VALID match wins),
@@ -11205,7 +11206,7 @@ def generate_mtpk(
             and cycle_depth >= 1
             and len(tokens) >= ccopy_suspend_until
         ):
-            _cb_hist = prompt_ids + tokens
+            _cb_hist = _JoinedTokens(prompt_ids, tokens)
             ccopy_probes += 1
             _cb_pos, _cb_ext = ccopy_index.find(_cb_hist, max_pos=len(prompt_ids))
             _cb_block: list[int] = []
