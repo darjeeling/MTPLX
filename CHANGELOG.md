@@ -37,6 +37,18 @@ All notable user-facing changes to MTPLX. The format is based on
   continuation depending on whether the path engaged. The flag now shares
   the classic loop's per-token draw, and a new test holds the two token
   sequences equal at temperature 1.0, top-p 0.95, top-k 20.
+- **A draft head taken from a raw checkpoint no longer drafts backwards**
+  (PR #511, Stuart Rowlands). Hugging Face checkpoints store the MTP head's
+  RMSNorm gains zero-centred. mlx-lm restores the +1.0 convention on the
+  trunk but drops every `mtp.*` key first, and only Forge restored it on the
+  head. A sidecar that reached the Qwen 3.5 / 3.8 loader any other way
+  (copied in by hand, or extracted from the base checkpoint) bound without
+  an error and then ran at about 0% acceptance, slower than plain decoding:
+  the negative gain inverts the head's output, so the right token lands
+  near the bottom of the distribution (measured median rank 247,513 of
+  248,320). The loader now applies the same detector-gated restoration
+  Forge uses. A head already in the absolute convention passes through
+  byte for byte, so nothing is shifted twice.
 
 ## [2.11.3] - 2026-09-17
 
