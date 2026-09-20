@@ -155,6 +155,30 @@ A long conversation that starts over after a pause is a cache *miss*, not an
 expiry: open `/health` right after the slow turn and read
 `session_bank.last_miss_reason` and `last_prefix_diagnostic`.
 
+**A conversation over its per-session budget.** Its snapshot is not copied.
+The cache keeps a reference to the live KV instead, so the next turn can
+continue without a prefill. That reference holds real memory, and `/health`
+reports it: `session_bank.lease_entries` and `lease_nbytes`, and
+`held_nbytes` on each entry (`nbytes` stays the snapshot size, which is 0
+for a reference). It counts against `MTPLX_SESSION_BANK_MAX_BYTES`, a
+conversation keeps one at most, and memory pressure can release it; the
+conversation then restores from the SSD tier or prefills. Setting
+`MTPLX_SESSION_BANK_PER_SESSION_BYTES` *lower* to save memory does not save
+any: it only moves more conversations onto this path, where every turn after
+the limit depends on that single reference.
+
+**What the memory guards compare.** The guards that run before a long prompt
+and in the background compare MLX's own account (`active + cache`) with the
+Metal memory limit. They also read the process's real footprint from macOS
+(`phys_footprint`, the number the system's own memory-pressure logic uses)
+and add the part of it that MLX's account does not explain, beyond what a
+daemon normally holds outside Metal. `/health` and `/v1/mtplx/snapshot` show
+both under `mem`: `phys_footprint_bytes` and `host_overhang_bytes`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MTPLX_HOST_MEMORY_ALLOWANCE_BYTES` | `auto` | Process memory outside MLX's account that the guards treat as normal. `auto` is the larger of 8 GiB and what the machine leaves after the system reserve and the Metal limit (16 GiB on a 128 GB Mac with default limits). `0` makes every byte above MLX's account count, which is stricter than the memory plan and reads a full session on a 48 GB Mac as critical. Sizes such as `12G` are accepted. |
+
 ## SSD session cache (cold tier) limits
 
 Committed sessions are also written to `~/.mtplx/session-bank/` (or

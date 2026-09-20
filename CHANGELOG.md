@@ -25,6 +25,20 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **The memory guards read the process's real footprint from macOS**
+  (PR #500, Maikel Vos). Every guard compared MLX's own account of its
+  allocations with the Metal limit. `mtplx/os_memory.py` now reads
+  `phys_footprint`, the counter the system's own memory-pressure logic
+  uses, and the guard before a long prompt, its refusal check and the
+  background pressure loop add the part of it MLX's account does not
+  explain. Only the part beyond what a daemon normally holds outside Metal
+  is added (the larger of 8 GiB and what the machine leaves after the
+  system reserve and the Metal limit), because the Metal limit is not the
+  process's budget: comparing the whole footprint with it reads a full
+  session on a 48 GB Mac as critical. `MTPLX_HOST_MEMORY_ALLOWANCE_BYTES`
+  sets that allowance, and `0` is the strict comparison. The guard's log
+  line and the `mem` block on `/health` now carry `phys_footprint_bytes`
+  and `host_overhang_bytes`, so a memory report names its holder.
 - **Long sessions no longer leak one whole KV cache per turn** (issue #456,
   diagnosed by peterloron; also the memory growth in #499 and #438). When a
   session's snapshot is over the per-session limit, the session cache keeps
