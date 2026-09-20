@@ -2165,6 +2165,47 @@ _COMPILED_VERIFY_PLE: contextvars.ContextVar[Optional[mx.array]] = (
 )
 
 
+# Cache-only history append for the draft head (prefill). Appending prompt
+# history to the draft head ran its whole decoder layer over every chunk --
+# block selection, attention, the routed experts, both hyper-connection
+# writes -- and the prefill loop then threw the output away: it evaluates it
+# and returns the elapsed time. The only thing the pass leaves behind is the
+# head's QSA cache (keys, values, raw indexer keys, pooled blocks and their
+# float32 mirror), and those are written before any of that work starts.
+# Tonight's traces: 0.09 to 0.12 s per 4,096-row chunk, 3.26 s of a 103.8 s
+# 128K prefill, 1.48 s of 50.6 s at 64K, 0.35 s of 11.4 s at 16K.
+# Armed, Attention and the indexer return right after their cache writes, so
+# the writes are the same lines of code on the same inputs and the rest is
+# never built. Every cache leaf is bit-identical (the test compares bits).
+_QSA_HISTORY_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "qwen4_exp_qsa_history_only", default=False
+)
+
+
+def _mtp_history_cache_only_enabled() -> bool:
+    """``MTPLX_QWEN4_MTP_HISTORY_CACHE_ONLY=0`` restores the full layer pass."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_MTP_HISTORY_CACHE_ONLY") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _qsa_cache_arrays(cache: "QSACache") -> list:
+    """Every array a history append leaves on a QSA cache entry."""
+
+    kv = cache.kv
+    return [
+        value
+        for value in (
+            getattr(kv, "keys", None),
+            getattr(kv, "values", None),
+            cache.raw_keys,
+            cache.pooled,
+            cache.pooled_f32_t,
+        )
+        if isinstance(value, mx.array)
+    ]
+
+
 # In-forward boundary capture (prefill). A restore boundary at prompt position
 # p needs the recurrent state AFTER token p - 1. Until now the only way to get
 # it was to END a forward at p, so the prefill loop cut the last chunk into
@@ -3649,6 +3690,10 @@ class QSAIndexer(nn.Module):
 
         cache.write_raw(k)
         pooled = self._extend_pooled(cache, T)
+        if _QSA_HISTORY_ONLY.get():
+            # Draft-head history append: the keys and the pooled blocks are
+            # in the cache; nobody will read a selection.
+            return None
         nb_total = 0 if pooled is None else pooled.shape[1]
 
         # Per-query complete-block counts. If every visible prefix fits inside
@@ -4089,6 +4134,10 @@ class Attention(nn.Module):
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
         k, v = cache.kv.update_and_fetch(k, v)
+        if _QSA_HISTORY_ONLY.get():
+            # Draft-head history append: the cache holds this chunk now, and
+            # the caller evaluates the cache arrays instead of an output.
+            return None
         T = k.shape[2]
 
         if vrope is not None and not vision_qsa_enabled():
@@ -6089,11 +6138,33 @@ class Qwen4ExpMTP(nn.Module):
         tok_emb: mx.array,
         cache,
     ) -> mx.array:
-        """History/prefill phase route; it may carry S>1 and stays eager."""
+        """History/prefill phase route; it may carry S>1 and stays eager.
+
+        In a prefill loop the caller keeps nothing but the cache, so only the
+        cache is computed (see ``_QSA_HISTORY_ONLY``) and the cache arrays are
+        what comes back to be evaluated. Every other caller, and the rollback
+        switch, get the whole layer and its output as before.
+        """
 
         h = self._prepare_inputs_eager(widened, tok_emb)
         layer_cache = cache[0] if cache is not None else None
-        return self.layers[0](h, input_ids=None, ssm_mask=None, cache=layer_cache)
+        layer = self.layers[0]
+        if (
+            isinstance(layer_cache, QSACache)
+            and not getattr(layer_cache, "fixed_capacity", False)
+            and not layer.is_linear
+            and "ple" not in layer
+            and current_attention_phase() == "prefill"
+            and _mtp_history_cache_only_enabled()
+        ):
+            mixed, _hyper, _inject = layer.attn_hyper_connection(h)
+            token = _QSA_HISTORY_ONLY.set(True)
+            try:
+                layer.self_attn(mixed, layer_cache)
+            finally:
+                _QSA_HISTORY_ONLY.reset(token)
+            return _qsa_cache_arrays(layer_cache)
+        return layer(h, input_ids=None, ssm_mask=None, cache=layer_cache)
 
     def __call__(self, widened: mx.array, tok_emb: mx.array, cache) -> mx.array:
         return self.hyper_connection_mixer(self.fuse_and_run(widened, tok_emb, cache))
