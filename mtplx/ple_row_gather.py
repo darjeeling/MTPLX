@@ -66,6 +66,7 @@ __all__ = [
     "free_memory_bytes",
     "parse_prewarm_mode",
     "plan_hot_runs",
+    "plan_small_maps_first",
     "prewarm_mode_setting",
     "prewarm_prefix",
     "resolve_budget",
@@ -767,6 +768,56 @@ def plan_hot_runs(rows, row_meta, budget_bytes: int, *, page: int = PAGE_SIZE):
     return best[0], best[1]
 
 
+def plan_small_maps_first(
+    map_extents,
+    budget_bytes: int,
+    *,
+    page: int = PAGE_SIZE,
+    chunk_bytes: int = PREWARM_CHUNK_BYTES,
+):
+    """Read runs that fill whole maps in ascending size order.
+
+    Returns ``(runs, maps_complete)``.
+
+    Row ids are hash-uniform, so a gather of never-seen rows costs one cold
+    page per row in every map that is not resident.  A byte of budget spent
+    on a map of ``size`` bytes therefore avoids ``1 / size`` cold reads per
+    row, which makes the smallest map the best purchase and the file prefix
+    nearly the worst one: the shipped table is laid out weight (23.8 GiB),
+    scales (3.0 GiB), biases (3.0 GiB), so a 6.5 GiB prefix covers 27% of the
+    weights and nothing else (2.73 cold reads per new row), while the same
+    budget covers scales and biases completely (0.98 cold reads per new row).
+
+    Runs are cut at ``chunk_bytes`` so the pread pool can take them side by
+    side; the last map the budget reaches gets a prefix of what is left.
+    """
+
+    extents = sorted(
+        ((int(offset), int(nbytes)) for offset, nbytes in map_extents if int(nbytes) > 0),
+        key=lambda extent: (extent[1], extent[0]),
+    )
+    remaining = int(budget_bytes)
+    runs: list[tuple[int, int]] = []
+    complete = 0
+    for offset, nbytes in extents:
+        if remaining < page:
+            break
+        start = (offset // page) * page
+        end = -(-(offset + nbytes) // page) * page
+        take = min(end - start, (remaining // page) * page)
+        if take <= 0:
+            break
+        if take >= end - start:
+            complete += 1
+        cursor = start
+        while cursor < start + take:
+            length = min(int(chunk_bytes), start + take - cursor)
+            runs.append((cursor, length))
+            cursor += length
+        remaining -= take
+    return runs, complete
+
+
 def read_runs(fd: int, runs, *, submit=None) -> int:
     """Fault ``runs`` into the page cache with ``pread``; return bytes read."""
 
@@ -895,13 +946,17 @@ def run_prewarm(
     fd=None,
     submit=None,
     order_override=None,
+    map_extents=(),
 ) -> dict:
     """Pre-read as much of the n-gram table as the budget allows.
 
     Returns the full receipt; never raises.  The order is the hotness file
     when one exists (rows the model actually gathers, read as coalesced
-    page-aligned runs) and the file prefix otherwise -- at the same budget
-    both warm the same number of pages, so the only question is which ones.
+    page-aligned runs).  Without one, a caller that names the byte extents
+    of the table's maps gets the smallest maps first
+    (:func:`plan_small_maps_first`), and anyone else gets the file prefix --
+    at the same budget all three warm the same number of pages, so the only
+    question is which ones.
     """
 
     import time
@@ -962,6 +1017,12 @@ def run_prewarm(
                 plan["hot_rows"] = int(rows_taken)
             else:
                 warmed = prewarm_prefix(table_path, budget)
+        elif budget < table_bytes and fd is not None and len(tuple(map_extents)) > 1:
+            plan_runs, maps_complete = plan_small_maps_first(map_extents, budget)
+            order = "small_maps_first"
+            runs = len(plan_runs)
+            warmed = read_runs(fd, plan_runs, submit=submit)
+            plan["maps_complete"] = int(maps_complete)
         else:
             warmed = prewarm_prefix(table_path, budget)
     except OSError as error:

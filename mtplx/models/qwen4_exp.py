@@ -4474,6 +4474,14 @@ class _SidecarGather:
             row_meta=tuple(self._row_meta),
             fd=self._fd,
             submit=None if self._pool is None else self._pool.submit,
+            # Planar layout only: the interleaved row file is one map, and a
+            # single map has no smaller sibling to read first.
+            map_extents=tuple(
+                (int(offset), int(self._maps[name][0].nbytes))
+                for name, (offset, _row_bytes) in zip(self._maps, self._row_meta)
+            )
+            if self.row_layout == "planar"
+            else (),
         )
         # Two lines on the server's startup log: what was decided, and what it
         # cost.  Guarded -- a closed stdout (app-launched daemon, redirected

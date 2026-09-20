@@ -479,3 +479,91 @@ def test_the_order_env_reaches_the_pre_read():
     assert 'ORDER_ENV = "MTPLX_NGRAM_PREWARM_ORDER"' in body
     assert "os.environ.get(ORDER_ENV)" in body
     assert 'os.environ["MTPLX_NGRAM_PREWARM_ORDER"] = str(order)' in SERVER_TEXT
+
+
+# --------------------------------------------------------------------------
+# Smallest maps first (2026-09-20)
+# --------------------------------------------------------------------------
+
+# The shipped geometry in miniature: weight, scales, biases, in file order.
+MAP_EXTENTS = ((0, 4 << 20), (4 << 20, 2 << 20), (6 << 20, 2 << 20))
+
+
+def test_small_maps_are_planned_before_the_large_one():
+    page = row_gather.PAGE_SIZE
+    runs, complete = row_gather.plan_small_maps_first(
+        MAP_EXTENTS, 5 << 20, chunk_bytes=1 << 20
+    )
+    assert complete == 2
+    covered = sorted(runs)
+    # Both 2 MiB maps in full, then the first 1 MiB of the weight map.
+    assert sum(length for _, length in runs) == 5 << 20
+    assert all(offset % page == 0 and length % page == 0 for offset, length in runs)
+    small = [run for run in covered if run[0] >= 4 << 20]
+    assert sum(length for _, length in small) == 4 << 20
+    large = [run for run in covered if run[0] < 4 << 20]
+    assert large == [(0, 1 << 20)]
+    # Cut for the pread pool: no run is larger than the chunk.
+    assert max(length for _, length in runs) <= 1 << 20
+
+
+def test_small_maps_plan_never_exceeds_the_budget_and_handles_nothing():
+    runs, complete = row_gather.plan_small_maps_first(MAP_EXTENTS, 3 << 20)
+    assert complete == 1
+    assert sum(length for _, length in runs) <= 3 << 20
+    assert row_gather.plan_small_maps_first(MAP_EXTENTS, 0) == ([], 0)
+    assert row_gather.plan_small_maps_first((), 1 << 20) == ([], 0)
+
+
+def test_a_partial_budget_with_map_extents_reads_the_small_maps_first(tmp_path):
+    table = _table(tmp_path)
+    os.environ[row_gather.PREWARM_ENV] = "0.0045"  # 4.6 MiB of an 8 MiB table
+    fd = os.open(str(table), os.O_RDONLY)
+    try:
+        receipt = row_gather.run_prewarm(
+            table_path=table, row_meta=ROW_META, fd=fd, map_extents=MAP_EXTENTS
+        )
+    finally:
+        os.close(fd)
+    assert receipt["order"] == "small_maps_first"
+    assert receipt["maps_complete"] == 2
+    assert 4 << 20 <= receipt["warmed_bytes"] <= receipt["budget_bytes"]
+    assert receipt["skipped_reason"] is None
+
+
+def test_a_full_budget_with_map_extents_still_reads_sequentially(tmp_path):
+    table = _table(tmp_path)
+    os.environ[row_gather.PREWARM_ENV] = "all"
+    fd = os.open(str(table), os.O_RDONLY)
+    try:
+        receipt = row_gather.run_prewarm(
+            table_path=table, row_meta=ROW_META, fd=fd, map_extents=MAP_EXTENTS
+        )
+    finally:
+        os.close(fd)
+    assert receipt["order"] == "prefix"
+    assert receipt["warmed_bytes"] == table.stat().st_size
+
+
+def test_a_hotness_file_still_outranks_the_map_order(tmp_path):
+    import numpy as np
+
+    table = _table(tmp_path)
+    np.save(tmp_path / row_gather.HOTNESS_FILENAME, np.arange(0, 40_000, 7, np.int64))
+    os.environ[row_gather.PREWARM_ENV] = "0.002"
+    fd = os.open(str(table), os.O_RDONLY)
+    try:
+        receipt = row_gather.run_prewarm(
+            table_path=table, row_meta=ROW_META, fd=fd, map_extents=MAP_EXTENTS
+        )
+    finally:
+        os.close(fd)
+    assert receipt["order"] == "hotness"
+
+
+def test_the_sidecar_names_its_map_extents_to_the_pre_read():
+    body = (ROOT / "mtplx" / "models" / "qwen4_exp.py").read_text("utf-8")
+    call = body[body.index("receipt = run_prewarm(") :]
+    call = call[: call.index("\n        )\n") + 1]
+    assert "map_extents=tuple(" in call
+    assert 'self.row_layout == "planar"' in call
