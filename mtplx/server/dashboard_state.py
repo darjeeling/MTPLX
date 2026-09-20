@@ -642,9 +642,14 @@ class DashboardState:
     # 4 critical, 0 unknown. Written by the memory-pressure guard loop.
     last_memory_pressure_level: int = 0
     # Which signal produced the level above: "macos" (system-wide — often
-    # another process allocating) or "allocator" (this engine's Metal
-    # active+cache near its limit). Lets the app banner name the culprit
-    # instead of implying the engine is misbehaving under an external storm.
+    # another process allocating), "allocator" (this engine's Metal
+    # active+cache near its limit) or "system_available" (the kernel's
+    # available-memory figure fell under the desktop floor while the other two
+    # still read normal). Lets the app banner name the culprit instead of
+    # implying the engine is misbehaving under an external storm.
     last_memory_pressure_source: str = "macos"
     # (active+cache)/metal-limit at the same tick, for the banner detail.
     last_allocator_fraction: float = 0.0
+    # The kernel's available-memory figure at the same tick; None when it
+    # cannot be read or the system guard is off (mtplx/system_memory.py).
+    last_system_available_bytes: int | None = None

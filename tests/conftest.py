@@ -50,6 +50,20 @@ def _hermetic_mtplx_state(monkeypatch, tmp_path_factory):
     # Tests that exercise the config writer set their own path; everyone
     # else writes into this scratch file.
     monkeypatch.setenv("MTPLX_OPENCODE_CONFIG", str(isolated / "opencode.json"))
+    # The system memory guard reads how much memory the kernel can still hand
+    # out. On a developer machine that figure depends on what else is open,
+    # so the suite sees "unknown" (the guard takes no action) unless a test
+    # installs its own reading.
+    import mtplx.system_memory as system_memory
+
+    monkeypatch.setattr(system_memory, "_reader", lambda: None)
+    for name in (
+        "MTPLX_SYSTEM_MEMORY_GUARD",
+        "MTPLX_SYSTEM_MEMORY_ABORT_FLOOR_BYTES",
+        "MTPLX_SYSTEM_MEMORY_SHED_FLOOR_BYTES",
+        "MTPLX_SYSTEM_MEMORY_REHEARSAL_AVAILABLE_BYTES",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

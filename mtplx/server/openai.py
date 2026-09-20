@@ -152,6 +152,12 @@ from mtplx.runtime_options import (
 )
 from mtplx.draft_lm_head import _install_draft_lm_head
 from mtplx import request_capture
+from mtplx.system_memory import (
+    admission_shortfall_bytes as _system_admission_shortfall_bytes,
+    read_system_memory as _read_system_memory,
+    system_memory_floors as _system_memory_floors,
+    system_pressure_level as _system_pressure_level,
+)
 from mtplx.fan_mode import (
     FAN_MODE_CHOICES,
     FAN_MODE_DEFAULT,
@@ -18266,6 +18272,9 @@ def _mtplx_dashboard_snapshot(state: "ServerState") -> dict[str, Any]:
         "allocator_fraction": float(
             getattr(dashboard, "last_allocator_fraction", 0.0) or 0.0
         ),
+        "system_available_bytes": getattr(
+            dashboard, "last_system_available_bytes", None
+        ),
         "memory_plan": (
             state.memory_plan.to_dict()
             if getattr(state, "memory_plan", None) is not None
@@ -18480,6 +18489,30 @@ def _prefill_admission_refusal(
     over = max(0, projected - limit)
     prompt_tokens = int(receipt.get("prompt_tokens") or 0)
     miss_tokens = int(receipt.get("miss_tokens") or 0)
+    if receipt.get("refusal_reason") == "system_memory_short_after_reclamation":
+        available = int(
+            receipt.get("system_available_bytes_after")
+            or receipt.get("system_available_bytes")
+            or 0
+        )
+        short = int(
+            receipt.get("system_shortfall_bytes_after")
+            or receipt.get("system_shortfall_bytes")
+            or 0
+        )
+        return HTTPException(
+            status_code=507,
+            detail=(
+                "insufficient memory: the other apps on this Mac leave "
+                f"{available / gib:.1f} GiB free, and this prompt needs about "
+                f"{short / gib:.1f} GiB more than that ({prompt_tokens} prompt "
+                f"tokens, {miss_tokens} not cached). The engine gave back its "
+                "own caches first. The request was refused before prefill "
+                "instead of pushing the Mac into swap, which can freeze the "
+                "whole desktop. Close some apps and try again, or shorten the "
+                "prompt; --allow-swap admits it anyway."
+            ),
+        )
     return HTTPException(
         status_code=507,
         detail=(
@@ -18639,10 +18672,27 @@ def _prefill_admission_shed(
             except Exception:
                 transients = 0
         threshold = int(limit * _PREFILL_ADMISSION_PRESSURE_FRACTION)
+        # The second line a prefill must clear is the desktop's, not the
+        # engine's: what the kernel can still hand out after the other apps
+        # took theirs (mtplx/system_memory.py). A banked copy of the new
+        # prefix doubles the per-token growth while a session bank is on.
+        bank_copies = 2 if session_bank is not None else 1
+        system_memory = _read_system_memory()
+
+        def system_shortfall(tokens: int, pool_bytes: int) -> int:
+            return _system_admission_shortfall_bytes(
+                system_memory,
+                growth_bytes=tokens * per_token * bank_copies + transients,
+                reclaimable_bytes=pool_bytes,
+            )
+
         # Cheap worst-case gate first (miss == full prompt): skip the bank
-        # probe entirely when even a fully cold prefill projects under the
-        # line — the common, memory-healthy case.
-        if active + cache + prompt_tokens * per_token + transients <= threshold:
+        # probe entirely when even a fully cold prefill projects under both
+        # lines — the common, memory-healthy case.
+        if (
+            active + cache + prompt_tokens * per_token + transients <= threshold
+            and system_shortfall(prompt_tokens, cache) <= 0
+        ):
             return None
         reused_tokens = 0
         reused_mode = "none"
@@ -18728,7 +18778,8 @@ def _prefill_admission_shed(
         if miss_tokens < _prefill_admission_min_miss_tokens():
             return None
         projected = active + cache + miss_tokens * per_token + transients
-        if projected <= threshold:
+        system_short = system_shortfall(miss_tokens, cache)
+        if projected <= threshold and system_short <= 0:
             return None
         receipt: dict[str, Any] = {
             "action": "prefill_admission_shed",
@@ -18742,6 +18793,12 @@ def _prefill_admission_shed(
             "threshold_bytes": int(threshold),
             "limit_bytes": int(limit),
         }
+        if system_memory is not None:
+            receipt["system_available_bytes"] = int(system_memory.available_bytes)
+            receipt["system_shed_floor_bytes"] = int(
+                _system_memory_floors(system_memory.total_bytes)[0]
+            )
+            receipt["system_shortfall_bytes"] = int(system_short)
         # The allocator pool is free storage, whereas session snapshots
         # avoid real re-prefill/SSD work. Reclaim the pool and remeasure
         # before choosing any snapshot victims. Counting it as an admission
@@ -18762,7 +18819,9 @@ def _prefill_admission_shed(
                 + miss_tokens * per_token + transients
             )
         receipt["projected_bytes_after_cache_clear"] = int(projected)
-        deficit = max(0, projected - threshold)
+        # The allocator pool was already counted as reclaimable, so clearing
+        # it does not change the desktop's shortfall; bank evictions do.
+        deficit = max(0, projected - threshold, system_short)
         if session_bank is not None and deficit > 0:
             try:
                 bank_bytes_before = int(session_bank.total_nbytes)
@@ -18858,6 +18917,25 @@ def _prefill_admission_shed(
         if projected_after > limit and not bool(getattr(state, "allow_swap", False)):
             receipt["refused"] = True
             receipt["refusal_reason"] = "projected_over_limit_after_reclamation"
+        elif system_short > 0:
+            # Same rule for the desktop's line, measured again now that the
+            # pool and the bank have given back what they could. A request
+            # that still does not fit would push the other apps into swap.
+            system_memory = _read_system_memory()
+            system_short_after = system_shortfall(
+                miss_tokens, int(after.get("cache_memory_bytes") or 0)
+            )
+            receipt["system_available_bytes_after"] = (
+                int(system_memory.available_bytes)
+                if system_memory is not None
+                else None
+            )
+            receipt["system_shortfall_bytes_after"] = int(system_short_after)
+            if system_short_after > 0 and not bool(
+                getattr(state, "allow_swap", False)
+            ):
+                receipt["refused"] = True
+                receipt["refusal_reason"] = "system_memory_short_after_reclamation"
         _record_guard_event(state, receipt)
         try:
             print("[mtplx] memory guard " + json.dumps(receipt), flush=True)
@@ -18932,6 +19010,8 @@ def _engine_busy_signal(state: "ServerState") -> bool:
 # Metal allocation error (the only prior 507 trigger) would ever fire.
 # Sustained critical means the shedding already ran and lost.
 _PRESSURE_ABORT_TICKS = 3
+# Guard-loop period while the desktop is under its shed floor (see the loop).
+_SYSTEM_SHORT_INTERVAL_S = 2.0
 
 
 def _pressure_abort_requested(state: "ServerState") -> bool:
@@ -19104,6 +19184,7 @@ async def _memory_pressure_loop(
 
     guard = _MemoryPressureGuard()
     abort_streak = 0
+    system_level = 1
     while True:
         try:
             level = await asyncio.to_thread(_memory_pressure_level)
@@ -19123,6 +19204,21 @@ async def _memory_pressure_loop(
                 # (no Metal limit configured, or zero active memory), so
                 # engine steadiness cannot be attested either way.
                 level_source = "unknown"
+            # What the rest of the Mac has left (mtplx/system_memory.py). The
+            # two signals above are blind to it: the engine can sit under its
+            # own Metal limit while the desktop has nothing left to give, and
+            # the macOS level stays "normal" until the swap storm has begun.
+            # It only ever raises the level.
+            system_memory = _read_system_memory()
+            system_level = _system_pressure_level(system_memory)
+            if system_level > level:
+                level = system_level
+                level_source = "system_available"
+            state.dashboard.last_system_available_bytes = (
+                int(system_memory.available_bytes)
+                if system_memory is not None
+                else None
+            )
             state.dashboard.last_memory_pressure_level = level
             state.dashboard.last_memory_pressure_source = level_source
             state.dashboard.last_allocator_fraction = float(allocator_fraction)
@@ -19228,6 +19324,11 @@ async def _memory_pressure_loop(
                     "level": level,
                     "level_source": level_source,
                     "allocator_fraction": round(allocator_fraction, 3),
+                    "system_available_bytes": (
+                        int(system_memory.available_bytes)
+                        if system_memory is not None
+                        else None
+                    ),
                     "bank_entries_evicted": evicted,
                     "bank_bytes_after": int(
                         getattr(bank, "total_nbytes", 0) or 0
@@ -19242,9 +19343,17 @@ async def _memory_pressure_loop(
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            system_level = 1
         try:
-            await asyncio.sleep(interval_s)
+            # A prefill adds about 0.1 GiB per second. While the desktop is
+            # under its shed floor the loop looks every two seconds, so the
+            # sustained-critical abort fires within seconds of the abort floor
+            # instead of half a minute later.
+            await asyncio.sleep(
+                min(interval_s, _SYSTEM_SHORT_INTERVAL_S)
+                if system_level >= 2
+                else interval_s
+            )
         except asyncio.CancelledError:
             raise
 
@@ -25660,11 +25769,19 @@ def _run_generation(
             if _pressure_abort_requested(state) and not (
                 cancel_event is not None and cancel_event.is_set()
             ):
+                desktop_short = (
+                    getattr(state.dashboard, "last_memory_pressure_source", None)
+                    == "system_available"
+                )
                 raise _allocation_failure_http_exception(
                     state,
                     RuntimeError(
                         "sustained critical memory pressure during prefill; "
                         "aborted before the allocator wall"
+                        if not desktop_short
+                        else "the Mac ran out of free memory during prefill "
+                        "(other apps hold the rest); aborted before the "
+                        "desktop started to swap"
                     ),
                 )
             raise _StreamCancelled("client disconnected during prefill")
