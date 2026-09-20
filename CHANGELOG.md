@@ -25,6 +25,25 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **Long sessions no longer leak one whole KV cache per turn** (issue #456,
+  diagnosed by peterloron; also the memory growth in #499 and #438). When a
+  session's snapshot is over the per-session limit, the session cache keeps
+  a reference to the live cache instead of a copy. That entry recorded 0
+  bytes, so every memory check missed it: the check before a long prompt
+  logged `bank_bytes_before=0` and answered 507 with memory it could have
+  freed, the pressure routine never started, and the automatic cache limit
+  mistook the reference for the running request and evicted useful
+  snapshots instead. The entries were also skipped by the rules that retire
+  an older copy of the same conversation, so a turn that could not reuse
+  the reference built a new cache and left the old one allocated (measured
+  by peterloron on a 64 GB M4 Max: +3.7 GiB per turn). These entries now
+  report what they hold, a session keeps one at most, eviction and
+  `/admin/cache/clear` release the cache they point at, and the check
+  before a long prompt can release one that belongs to another
+  conversation. `/health` shows `lease_entries`, `lease_nbytes` and a
+  per-entry `held_nbytes`. A very long session on a small Mac can now push
+  its own older snapshots out of memory (they stay on the SSD cache),
+  because the cache finally stays inside its limit.
 - **Dashboard draft totals fall back to the per-depth counts** (PR #490,
   Wu Shuwen; issue #401). The "accepted of drafted" line and the drafted
   per verify call tile total `accepted_by_depth` and `drafted_by_depth`
