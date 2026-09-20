@@ -120,6 +120,7 @@ from mtplx.gemma4_pair import (
     resolve_gemma4_pair_paths,
 )
 from mtplx.model_scheduler import ModelWorkScheduler
+from mtplx.os_memory import phys_footprint_bytes
 from mtplx.server.hyper import HYPER_ADMISSION_CAP, HyperAdmissionGate
 from mtplx.reasoning_effort import (
     REASONING_EFFORT_CHOICES,
@@ -423,6 +424,42 @@ def _resolve_stream_stall_deadline_s(raw: str | float | None) -> float:
 
 STREAM_STALL_DEADLINE_S = _resolve_stream_stall_deadline_s(
     os.environ.get("MTPLX_STREAM_STALL_DEADLINE_S")
+)
+
+
+# Smart-fan counterpart of the stream deadline (#201, PR #295). The stale-lease
+# reconciler only drops leaked fan leases while the activity probe reports the
+# engine idle, and a WEDGED foreground request used to read as busy forever:
+# on 2026-08-18 twenty leases pinned both fans at max for ~15 h behind a single
+# parked request whose client was already dead. This deadline is what lets the
+# probe call that stall "not busy" so the existing restore path can run. Kept
+# below the stream deadline because reporting idle only stops *claiming* the
+# fans. It never cancels a request, so it is safe to be eager here. Total time
+# to fan restore is this plus MTPLX_SMART_FAN_STALE_LEASE_S. 0 disables (the
+# probe then keeps the presence-only behaviour).
+FOREGROUND_STALL_DEADLINE_DEFAULT_S = 180.0
+
+
+def _resolve_foreground_stall_deadline_s(raw: str | float | None) -> float:
+    """Seconds of a still owner heartbeat before a registered request stops
+    counting as fan activity; 0 turns the check off.
+
+    Same parsing law as the stream deadline (#448): blank, absent or
+    unreadable means the default, and "0" stays 0.
+    """
+    if raw is None:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+    text = str(raw).strip()
+    if not text:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return FOREGROUND_STALL_DEADLINE_DEFAULT_S
+
+
+FOREGROUND_STALL_DEADLINE_S = _resolve_foreground_stall_deadline_s(
+    os.environ.get("MTPLX_FOREGROUND_STALL_DEADLINE_S")
 )
 
 
@@ -3705,6 +3742,12 @@ class ServerState:
         self.args.fan_mode = self.fan_mode
         from mtplx.thermal import SmartFanController
 
+        # Read side of the owner progress heartbeat for the fan activity probe
+        # (#201). Separate instance from the per-stream watchdogs so its
+        # baseline is never stolen by a concurrent stream poll.
+        self._fan_stall_probe = _OwnerStallProbe(
+            deadline_s=FOREGROUND_STALL_DEADLINE_S
+        )
         self.smart_fans = SmartFanController(
             log=lambda line: LOGGER.info("%s", line),
             activity_probe=self._smart_fan_activity_probe,
@@ -3768,8 +3811,21 @@ class ServerState:
         queues and the executing item of either lane (foreground + idle
         postcommit), and a short recency window so back-to-back agent turns
         never look idle between requests.
+
+        A registered foreground request is only busy while the owner thread is
+        actually ADVANCING. A wedged request stays registered forever, and
+        treating presence as progress is what let a single parked request pin
+        both fans at max for ~15 h (2026-08-18). The owner progress heartbeat
+        ticks many times per second under any healthy prefill or decode, so a
+        reading frozen past FOREGROUND_STALL_DEADLINE_S means parked, not slow.
+        Reporting idle here does not cancel anything. It only stops claiming
+        the fans, letting the SmartFanController stale-lease reconciler (#201)
+        run its normal restore.
         """
         if self.has_foreground():
+            stall_probe = getattr(self, "_fan_stall_probe", None)
+            if stall_probe is not None and stall_probe.observe() is not None:
+                return False
             return True
         scheduler = getattr(self, "model_scheduler", None)
         if scheduler is not None and hasattr(scheduler, "any_pending_or_active"):
@@ -3784,8 +3840,21 @@ class ServerState:
 
     def begin_foreground(self) -> None:
         with self.foreground_lock:
+            was_idle = self.foreground_active == 0
             self.foreground_active += 1
             self.last_request_started_at = time.time()
+            # Rearm the fan activity probe on the idle -> active edge only.
+            # The probe is a single long-lived instance that is READ only
+            # while foreground work exists, so after a quiet window its
+            # frozen-since baseline is hours old and the next request would
+            # be classified wedged on its FIRST poll, collapsing the
+            # documented FOREGROUND_STALL_DEADLINE_S + stale-lease budget.
+            # Never rearm for additional concurrent requests: a steady
+            # arrival stream would otherwise hide a genuinely wedged owner.
+            if was_idle:
+                probe = getattr(self, "_fan_stall_probe", None)
+                if probe is not None:
+                    probe.rearm()
 
     def end_foreground(self) -> None:
         with self.foreground_lock:
@@ -3864,6 +3933,48 @@ def _session_bank_cold_tier_from_args(args: argparse.Namespace) -> Any | None:
         min_prefix_tokens=min_prefix_tokens,
         reconcile_listener=_reconcile_event,
     )
+
+
+def _owner_settled_eval(*values: Any) -> None:
+    """Settle model-owner work AND prove the owner is alive (#86, #295).
+
+    The AR batch pump drives ``mlx_lm``'s ``BatchGenerator``, whose prefill
+    happens inside the library; the only heartbeat this lane had was
+    ``record_batch_step``, which fires solely when a decode step produced
+    generation responses. A long shared-prefix prefill or a prefill-only pump
+    cycle therefore ticked nothing, and both the #86 stream stall watchdog
+    and the smart-fan activity probe read "alive" as "the owner heartbeat is
+    advancing", so a healthy width-8 prefill that outlasted their deadlines
+    read as a wedge. Deliberately used only on the owner thread: ticking from
+    a request thread would forge owner liveness and blind both readers.
+    """
+
+    import mlx.core as mx
+
+    mx.eval(*values)
+    progress_heartbeat.tick()
+
+
+def _owner_settled_pump_step(
+    prompt_responses: Any, generation_responses: Any
+) -> None:
+    """Tick owner progress for ONE ``BatchGenerator`` step, only if it ran.
+
+    The library settles its own step values before returning, so there is
+    nothing left for us to ``mx.eval`` — the heartbeat tick is the whole
+    payload, and that makes an unconditional tick pure fabrication.
+    ``next()`` can hand back two empty lists (a transient library step, or a
+    pump whose ``_active`` map has desynchronised from the generator); ticking
+    there lets the pump spin forever while continuously resetting both the
+    #86 stream stall watchdog and the fan activity probe: streams starve,
+    nothing ever aborts, and the fan leases stay pinned. A prompt response (a
+    settled prefill chunk) or a generation response (a settled decode step) is
+    the only proof a step actually completed.
+    """
+
+    if not prompt_responses and not generation_responses:
+        return
+    progress_heartbeat.tick()
 
 
 class _BatchedARJob:
@@ -4250,11 +4361,11 @@ class _BatchedARGenerationService:
                     cache=cache,
                     return_hidden=False,
                 )
-            mx.eval(logits, [entry.state for entry in cache])
+            _owner_settled_eval(logits, [entry.state for entry in cache])
             prefill_s = time.perf_counter() - prefill_started
             snapshot_started = time.perf_counter()
             snapshot = snapshot_cache(cache)
-            mx.eval(snapshot.states, snapshot.meta_states)
+            _owner_settled_eval(snapshot.states, snapshot.meta_states)
             snapshot_s = time.perf_counter() - snapshot_started
         except Exception as exc:
             for job in candidates:
@@ -4667,7 +4778,6 @@ class _BatchedARGenerationService:
                 job.future.set_exception(exc)
 
     def _pump(self) -> None:
-        import mlx.core as mx
         from mlx_lm.generate import BatchGenerator
 
         config = _scheduler_config_from_args(self.state.args)
@@ -4796,7 +4906,7 @@ class _BatchedARGenerationService:
                             self._active.pop(uid, None)
                         self._commit_finished_row(job, response)
                         self._complete_job(job, finish_reason=str(finish_reason))
-                mx.eval([])
+                _owner_settled_pump_step(prompt_responses, generation_responses)
         except BaseException as exc:
             self._fail_all(exc)
             raise
@@ -15330,11 +15440,19 @@ def _record_request_metrics(state: "ServerState", record: dict[str, Any]) -> Non
         # silently unless its TRACE env is set — the 147.4k decode cliff hid
         # behind that silence. Cumulative-since-boot module counters; a delta
         # between consecutive rows isolates one request.
-        from ..attention_split import gqa_packed_route_bail_counts
+        from ..attention_split import (
+            gqa_packed_route_bail_counts,
+            gqa_packed_route_engaged_counts,
+        )
         from ..kernels.sdpa_gqa_packed import gqa_packed_bail_counts
 
         record.setdefault(
             "gqa_packed_route_bail_counts", dict(gqa_packed_route_bail_counts)
+        )
+        # The accepted half (#506), same cumulative-since-boot reading.
+        record.setdefault(
+            "gqa_packed_route_engaged_counts",
+            dict(gqa_packed_route_engaged_counts),
         )
         record.setdefault(
             "gqa_packed_kernel_bail_counts", dict(gqa_packed_bail_counts)
@@ -16744,6 +16862,18 @@ def _memory_attribution(state: Any) -> dict[str, Any]:
         attribution["generation_working_bytes"] = max(
             0, active - int(weights or 0) - bank_bytes
         )
+        # What the kernel holds for this process (the counter jetsam reads),
+        # and the part of it MLX's own account does not explain. Reported on
+        # every surface that carries this block so a memory report from the
+        # field names its holder: "active is fine and the Mac is full" and
+        # "active itself is high" are different defects (#456, PR #500).
+        footprint = phys_footprint_bytes()
+        attribution["phys_footprint_bytes"] = footprint
+        attribution["host_overhang_bytes"] = (
+            max(0, int(footprint) - active - int(_mx.get_cache_memory()))
+            if footprint
+            else None
+        )
     except Exception:
         attribution["generation_working_bytes"] = None
     return attribution
@@ -17476,6 +17606,17 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
             flash_dispatches[attr_name] = dict(value)
     if flash_dispatches:
         nax["flash_dispatch_counters"] = flash_dispatches
+    # The same positive receipt for the packed-GQA verify route, which is the
+    # 27B's long-context verify kernel on every chip before the M5 (#506).
+    # Without it "declined 96 times" could not be told from "declined 96
+    # times and accepted every verify window since". See the counter's note
+    # in attention_split: inside the compiled verifier both count traces.
+    try:
+        from mtplx.attention_split import gqa_packed_route_engaged_counts
+
+        nax["gqa_packed_engaged_counters"] = dict(gqa_packed_route_engaged_counts)
+    except BaseException:
+        pass
 
     # Nothing goes slow in silence: every demotion off a fast lane, with a
     # count and the last plain-English reason (mtplx/demotions.py).
@@ -18546,6 +18687,84 @@ def _vision_bank_session_id(bank: Any, prompt_ids: list[int], splice: Any) -> st
     return entry.session_id
 
 
+# Memory a healthy daemon holds OUTSIDE MLX's own account (Python heap,
+# tokenizer, thread stacks, n-gram hot rows, the SSD writer's staged bytes).
+# Measured 3 to 6 GiB on a Flash-Next daemon on 2026-09-16 (phys_footprint
+# 88.58 GB, 77 GB of it weights), and the SSD writer alone may stage up to
+# MTPLX_SSD_WRITER_BACKLOG_BYTES (4 GiB). The floor below is that measurement
+# plus headroom; MTPLX_HOST_MEMORY_ALLOWANCE_BYTES overrides it.
+_HOST_MEMORY_ALLOWANCE_FLOOR_BYTES = 8 * 1024**3
+
+
+def _host_memory_allowance_bytes(state: Any, limit: int) -> int:
+    """How much process memory outside MLX's account is normal on this seat.
+
+    The allocator limit is not the process's budget. The memory plan fits
+    weights, KV, transients and the session cache inside the limit (75% of
+    RAM by default) and leaves the rest of the machine to macOS AND to what
+    this process holds outside Metal. Comparing the whole footprint with the
+    allocator limit therefore reads a session the plan itself sized to fit
+    as over the line: on a 48 GB Mac with the 27B, limit 36 GiB, a full
+    session plus 2 to 3 GiB of ordinary host memory is 1.06 to 1.08 of the
+    limit, which is CRITICAL at rest (the 2026-09-16 review of PR #500).
+
+    The allowance is the larger of two numbers. The plan's own headroom:
+    RAM (or the user's --memory-budget) minus the system reserve minus the
+    limit, 16 GiB on a default 128 GB seat. And a floor for the seats where
+    the limit already IS "everything outside the system reserve" (Flash-Next
+    on 96 GB, or an operator's explicit limit), where that difference is
+    zero and a healthy daemon would otherwise sit in WARNING for good.
+    WARNING halves the warm session cache, so a false one is a regression.
+
+    MTPLX_HOST_MEMORY_ALLOWANCE_BYTES=0 is the strict floor PR #500 proposed:
+    every byte of footprint above MLX's account counts.
+    """
+
+    raw = os.environ.get("MTPLX_HOST_MEMORY_ALLOWANCE_BYTES")
+    if raw is not None and raw.strip():
+        parsed = _parse_byte_limit(raw)
+        if parsed is not None and parsed >= 0:
+            return int(parsed)
+    allowance = int(_HOST_MEMORY_ALLOWANCE_FLOOR_BYTES)
+    total = 0
+    caps = getattr(state, "metal_memory_caps", None)
+    if isinstance(caps, dict) and isinstance(caps.get("total_ram_bytes"), int):
+        total = int(caps["total_ram_bytes"])
+    budget = getattr(state, "memory_budget_bytes", None)
+    if isinstance(budget, int) and budget > 0:
+        total = min(total, budget) if total > 0 else budget
+    if total > 0 and limit > 0:
+        from mtplx.memory_plan import system_reserve_bytes
+
+        allowance = max(allowance, total - system_reserve_bytes(total) - int(limit))
+    return int(allowance)
+
+
+def _footprint_floor(
+    state: Any, *, limit: int, allocator_bytes: int
+) -> tuple[int, dict[str, Any]]:
+    """``allocator_bytes`` raised by the footprint MLX cannot account for.
+
+    Returns the number every guard compares with the allocator limit, and
+    the fields that explain it. ``host_overhang_bytes`` is what the kernel
+    holds for this process beyond active + cache; only the part above the
+    seat's allowance is charged. A failed probe (no libproc, not Darwin)
+    returns ``allocator_bytes`` unchanged, as does any healthy process.
+    """
+
+    footprint = phys_footprint_bytes()
+    fields: dict[str, Any] = {"phys_footprint_bytes": footprint}
+    if not footprint:
+        return int(allocator_bytes), fields
+    overhang = max(0, int(footprint) - int(allocator_bytes))
+    allowance = _host_memory_allowance_bytes(state, int(limit))
+    charged = max(0, overhang - allowance)
+    fields["host_overhang_bytes"] = int(overhang)
+    fields["host_allowance_bytes"] = int(allowance)
+    fields["host_overhang_charged_bytes"] = int(charged)
+    return int(allocator_bytes) + int(charged), fields
+
+
 def _prefill_admission_shed_enabled() -> bool:
     return os.environ.get(
         "MTPLX_PREFILL_ADMISSION_SHED", "1"
@@ -18656,6 +18875,20 @@ def _prefill_admission_shed(
         cache = int(stats.get("cache_memory_bytes") or 0)
         if active <= 0:
             return None
+        # #456 / two independently reported kernel panics: active+cache is
+        # MLX's own account of what it allocated through Metal, and it can
+        # drift below what the kernel actually holds resident for this
+        # process. live_bytes floors every projection below at the real
+        # phys_footprint when that reads higher, so a request already
+        # dangerous in reality is never judged safe by allocator bookkeeping
+        # alone. A missing/failed probe (non-Darwin, no libproc) leaves
+        # live_bytes identical to active+cache — byte-identical to before.
+        #
+        # Re-based after review: the floor charges only the footprint beyond
+        # what this seat normally holds outside Metal (_footprint_floor).
+        live_bytes, footprint_fields = _footprint_floor(
+            state, limit=limit, allocator_bytes=active + cache
+        )
         plan = getattr(state, "memory_plan", None)
         per_token = 0
         transients = 0
@@ -18690,7 +18923,7 @@ def _prefill_admission_shed(
         # probe entirely when even a fully cold prefill projects under both
         # lines — the common, memory-healthy case.
         if (
-            active + cache + prompt_tokens * per_token + transients <= threshold
+            live_bytes + prompt_tokens * per_token + transients <= threshold
             and system_shortfall(prompt_tokens, cache) <= 0
         ):
             return None
@@ -18777,7 +19010,7 @@ def _prefill_admission_shed(
         miss_tokens = max(0, prompt_tokens - reused_tokens)
         if miss_tokens < _prefill_admission_min_miss_tokens():
             return None
-        projected = active + cache + miss_tokens * per_token + transients
+        projected = live_bytes + miss_tokens * per_token + transients
         system_short = system_shortfall(miss_tokens, cache)
         if projected <= threshold and system_short <= 0:
             return None
@@ -18789,6 +19022,7 @@ def _prefill_admission_shed(
             "miss_tokens": int(miss_tokens),
             "active_bytes": int(active),
             "cache_bytes": int(cache),
+            **footprint_fields,
             "projected_bytes": int(projected),
             "threshold_bytes": int(threshold),
             "limit_bytes": int(limit),
@@ -18813,11 +19047,13 @@ def _prefill_admission_shed(
             receipt["cache_clear_error"] = repr(exc)
         after_cache = _mlx_memory_stats_live()
         if int(after_cache.get("active_memory_bytes") or 0) > 0:
-            projected = (
-                int(after_cache["active_memory_bytes"])
-                + int(after_cache.get("cache_memory_bytes") or 0)
-                + miss_tokens * per_token + transients
+            live_after_cache, _ = _footprint_floor(
+                state,
+                limit=limit,
+                allocator_bytes=int(after_cache["active_memory_bytes"])
+                + int(after_cache.get("cache_memory_bytes") or 0),
             )
+            projected = live_after_cache + miss_tokens * per_token + transients
         receipt["projected_bytes_after_cache_clear"] = int(projected)
         # The allocator pool was already counted as reclaimable, so clearing
         # it does not change the desktop's shortfall; bank evictions do.
@@ -18907,11 +19143,25 @@ def _prefill_admission_shed(
         # mark the receipt refused; the caller answers with the structured
         # 507 before prefill. --allow-swap (#427) keeps the operator's
         # explicit past-the-fit choice.
-        projected_after = (
-            int(after.get("active_memory_bytes") or 0)
-            + int(after.get("cache_memory_bytes") or 0)
-            + miss_tokens * per_token
-            + transients
+        #
+        # This final check is the one #450 added and the one that still
+        # missed both later kernel panics: active+cache after reclamation
+        # read under the limit while the OS-reported footprint did not.
+        # Float the same phys_footprint floor in here too, or the refusal
+        # this comment describes never actually fires for that failure
+        # shape.
+        live_after, footprint_fields_after = _footprint_floor(
+            state,
+            limit=limit,
+            allocator_bytes=int(after.get("active_memory_bytes") or 0)
+            + int(after.get("cache_memory_bytes") or 0),
+        )
+        projected_after = live_after + miss_tokens * per_token + transients
+        receipt["phys_footprint_bytes_after"] = footprint_fields_after.get(
+            "phys_footprint_bytes"
+        )
+        receipt["host_overhang_charged_bytes_after"] = footprint_fields_after.get(
+            "host_overhang_charged_bytes", 0
         )
         receipt["projected_bytes_after"] = int(projected_after)
         if projected_after > limit and not bool(getattr(state, "allow_swap", False)):
@@ -18956,14 +19206,28 @@ def _prefill_admission_shed(
 
 
 def _allocator_pressure_level(state: "ServerState") -> tuple[int, float]:
-    """Engine-relative pressure: allocator footprint vs the Metal limit.
+    """Engine-relative pressure: real footprint vs the Metal limit.
 
     macOS's kern.memorystatus level fires only once the system is already
     compressing/swapping — on a 48 GB Mac that is minutes into the death
     spiral (#305: 61.8/48.0 GB before the first signal). The allocator
     knows its allocation envelope earlier: active+cache at >=97% of the
     configured Metal memory limit is treated as WARNING (2);
-    past the limit is CRITICAL-equivalent (4). Returns (level, fraction).
+    past the limit is CRITICAL-equivalent (4).
+
+    active+cache is MLX's own account of what it allocated through Metal,
+    and it can drift below what the kernel actually holds resident for this
+    process — touched-then-kept weight pages, non-Metal Python/NumPy heap,
+    thread stacks, the session bank's host-side buffers. Two independently
+    reported machines grew past this gate's limit while it still read
+    sub-WARNING, and both ended in a kernel panic (watchdog timeout, near-
+    zero free pages) rather than the sustained-pressure abort this loop is
+    meant to arm. ``phys_footprint_bytes()`` reads the same counter macOS's
+    own jetsam subsystem uses for this exact decision. Only the footprint
+    beyond what this seat normally holds outside Metal is added
+    (``_footprint_floor``), so the reading can only rise, never fall below
+    what the allocator already measured, and a healthy engine sees no
+    change. Returns (level, fraction).
     """
     caps = getattr(state, "metal_memory_caps", None)
     limit = 0
@@ -18978,7 +19242,10 @@ def _allocator_pressure_level(state: "ServerState") -> tuple[int, float]:
     cache = stats.get("cache_memory_bytes") or 0
     if not active:
         return 1, 0.0
-    fraction = float(int(active) + int(cache)) / float(limit)
+    live_bytes, _ = _footprint_floor(
+        state, limit=limit, allocator_bytes=int(active) + int(cache)
+    )
+    fraction = float(live_bytes) / float(limit)
     if fraction >= 1.02:
         return 4, fraction
     if fraction >= 0.97:
@@ -19329,6 +19596,7 @@ async def _memory_pressure_loop(
                         if system_memory is not None
                         else None
                     ),
+                    "phys_footprint_bytes": phys_footprint_bytes(),
                     "bank_entries_evicted": evicted,
                     "bank_bytes_after": int(
                         getattr(bank, "total_nbytes", 0) or 0
@@ -19636,6 +19904,14 @@ class _OwnerStallProbe:
         self._clock = clock
         self._last_value = progress()
         self._frozen_since_s = clock()
+
+    def rearm(self, now_s: float | None = None) -> None:
+        """Restart the frozen-since window from the current heartbeat.
+
+        Used when a probe that nobody was reading becomes live again, so an
+        idle gap is not charged against the newly arrived work."""
+        self._last_value = self._progress()
+        self._frozen_since_s = self._clock() if now_s is None else now_s
 
     def observe(self, now_s: float | None = None) -> float | None:
         """Return how long the owner has been frozen once past the deadline."""

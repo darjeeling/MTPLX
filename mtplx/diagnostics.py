@@ -7,6 +7,7 @@ fresh machines before the runtime stack is installed.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import socket
@@ -752,7 +753,72 @@ def build_diagnostic_checks(
             "Let the Mac cool down or improve airflow before sustained benchmarks.",
         )
     )
+    checks.append(last_failed_start_check())
     return host, checks
+
+
+#: How much of the app's failed-start report doctor repeats. A Python
+#: traceback plus the start-up lines before it fits; the file keeps 200.
+FAILED_START_TAIL_LINES = 60
+#: A failed start older than this is history, not the reason for today's report.
+FAILED_START_MAX_AGE_DAYS = 14
+
+
+def failed_start_report_path() -> Path:
+    """Where the app writes a failed start's output (SYNC PAIR:
+    ``StartFailureReport.defaultURL`` in the app). The override exists so the
+    test suite never reads a developer's real file."""
+    override = os.environ.get("MTPLX_START_FAILURE_REPORT")
+    if override and override.strip():
+        return Path(override).expanduser()
+    return Path.home() / ".mtplx" / "logs" / "last-failed-start.log"
+
+
+def last_failed_start_check() -> DiagnosticCheck:
+    """The output of the app's last failed start, if it is recent (#504).
+
+    A daemon that dies before /health leaves the app one line to show, and the
+    banner cuts that line off. The app keeps the whole output in this file,
+    with the launch line's secrets already masked, and doctor repeats its
+    tail, so a "will not start" report carries its cause.
+    """
+
+    path = failed_start_report_path()
+    expected = "no recent failed start recorded by the app"
+    try:
+        stat = path.stat()
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return DiagnosticCheck("app.last_failed_start", "pass", "warning", None, expected)
+    age_s = max(0.0, time.time() - stat.st_mtime)
+    if age_s > FAILED_START_MAX_AGE_DAYS * 24 * 3600:
+        return DiagnosticCheck(
+            "app.last_failed_start",
+            "pass",
+            "warning",
+            {"path": str(path), "stale_days": int(age_s // (24 * 3600))},
+            expected,
+        )
+    lines = text.splitlines()
+    header: dict[str, str] = {}
+    for line in lines[:8]:
+        key, sep, value = line.partition(": ")
+        if sep and key in {"when", "app", "macos", "reason"}:
+            header[key] = value
+    return DiagnosticCheck(
+        "app.last_failed_start",
+        "warn",
+        "warning",
+        {
+            "path": str(path),
+            "age_hours": round(age_s / 3600, 1),
+            **header,
+            "tail": lines[-FAILED_START_TAIL_LINES:],
+        },
+        expected,
+        "The MTPLX app could not start its server. The lines under `tail` are "
+        "what the server printed before it stopped; include them in a bug report.",
+    )
 
 
 def summarize_checks(checks: list[DiagnosticCheck]) -> str:

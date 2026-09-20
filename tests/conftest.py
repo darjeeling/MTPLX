@@ -64,6 +64,12 @@ def _hermetic_mtplx_state(monkeypatch, tmp_path_factory):
         "MTPLX_SYSTEM_MEMORY_REHEARSAL_AVAILABLE_BYTES",
     ):
         monkeypatch.delenv(name, raising=False)
+    # `mtplx doctor` reads the app's failed-start report (#504). A developer
+    # whose own app once failed to start must not get a different doctor
+    # result from the suite than CI does.
+    monkeypatch.setenv(
+        "MTPLX_START_FAILURE_REPORT", str(isolated / "last-failed-start.log")
+    )
 
 
 @pytest.fixture

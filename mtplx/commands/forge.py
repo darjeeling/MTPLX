@@ -1083,6 +1083,24 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
             )
         _mirror_model_tree(source_path, destination)
         _write_progress(run, "convert", progress=1.0, label="to_mlx", finished=True)
+    elif (
+        source_format == SOURCE_BF16_NATIVE
+        and str(probe.get("recommended_backend") or "") == "qwen4_exp"
+    ):
+        # Flash-Next: the pinned mlx-lm has no qwen4_exp, and the family needs
+        # the n-gram table streamed into its SSD sidecar rather than converted
+        # as a 95 GiB parameter (#390). MTPLX's own backend does the body.
+        from mtplx.commands.forge_qwen4_exp import Qwen4ForgeError, run_lane
+
+        _err("[forge] converting with the MTPLX qwen4_exp lane (n-gram sidecar + streamed body + MTP head)")
+
+        def _lane_progress(name: str, progress: float, label: str, finished: bool) -> None:
+            _write_progress(run, name, progress=progress, label=label, finished=finished)
+
+        try:
+            run_lane(source_path, destination, recipe=recipe, progress=_lane_progress)
+        except Qwen4ForgeError as exc:
+            raise ForgeError(f"qwen4_exp lane failed: {exc}", code=2) from exc
     elif source_format in {SOURCE_AUTOAWQ, SOURCE_COMPRESSED_TENSORS_AWQ}:
         _convert_compressed_tensors_awq(
             source_path,
@@ -1122,7 +1140,7 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
     )
 
     existing_runtime = _read_runtime(destination) or _read_runtime(source_path)
-    require_all_depths = True
+    require_all_depths = _build_requires_all_depths(destination)
     verify_depths = _forge_verify_depths(destination)
     rows = _verify_rows_from_runtime(existing_runtime)
     calibration_diagnostic: str | None = None
@@ -1734,12 +1752,28 @@ def _extract_embedded_mtp(
     sanitize_values: bool = False,
 ) -> bool:
     index_path = source / "model.safetensors.index.json"
-    if not index_path.exists():
-        return False
-    index = _load_json(index_path)
-    weight_map = index.get("weight_map") if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict):
-        return False
+    if index_path.exists():
+        index = _load_json(index_path)
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict):
+            return False
+    else:
+        # A model small enough for one model.safetensors ships no index
+        # (#492, a 4B distill). inspect reads the shard headers in that case
+        # (artifacts._local_model_weight_keys) and reports the head as present,
+        # so forge went ahead, and this function then returned False for want
+        # of an index: the trunk was converted, no mtp.safetensors was written,
+        # and the build died at calibration with "return_hidden requires an
+        # MTP-patched runtime". Build the same map from the headers inspect
+        # reads, so the two agree about what a checkpoint contains.
+        weight_map = {}
+        for shard in sorted(source.glob("model*.safetensors")):
+            _header_size, header = _read_safetensors_header(shard)
+            for key in header:
+                if key != "__metadata__":
+                    weight_map[str(key)] = shard.name
+        if not weight_map:
+            return False
 
     if config is None:
         config_path = source / "config.json"
@@ -2700,6 +2734,17 @@ def _run_verify(
             )
         )
     return rows
+
+
+def _build_requires_all_depths(model_path: Path) -> bool:
+    """Whether a build must see every tune depth (D1..Dn) before it passes.
+
+    The tune lane sweeps depths, so a missing one is a failed measurement.
+    The family-serve lane measures exactly two rows -- AR and the family's
+    speculative default (D3 on Flash-Next) -- through the real serve path,
+    so requiring D1/D2 there rejected every qwen4_exp build after a passing
+    verify."""
+    return _verify_rows_lane(model_path) != "family-serve"
 
 
 def _verify_rows_lane(model_path: Path) -> str:

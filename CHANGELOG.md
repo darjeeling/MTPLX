@@ -6,6 +6,34 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ## [Unreleased] (2.11.4)
 
+### Added
+
+- **`forge build` converts Qwen3.8-Flash-Next sources** (PR #508, Bradford
+  Matthews, issue #390). Forge handed every Flash-Next fine-tune to the
+  pinned mlx-lm, which does not know the `qwen4_exp` architecture, and
+  stopped with `Model type qwen4_exp not supported`. A BF16 source of that
+  family now takes its own path. The 51B n-gram table is quantized one
+  shard at a time straight into `ngram-table.safetensors` and is never held
+  in memory. The trunk is converted with MTPLX's own model code under the
+  Optimized Speed recipe, one tensor at a time, because saving a whole
+  shard in one step ran long enough for macOS to stop the GPU work.
+  `module_overrides` still apply on top. The draft head is written in the
+  layout the runtime loads. New recipe keys: `ngram.bits` and
+  `ngram.group_size` (default 4 and 32, the layout the runtime expects),
+  `qwen4_mtp_bits` (default: the same as the trunk) and `qwen4_qsa_8bit`.
+  A build of this family is checked on the two rows its verify step
+  measures, plain decoding and depth 3, instead of failing on `required
+  depths: D1, D2`. The contributor built
+  `orcarouter/Qwen3.8-Flash-Next-Uncensored` end to end on an M5 Max with
+  128 GB.
+- **Remove a downloaded model from the app** (PR #377, Philip John
+  Basile). The model picker has a Remove action with a confirmation. It
+  runs `mtplx remove` for exactly the entry shown, only inside the primary
+  model folder from Settings (additional model folders stay read-only), and
+  it refuses the model the server is currently serving. When the command
+  refuses, the app shows its reason instead of an exit code. The new
+  strings are in all thirteen languages.
+
 ### Changed
 
 - **Request captures hold no content by default** (PR #356, Philip John
@@ -25,6 +53,108 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **Saving a long session to SSD no longer holds up the next request**
+  (issue #505, reported by peterloron). On a 64 GB Mac with the 27B at about
+  104K tokens, the background job that writes a session to the SSD cache
+  held the model for more than 500 s while a request waited behind it, and
+  the stream watchdog ended that request at 300 s. The job was meant to give
+  way to a waiting request, but it only looked between pieces of work whose
+  size nothing limited. Each piece is now at most 32 MiB and the job looks
+  after every one, including while it reads a restored session's boundary
+  records. The files on disk are byte for byte the same. `/health` reports
+  `encode_units`, `encode_slow_units` and `encode_longest_unit_s` for the SSD
+  cache, and any piece slower than 1 s is logged with what it was.
+- **`mtplx remove` acts on the entry you named.** A folder in the model
+  cache whose name spells one of the public aliases resolved to the
+  first-party model's folder instead, so `mtplx models` could print a
+  delete command for one entry that would have removed another. An exact
+  folder name now wins. When two copies of a model sit in two model
+  folders, the refusal says to choose one with `--cache-dir`; a typed
+  `--cache-dir` now does that even when the other folder comes from
+  `MTPLX_MODEL_DIRS` or the config file.
+- **A stuck request no longer holds the fans at maximum** (PR #295,
+  El-Patronum). In Smart fan mode a request holds the fans up until it
+  ends, and a safety net restores them when the server has been idle for
+  120 s with a request still holding them. A request that was stuck still
+  counted as activity, so the safety net never ran: one report had both fans
+  at maximum for about fifteen hours behind a request whose client had
+  already gone. A request now counts as activity only while the model is
+  making progress. After 180 s without any (`MTPLX_FOREGROUND_STALL_DEADLINE_S`,
+  `0` switches the check off) it stops counting, and the fans return to
+  automatic 120 s later. Nothing is cancelled. The batched serving paths now
+  report progress during prefill as well, which also stops the stream
+  watchdog from failing a healthy batched prefill that runs longer than its
+  300 s deadline.
+- **Forge builds a model that ships as one weights file** (issue #492). A
+  model small enough for a single `model.safetensors` has no
+  `model.safetensors.index.json`. `mtplx inspect` read the file's header
+  and reported the draft head as present, but Forge looked for the head
+  through the index only, so it converted the model, wrote no
+  `mtp.safetensors`, and stopped at calibration with `return_hidden
+  requires an MTP-patched runtime`. Forge now reads the same headers
+  `inspect` does.
+- **`mtplx doctor` shows why the app could not start** (issue #504). When
+  the app's server stops before it is ready, the app showed one line and
+  cut it off, and nothing was written to disk. The app now writes the
+  server's last output to `~/.mtplx/logs/last-failed-start.log` (the launch
+  line has its secrets masked), and `mtplx doctor` includes the last 60
+  lines as `app.last_failed_start` when the file is less than 14 days old.
+- **A download blocked by a company proxy now says what to do** (issue
+  #495). Behind a proxy that inspects HTTPS, model downloads stopped at
+  setup step 6 of 7 with `CERTIFICATE_VERIFY_FAILED` while `curl` worked,
+  because the proxy's root certificate is in the macOS keychain and Python
+  verifies against its own bundle. The error now explains that and names
+  both fixes (`SSL_CERT_FILE`, or the `truststore` package). When
+  `truststore` is installed, downloads verify through the keychain
+  automatically; MTPLX does not depend on it, and `MTPLX_SYSTEM_TRUST=0`
+  switches that off.
+- **The memory guards read the process's real footprint from macOS**
+  (PR #500, Maikel Vos). Every guard compared MLX's own account of its
+  allocations with the Metal limit. `mtplx/os_memory.py` now reads
+  `phys_footprint`, the counter the system's own memory-pressure logic
+  uses, and the guard before a long prompt, its refusal check and the
+  background pressure loop add the part of it MLX's account does not
+  explain. Only the part beyond what a daemon normally holds outside Metal
+  is added (the larger of 8 GiB and what the machine leaves after the
+  system reserve and the Metal limit), because the Metal limit is not the
+  process's budget: comparing the whole footprint with it reads a full
+  session on a 48 GB Mac as critical. `MTPLX_HOST_MEMORY_ALLOWANCE_BYTES`
+  sets that allowance, and `0` is the strict comparison. The guard's log
+  line and the `mem` block on `/health` now carry `phys_footprint_bytes`
+  and `host_overhang_bytes`, so a memory report names its holder.
+- **A session over its cache budget continues instead of being read again**
+  (issue #499). On a 48 GB Mac one conversation may hold about 7.4 GB of
+  warm cache, and a 142,000-token session needs 11 GB, so the cache keeps a
+  reference to the live state instead of a copy. With speculative decoding
+  on, that entry dropped the draft head's history it was handed, so the
+  next turn's restore failed (`no_snapshot_coverage`), the copy on disk had
+  been written without the history and was refused
+  (`ssd_missing_mtp_history`), and the whole prompt was read again: 570 s
+  to the first token at 150,000 tokens in the report, on every turn. The
+  entry now keeps the history (about 4 KB per token, next to 64 KB per
+  token of main state) in memory and in its SSD copy, so the next turn
+  continues and a restart restores from disk. Copies written by older
+  versions lack the history; each long session reads its prompt once more
+  after the update.
+- **Long sessions no longer leak one whole KV cache per turn** (issue #456,
+  diagnosed by peterloron; also the memory growth in #499 and #438). When a
+  session's snapshot is over the per-session limit, the session cache keeps
+  a reference to the live cache instead of a copy. That entry recorded 0
+  bytes, so every memory check missed it: the check before a long prompt
+  logged `bank_bytes_before=0` and answered 507 with memory it could have
+  freed, the pressure routine never started, and the automatic cache limit
+  mistook the reference for the running request and evicted useful
+  snapshots instead. The entries were also skipped by the rules that retire
+  an older copy of the same conversation, so a turn that could not reuse
+  the reference built a new cache and left the old one allocated (measured
+  by peterloron on a 64 GB M4 Max: +3.7 GiB per turn). These entries now
+  report what they hold, a session keeps one at most, eviction and
+  `/admin/cache/clear` release the cache they point at, and the check
+  before a long prompt can release one that belongs to another
+  conversation. `/health` shows `lease_entries`, `lease_nbytes` and a
+  per-entry `held_nbytes`. A very long session on a small Mac can now push
+  its own older snapshots out of memory (they stay on the SSD cache),
+  because the cache finally stays inside its limit.
 - **Dashboard draft totals fall back to the per-depth counts** (PR #490,
   Wu Shuwen; issue #401). The "accepted of drafted" line and the drafted
   per verify call tile total `accepted_by_depth` and `drafted_by_depth`
@@ -37,6 +167,18 @@ All notable user-facing changes to MTPLX. The format is based on
   continuation depending on whether the path engaged. The flag now shares
   the classic loop's per-token draw, and a new test holds the two token
   sequences equal at temperature 1.0, top-p 0.95, top-k 20.
+- **A draft head taken from a raw checkpoint no longer drafts backwards**
+  (PR #511, Stuart Rowlands). Hugging Face checkpoints store the MTP head's
+  RMSNorm gains zero-centred. mlx-lm restores the +1.0 convention on the
+  trunk but drops every `mtp.*` key first, and only Forge restored it on the
+  head. A sidecar that reached the Qwen 3.5 / 3.8 loader any other way
+  (copied in by hand, or extracted from the base checkpoint) bound without
+  an error and then ran at about 0% acceptance, slower than plain decoding:
+  the negative gain inverts the head's output, so the right token lands
+  near the bottom of the distribution (measured median rank 247,513 of
+  248,320). The loader now applies the same detector-gated restoration
+  Forge uses. A head already in the absolute convention passes through
+  byte for byte, so nothing is shifted twice.
 
 ## [2.11.3] - 2026-09-17
 

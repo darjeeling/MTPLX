@@ -1028,7 +1028,84 @@ def _classify_pull_error(exc: BaseException, repo_id: str) -> str:
         return f"Hugging Face could not find {repo_id}. Check the model name, then retry."
     if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
         return "Not enough disk space to finish the model download. Free space, then retry."
+    certificate_failure = _certificate_verify_failure(exc)
+    if certificate_failure is not None:
+        return (
+            "The secure connection to Hugging Face could not be verified. This "
+            "usually means a company proxy inspects HTTPS traffic and signs it "
+            "with its own certificate. macOS, Safari and curl trust that "
+            "certificate through the keychain; Python does not read the keychain. "
+            "Ask your IT team for the proxy's root certificate as a .pem file, "
+            "then set SSL_CERT_FILE and REQUESTS_CA_BUNDLE to its path and retry. "
+            "If the Python package `truststore` is installed next to MTPLX, the "
+            "keychain is used automatically and nothing else is needed. "
+            # The wrapped error's own text, not the outermost wrapper's: a bug
+            # report needs the line that names the certificate problem.
+            f"Details: {certificate_failure}"
+        )
     return str(exc)
+
+
+def _certificate_verify_failure(exc: BaseException) -> BaseException | None:
+    """The TLS certificate verification failure in ``exc``'s chain, if any (#495).
+
+    httpx and huggingface_hub wrap the ``ssl`` error, sometimes more than
+    once, and some wrappers keep only its text.
+    """
+
+    import ssl
+
+    seen: set[int] = set()
+    cursor: BaseException | None = exc
+    while cursor is not None and id(cursor) not in seen:
+        seen.add(id(cursor))
+        if isinstance(cursor, ssl.SSLCertVerificationError):
+            return cursor
+        if "CERTIFICATE_VERIFY_FAILED" in str(cursor):
+            return cursor
+        cursor = cursor.__cause__ or cursor.__context__
+    return None
+
+
+_SYSTEM_TRUST_STATE: dict[str, Any] = {"attempted": False, "active": False, "reason": None}
+
+
+def use_system_trust_store() -> dict[str, Any]:
+    """Verify TLS through the operating system when ``truststore`` is present.
+
+    Behind a TLS-inspecting proxy the proxy's root certificate is in the macOS
+    keychain and not in ``certifi``, so every download fails verification
+    while curl works (#495). ``truststore`` hands verification to the system
+    (Security.framework on macOS), which is what pip has done since 24.2. It
+    is used when it is installed and never required: MTPLX does not depend on
+    it, so nothing changes for anyone who has not installed it.
+
+    Deliberately not done: building a CA bundle from ``security
+    find-certificate``. That dumps every certificate in a keychain whatever
+    its trust setting, so it would trust roots an administrator marked as
+    never trusted.
+
+    ``MTPLX_SYSTEM_TRUST=0`` switches it off. Idempotent: injecting twice would
+    stack the ``ssl.SSLContext`` replacement.
+    """
+
+    state = _SYSTEM_TRUST_STATE
+    if state["attempted"]:
+        return dict(state)
+    state["attempted"] = True
+    raw = os.environ.get("MTPLX_SYSTEM_TRUST", "1").strip().lower()
+    if raw in {"0", "off", "false", "no"}:
+        state["reason"] = "disabled_by_env"
+        return dict(state)
+    try:
+        import truststore
+    except ImportError:
+        state["reason"] = "truststore_not_installed"
+        return dict(state)
+    truststore.inject_into_ssl()
+    state["active"] = True
+    state["reason"] = "truststore"
+    return dict(state)
 
 
 def _safe_destination_for_repo_file(destination: Path, repo_file: RepoFile) -> Path:
@@ -1613,6 +1690,8 @@ def pull_model(
     repo_id = repo_id_from_model_ref(model_ref)
     if repo_id is None:
         raise ValueError(f"pull requires a Hugging Face repo id or URL, got: {model_ref}")
+    # Before the first request of any kind (the freshness query below is one).
+    use_system_trust_store()
     revision = _effective_model_revision(repo_id, revision)
     root = ensure_model_root(model_cache_dir(cache_dir).expanduser().absolute())
     if destination is None:

@@ -373,6 +373,27 @@ def _snapshot_nbytes(snapshot: CacheSnapshot) -> int:
     return _tree_nbytes(snapshot.states) + _tree_nbytes(snapshot.meta_states)
 
 
+def _live_cache_nbytes(cache: list[Any] | None) -> int:
+    """Bytes a list of LIVE cache objects keeps allocated (0 when unknown).
+
+    Reads each object's ``nbytes``: the real allocation, capacity overhang
+    included, which is what a live-reference lease pins (a paged KV reserves
+    ``prompt + 16384`` tokens). Every real cache class implements it (mlx-lm's
+    and MTPLX's paged and tensor-offset ones), and none of them materialize
+    arrays to answer, unlike ``state`` on the paged classes. An object without
+    the property, or mlx-lm's base class saying a subclass never implemented
+    it, reports 0 and the caller falls back to the refused snapshot's size.
+    """
+
+    total = 0
+    for item in cache or ():
+        try:
+            total += int(getattr(item, "nbytes", 0) or 0)
+        except NotImplementedError:
+            continue
+    return total
+
+
 @dataclass
 class SessionBankEntry:
     token_ids: tuple[int, ...]
@@ -394,6 +415,15 @@ class SessionBankEntry:
     # Record the rejected snapshot size that forced the lease so projections
     # stay honest across the whole oversized regime.
     oversized_nbytes: int = 0
+    # What a lease really holds, recorded once at put() time (#456). A lease
+    # has no snapshot, so ``nbytes`` stays 0 and keeps meaning "snapshot
+    # bytes" for the per-session budget, but the lease still keeps memory
+    # alive: ``lease_pinned_nbytes`` is the live cache it pins until a restore
+    # consumes it, ``lease_aux_nbytes`` is what it owns outright (logits,
+    # hidden, recurrent boundary records) and keeps after consumption.
+    # ``held_nbytes`` adds them up; every budget and guard reads that.
+    lease_pinned_nbytes: int = 0
+    lease_aux_nbytes: int = 0
     # Passive probe: monotonic time this ENTRY OBJECT's cold-tier encode
     # completed (the encode evals the entry's lazy roots in place), or None.
     # Kept on the exact object — Site A and Site B can create distinct
@@ -449,6 +479,36 @@ class SessionBankEntry:
     @property
     def prefix_len(self) -> int:
         return len(self.token_ids)
+
+    @property
+    def held_nbytes(self) -> int:
+        """Bytes of memory this entry keeps alive right now.
+
+        A durable entry holds its snapshot (``nbytes``; a lazy snapshot shares
+        its buffers with any live reference it also keeps). A lease holds the
+        live cache it pins until a restore takes the reference, and what it
+        owns outright after that. The refused snapshot's size is the floor for
+        a live lease whose cache objects cannot report their allocation.
+        """
+
+        if not self.live_ref_only:
+            return int(self.nbytes)
+        if self.cache_ref is None:
+            return int(self.lease_aux_nbytes)
+        return max(
+            int(self.lease_pinned_nbytes) + int(self.lease_aux_nbytes),
+            int(self.oversized_nbytes),
+        )
+
+    def release_live_refs(self) -> None:
+        """Drop the references to the live caches (eviction, clear).
+
+        An entry object outlives the bank's dict whenever a finished request's
+        outcome still points at it; the cache it pinned must not.
+        """
+
+        self.cache_ref = None
+        self.mtp_history_cache_ref = None
 
     def _ensure_boundaries_loaded(
         self, *, should_abort: Callable[[], bool] | None = None
@@ -669,7 +729,28 @@ class SessionBank:
         # the model owner mutates the dict inside put() (#487 -- a
         # "dictionary changed size during iteration" 500 counts as a
         # watchdog miss in the app). list() of a dict is atomic under the GIL.
-        return sum(entry.nbytes for entry in list(self._entries.values()))
+        #
+        # held_nbytes, not nbytes (#456): a live-reference lease has no
+        # snapshot and recorded 0 here while pinning a whole paged KV. Every
+        # reader of this total is a memory guard, and each one failed the same
+        # way: the admission shed (gated on a non-zero total) reported
+        # "nothing sheddable", shrink_to_bytes never entered its loop, and the
+        # dynamic ceiling (working set = active - weights - this total) took
+        # the lease for working set and evicted the durable snapshots instead.
+        return sum(entry.held_nbytes for entry in list(self._entries.values()))
+
+    @property
+    def lease_entries(self) -> int:
+        return sum(1 for entry in list(self._entries.values()) if entry.live_ref_only)
+
+    @property
+    def lease_nbytes(self) -> int:
+        """The part of ``total_nbytes`` held by live-reference leases."""
+        return sum(
+            entry.held_nbytes
+            for entry in list(self._entries.values())
+            if entry.live_ref_only
+        )
 
     def effective_max_bytes(self) -> int:
         """The byte budget in force right now.
@@ -844,6 +925,26 @@ class SessionBank:
         def live_ref_entry(reason: str, nbytes: int) -> SessionBankEntry | None:
             if not keep_live_ref or not cache:
                 return None
+            # The draft head's committed history (#499). A caller hands it
+            # over either as a live reference or as a snapshot, and the
+            # server's generation-final commit always uses the snapshot.
+            # The lease used to drop that snapshot while keeping its epoch,
+            # so with MTP on it could never be restored: the restore took
+            # the trunk reference, found no history and failed with
+            # no_snapshot_coverage, and the idle-lane spill wrote an SSD
+            # copy that _restore_cold refuses (ssd_missing_mtp_history).
+            # Every turn past the per-session budget then prefilled cold
+            # (570 s at 150K tokens in the report). The history is one
+            # attention layer, small next to the trunk that made the
+            # snapshot oversized, and trunk reference plus history
+            # snapshot is the pairing every durable generation-final
+            # entry already restores with. A live reference, when the
+            # caller gave one, serves instead and no copy is held.
+            kept_mtp_history = (
+                None
+                if mtp_history_cache_ref is not None
+                else _clone_tree(mtp_history_snapshot)
+            )
             entry = SessionBankEntry(
                 token_ids=tokens,
                 token_hash=token_prefix_hash(tokens),
@@ -858,12 +959,25 @@ class SessionBank:
                 live_ref_only=True,
                 nbytes=0,
                 oversized_nbytes=max(0, int(nbytes)),
+                lease_pinned_nbytes=(
+                    _live_cache_nbytes(cache)
+                    + _live_cache_nbytes(mtp_history_cache_ref)
+                ),
+                lease_aux_nbytes=(
+                    _tree_nbytes(logits)
+                    + _tree_nbytes(hidden)
+                    + _tree_nbytes(kept_mtp_history)
+                    + sum(
+                        _snapshot_nbytes(r[1]) + _tree_nbytes(r[2])
+                        for r in normalized_boundaries
+                    )
+                ),
                 session_id=session_id,
                 template_hash=template_hash,
                 mtp_history_policy=mtp_history_policy,
                 draft_head_identity=draft_head_identity,
                 policy_fingerprint=policy_fingerprint,
-                mtp_history_snapshot=None,
+                mtp_history_snapshot=kept_mtp_history,
                 snapshot_epoch=int(snapshot_epoch),
                 mtp_snapshot_epoch=(
                     int(mtp_snapshot_epoch)
@@ -871,6 +985,7 @@ class SessionBank:
                     else (
                         int(snapshot_epoch)
                         if mtp_history_cache_ref is not None
+                        or kept_mtp_history is not None
                         else None
                     )
                 ),
@@ -890,6 +1005,7 @@ class SessionBank:
                 }
             )
             self._entries[tokens] = entry
+            self._release_stale_session_leases(entry)
             self._supersede_contained_prefixes(tokens)
             self._evict_if_needed(protected_tokens=tokens)
             return entry
@@ -1051,6 +1167,7 @@ class SessionBank:
             self._schedule_snapshot_settle(entry, timing_out=timing_out)
         self._enqueue_cold_entry(entry, timing_out=timing_out)
         self._entries[tokens] = entry
+        self._release_stale_session_leases(entry)
         self._supersede_contained_prefixes(tokens)
         self._evict_if_needed(protected_tokens=tokens)
         return entry
@@ -1136,6 +1253,7 @@ class SessionBank:
         )
         self._enqueue_cold_entry(entry)
         self._entries[tokens] = entry
+        self._release_stale_session_leases(entry)
         self._supersede_contained_prefixes(tokens)
         self._evict_if_needed(protected_tokens=tokens)
         return entry
@@ -1992,8 +2110,13 @@ class SessionBank:
         )
 
     def clear(self, *, session_id: str | None = None) -> int:
+        # Cleared entries let go of their live caches like evicted ones do
+        # (see _evict_entry): /admin/cache/clear and the admission shed's
+        # superseded-session clear are both expected to give memory back.
         if session_id is None:
             count = len(self._entries)
+            for entry in list(self._entries.values()):
+                entry.release_live_refs()
             self._entries.clear()
             return count
         victims = [
@@ -2002,7 +2125,9 @@ class SessionBank:
             if entry.session_id == session_id
         ]
         for tokens in victims:
-            self._entries.pop(tokens, None)
+            entry = self._entries.pop(tokens, None)
+            if entry is not None:
+                entry.release_live_refs()
         return len(victims)
 
     def archive_cold_tier(self) -> dict[str, Any]:
@@ -2042,6 +2167,10 @@ class SessionBank:
             "idle_ttl_s": self.idle_ttl_s,
             "entries": len(self._entries),
             "total_nbytes": self.total_nbytes,
+            # #456: leases were invisible here ("entries: 4, total_nbytes: 0"
+            # was the only outside sign of a pinned paged KV per turn).
+            "lease_entries": self.lease_entries,
+            "lease_nbytes": self.lease_nbytes,
             "last_miss_reason": self.last_miss_reason,
             "last_oversized_skip": self.last_oversized_skip,
             "last_restore_source": self.last_restore_source,
@@ -2069,6 +2198,7 @@ class SessionBank:
                     "policy_fingerprint": entry.policy_fingerprint,
                     "hits": entry.hits,
                     "nbytes": entry.nbytes,
+                    "held_nbytes": entry.held_nbytes,
                     "created_at_s": entry.created_at_s,
                     "last_access_s": entry.last_access_s,
                     "has_live_ref": entry.cache_ref is not None,
@@ -2442,10 +2572,12 @@ class SessionBank:
             return False
         try:
             snapshot = snapshot_cache_lazy_hybrid(entry.cache_ref)
+            # Either form of the draft history goes to disk: without it a
+            # committed-policy restore refuses the record (#499).
             mtp_snapshot = (
                 snapshot_cache_lazy_hybrid(entry.mtp_history_cache_ref)
                 if entry.mtp_history_cache_ref is not None
-                else None
+                else entry.mtp_history_snapshot
             )
         except RuntimeError as exc:
             # e.g. the paged long-context guard refuses to materialize
@@ -2618,6 +2750,9 @@ class SessionBank:
         entry.hits += 1
         entry.last_access_s = time.time()
         self._entries[entry.token_ids] = entry
+        # The session is being served from disk into a fresh cache: any
+        # lease it still holds pins a cache this turn is not using (#456).
+        self._release_stale_session_leases(entry)
         self._evict_if_needed(protected_tokens=entry.token_ids)
         self.last_restore_source = "ssd"
         self.last_ssd_restore_s = float(getattr(record, "restore_s", 0.0) or 0.0)
@@ -2665,6 +2800,47 @@ class SessionBank:
             for entry in self._entries.values()
             if entry.session_id == session_id
         )
+
+    def _release_stale_session_leases(self, newest: SessionBankEntry) -> None:
+        """A session keeps at most one lease: the one just committed (#456).
+
+        A lease exists because the snapshot alone is over the per-session byte
+        budget, so two of them are the session holding at least twice its
+        budget. And the older one is dead weight by construction: a lease is
+        single-use, and a session that commits again either consumed it (the
+        entry is an empty shell now, still holding its boundary records) or
+        could not use it and prefilled into a NEW cache, in which case the old
+        lease pins a whole paged KV that nothing will ever read. That second
+        case leaked one cache per turn: leases were exempt from supersede in
+        both directions and from per-session retention, and recorded 0 bytes,
+        so no budget could see them either. Measured on a 64 GB M4 Max: +3.7
+        GiB of active memory per turn with ``entries: 4, total_nbytes: 0``.
+
+        Called at INSERTION, never at consumption. ``put()`` inherits recurrent
+        boundary records from the longest stored prefix, and between turns that
+        prefix is the consumed lease; dropping it earlier would strip the next
+        entry's records and push a divergent turn onto a cold prefill.
+
+        Sessions without an id are left to the byte budget, which now counts
+        leases (``total_nbytes``): an agent compaction mints a new id, and
+        unrelated anonymous conversations must not release each other's state.
+        A forked conversation under one session id loses the older fork's
+        lease; that fork falls back to its durable entries, the SSD tier, or a
+        prefill. The alternative is the over-commit this replaces.
+        """
+
+        session_id = newest.session_id
+        if not session_id:
+            return
+        stale = [
+            entry
+            for entry in self._entries.values()
+            if entry is not newest
+            and entry.live_ref_only
+            and entry.session_id == session_id
+        ]
+        for entry in stale:
+            self._evict_entry(entry, reason="superseded_session_lease")
 
     def _supersede_contained_prefixes(self, tokens: tuple[int, ...]) -> None:
         """Evict RAM entries that are strict token-prefixes of a new entry.
@@ -2883,7 +3059,11 @@ class SessionBank:
                         candidates = idle
             victim = min(
                 candidates,
-                key=lambda entry: (entry.last_access_s, -entry.nbytes, entry.created_at_s),
+                key=lambda entry: (
+                    entry.last_access_s,
+                    -entry.held_nbytes,
+                    entry.created_at_s,
+                ),
             )
             terminal = self._newest_extending_entry(protected_tokens)
             if terminal is not None and victim is terminal and len(candidates) > 1:
@@ -2899,7 +3079,7 @@ class SessionBank:
                     candidates,
                     key=lambda entry: (
                         entry.last_access_s,
-                        -entry.nbytes,
+                        -entry.held_nbytes,
                         entry.created_at_s,
                     ),
                 )
@@ -2950,7 +3130,7 @@ class SessionBank:
                 key=lambda entry: (
                     entry.session_id in active,
                     entry.last_access_s,
-                    -entry.nbytes,
+                    -entry.held_nbytes,
                     entry.created_at_s,
                 ),
             )
@@ -3031,6 +3211,17 @@ class SessionBank:
             # at 15 tok/s against 63 stock.
             return entry.cache_ref is None and not entry.live_ref_only
 
+        def _evictable_under_deficit(entry) -> bool:
+            # Phase 2 only (#456). The bar above protects the session that is
+            # about to restore, and ``protected_keys`` already names that
+            # entry. Every OTHER lease pins a cache no running request reads:
+            # a restore takes the reference away from its entry, so a session
+            # that is generating holds none. Those leases were the memory the
+            # shed could not reach ("bank 0, nothing sheddable", then a 507
+            # that only a restart cleared). Releasing one costs that session
+            # a disk restore or a prefill on its next turn.
+            return _evictable(entry) or entry.live_ref_only
+
         def _non_terminal_candidates():
             terminal: dict[str, int] = {}
             for entry in self._entries.values():
@@ -3049,7 +3240,7 @@ class SessionBank:
             _non_terminal_candidates,
             lambda entry: (
                 entry.last_access_s,
-                -entry.nbytes,
+                -entry.held_nbytes,
                 entry.created_at_s,
             ),
         )
@@ -3061,12 +3252,12 @@ class SessionBank:
             lambda: [
                 entry
                 for key, entry in self._entries.items()
-                if key not in protected_keys and _evictable(entry)
+                if key not in protected_keys and _evictable_under_deficit(entry)
             ],
             lambda entry: (
                 entry.session_id in active,
                 entry.last_access_s,
-                -entry.nbytes,
+                -entry.held_nbytes,
                 entry.created_at_s,
             ),
         )
@@ -3074,11 +3265,17 @@ class SessionBank:
 
     def _evict_entry(self, entry: SessionBankEntry, *, reason: str) -> None:
         entry.eviction_reason = reason
+        # Read before the references go: this is what the eviction gives back.
+        held_nbytes = int(entry.held_nbytes)
         if self._entries.pop(entry.token_ids, None) is None:
             for key, value in list(self._entries.items()):
                 if value is entry:
                     self._entries.pop(key, None)
                     break
+        # An evicted entry can never be restored from the bank again, but the
+        # object can outlive the dict (a finished request's outcome points at
+        # it). Without this an "evicted" lease kept its paged KV allocated.
+        entry.release_live_refs()
         self.eviction_log.append(
             {
                 "reason": reason,
@@ -3086,6 +3283,8 @@ class SessionBank:
                 "prefix_len": entry.prefix_len,
                 "token_hash": entry.token_hash,
                 "nbytes": entry.nbytes,
+                "held_nbytes": held_nbytes,
+                "live_ref_only": bool(entry.live_ref_only),
                 "last_access_s": entry.last_access_s,
                 "session_active": bool(
                     entry.session_id
