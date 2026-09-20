@@ -673,6 +673,10 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
 
         if mask is not None:
             qkv = mx.where(mask[..., None], qkv, 0)
+        # The pre-conv stream [conv tail, this forward's rows]: built by the
+        # stock branch below, and only on demand by a boundary capture when a
+        # fused branch served the conv.
+        conv_input = None
         if self._fused_step_applies(B, S, mask, cache):
             # One-dispatch GDN step: conv+silu+l2norm + g/beta + delta +
             # gated norm in a single kernel between the two library GEMVs.
@@ -771,9 +775,15 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
         if capture_at:
             # Same recurrence, run in segments: the state after row p - 1 is
             # the boundary at p. The conv tail at p is the last kernel - 1
-            # rows of the pre-conv stream before p.
+            # rows of the pre-conv stream before p. The stock branch already
+            # built that stream; a second concatenate would be a second copy
+            # of the chunk's widest GDN tensor.
             n_keep = self.conv_kernel_size - 1
-            conv_stream = mx.concatenate([conv_state, qkv], axis=1)
+            conv_stream = (
+                conv_input
+                if conv_input is not None
+                else mx.concatenate([conv_state, qkv], axis=1)
+            )
             pieces = []
             seg_start = 0
             for edge in (*capture_at, S):
@@ -5487,6 +5497,21 @@ class Qwen4ExpTextModel(nn.Module):
                 ids, a, record
             ),
         )
+
+    # ---- in-forward restore boundaries ------------------------------------
+    # The prefill loop finds these two by walking the model chain (the same
+    # way it finds the PLE lookahead), so a family without them keeps the
+    # tail ladder and nothing here is imported by name.
+
+    def boundary_capture_scope(self, offsets):
+        """Record the recurrent state at each row offset of the next forward."""
+
+        return boundary_capture_scope(offsets)
+
+    def take_boundary_captures(self, cache):
+        """What the last forward recorded, keyed by row offset."""
+
+        return take_boundary_captures(cache)
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
         if qwen4_opdiet_enabled("rope"):

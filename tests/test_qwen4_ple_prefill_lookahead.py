@@ -929,6 +929,9 @@ def test_every_chunked_prefill_loop_is_either_wired_or_tripwired():
         iterates = (
             "_iter_prefill_chunk_spans(" in body
             or "_prefill_spans_with_tail_grid(" in body
+            # The loops ask the shared planner for their spans since the
+            # in-forward boundary capture landed; they are still loops.
+            or "_prefill_boundary_plan(" in body
         )
         if not iterates or node.name in {
             "_iter_prefill_chunk_spans",
@@ -937,6 +940,10 @@ def test_every_chunked_prefill_loop_is_either_wired_or_tripwired():
             # request arrival, so the first-gather-early lane can start chunk
             # 1; it iterates nothing and forwards no chunk to a model.
             "_predicted_first_prefill_span",
+            # The one planner the three loops share: it returns the spans
+            # (and the boundary positions to record inside them) and forwards
+            # nothing.  The loops that run its plan are checked below.
+            "_prefill_boundary_plan",
         }:
             continue
         if (

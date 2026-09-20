@@ -40,6 +40,7 @@ from .deepseek_v4_adaptive_width import (
 )
 from .progress_heartbeat import tick as _owner_progress_tick
 from .cache_state import (
+    CacheSnapshot,
     detach_array_leaf,
     detach_cache_state,
     owned_recurrent_state_stats,
@@ -997,6 +998,7 @@ def _predicted_first_prefill_span(
     stable_prefix_len=None,
     session_bank=None,
     vision_splice=None,
+    rt=None,
 ):
     """The span ``_prefill_committed_mtp_history_streaming`` will open with.
 
@@ -1034,6 +1036,14 @@ def _predicted_first_prefill_span(
         and _gdn_boundary_capture_enabled()
     )
     if not may_capture:
+        return plain[0]
+    if (
+        rt is not None
+        and _resolve_inforward_boundary_hooks(rt, vision_splice=vision_splice)
+        is not None
+    ):
+        # Boundaries recorded inside the forwards: the loop runs the plain
+        # grid whatever the tail looks like.
         return plain[0]
     cold_edges: tuple[int, ...] = ()
     if stable_prefix_len is not None and 0 < int(stable_prefix_len) < body_len:
@@ -1140,6 +1150,7 @@ def _ple_first_gather_early_scope(
         stable_prefix_len=stable_prefix_len,
         session_bank=session_bank,
         vision_splice=vision_splice,
+        rt=rt,
     )
     if span is None:
         with first_gather_early_scope(None, "unpredictable_first_span"):
@@ -3606,18 +3617,22 @@ def _prefill_restored_prompt_suffix(
     body = suffix[:-1]
     body_array = None
     spans: list[tuple[int, int]] = []
+    _inforward_hooks = (
+        _resolve_inforward_boundary_hooks(rt, vision_splice=vision_splice)
+        if capture_boundaries
+        else None
+    )
+    _inforward_edges: tuple[int, ...] = ()
     if body:
         body_array = mx.array([body])
-        spans = list(
-            _prefill_spans_with_tail_grid(
-                len(body),
-                tail_interval=_gdn_boundary_tail_interval(),
-                mandatory_edges=(
-                    (_stable_edge_rel,) if _stable_edge_rel is not None else ()
-                ),
-            )
-            if capture_boundaries
-            else _iter_prefill_chunk_spans(len(body))
+        spans, _inforward_edges = _prefill_boundary_plan(
+            len(body),
+            capture_boundaries=capture_boundaries,
+            inforward=_inforward_hooks is not None,
+            tail_interval=_gdn_boundary_tail_interval(),
+            mandatory_edges=(
+                (_stable_edge_rel,) if _stable_edge_rel is not None else ()
+            ),
         )
     # PLE n-gram prefill lookahead (MTPLX_QWEN4_PLE_PREFILL_LOOKAHEAD, off by
     # default), wired to the warm loop exactly as to the cold one: chunk k+1's
@@ -3636,7 +3651,12 @@ def _prefill_restored_prompt_suffix(
             chunk_embeddings = _suffix_chunk_embeddings(chunk_array)
             started = time.perf_counter()
             chunk_gather_before = _ple_stage_seconds()
-            with attention_phase("prefill"):
+            with (
+                attention_phase("prefill"),
+                _inforward_capture_scope(
+                    _inforward_hooks, _inforward_edges, start, end
+                ) as _capture_rows,
+            ):
                 if use_committed_mtp:
                     logits_chunk, hidden_chunk = rt.forward_ar(
                         chunk_array,
@@ -3654,15 +3674,10 @@ def _prefill_restored_prompt_suffix(
                         restored.cache,
                         input_embeddings=chunk_embeddings,
                     )
-            if hidden_chunk is None:
-                if logits_chunk is None:
-                    _eval_cache_roots(restored.cache)
-                else:
-                    _eval(logits_chunk)
-            elif logits_chunk is None:
-                _eval(hidden_chunk)
-            else:
-                _eval(logits_chunk, hidden_chunk)
+            _captured = (
+                _inforward_hooks[1](restored.cache) if _capture_rows else {}
+            )
+            _eval_prefill_chunk(logits_chunk, hidden_chunk, restored.cache, _captured)
             chunk_elapsed = time.perf_counter() - started
             target_forward_time += chunk_elapsed
             # The same two numbers the cold loop records, for the same reason:
@@ -3683,6 +3698,19 @@ def _prefill_restored_prompt_suffix(
             emit_chunk(end - start, chunk_elapsed, started)
             _check_postcommit_abort(abort_check)
 
+            # Boundaries recorded INSIDE this forward come first: their
+            # positions are below the span end captured next.
+            _bank_inforward_boundaries(
+                rt,
+                gdn_boundary_sink,
+                restored.cache,
+                _captured,
+                _capture_rows,
+                span_start=start,
+                position_base=cached_tokens,
+                hidden_chunk=hidden_chunk,
+            )
+            del _captured
             if capture_boundaries:
                 # Warm prefills must capture boundaries exactly like cold
                 # ones (absolute positions; hidden of the chunk's last token
@@ -4584,6 +4612,244 @@ def _prefill_spans_with_tail_grid(
         cursor = edge
     refined.append((cursor, end))
     return _split_spans_at(refined, mandatory_edges)
+
+
+def _gdn_boundary_inforward_enabled() -> bool:
+    """``MTPLX_GDN_BOUNDARY_INFORWARD=1``: record tail boundaries INSIDE the
+    last wide forward instead of ending a forward at each of them.
+
+    Opt-in.  On Flash-Next every forward of 64 rows or more reads nearly all
+    512 experts of every layer once, about 0.1 s whatever its width (M5 Max,
+    2026-09-18: 64 rows 0.17 to 0.26 s, 1,024 rows 0.69 to 1.28 s), and the
+    tail ladder puts two of them behind every cold prompt and one behind every
+    warm agent turn.  The boundary POSITIONS are the ladder's, so restores,
+    retention and the bank see the same records; what changes is the chunk
+    layout of the last chunk, which is the rounding class every chunk-layout
+    change is in (the recurrent state at p now comes from the wide forward's
+    own arithmetic, exactly as the KV rows before p do).
+    """
+
+    return _env_truthy("MTPLX_GDN_BOUNDARY_INFORWARD")
+
+
+def _resolve_inforward_boundary_hooks(rt: Any, *, vision_splice: Any = None):
+    """``(scope, take)`` when this request may capture in-forward, else None.
+
+    The two hooks live on the family's text model (found the way the PLE
+    lookahead is).  A family without them keeps the ladder.  Image requests
+    keep the ladder too: their restore rules are keyed on the image span and
+    were proven against forwards that END at the boundary.
+    """
+
+    if vision_splice is not None or not _gdn_boundary_inforward_enabled():
+        return None
+    scope = _resolve_ple_lookahead_hook(rt, "boundary_capture_scope")
+    take = _resolve_ple_lookahead_hook(rt, "take_boundary_captures")
+    if scope is None or take is None:
+        return None
+    return scope, take
+
+
+def _prefill_boundary_plan(
+    token_count: int,
+    *,
+    capture_boundaries: bool,
+    inforward: bool,
+    tail_interval: int,
+    mandatory_edges: tuple[int, ...] = (),
+    chunk_size: int | None = None,
+) -> tuple[list[tuple[int, int]], tuple[int, ...]]:
+    """``(spans to forward, boundary positions to record inside them)``.
+
+    One owner for the three prefill loops.  Without boundary capture it is
+    the plain chunk grid.  With it, the boundary positions are ALWAYS the
+    span ends of the tail ladder (geometric or dense, plus the mandatory
+    edges); the only question is whether the forwards are cut there
+    (``inforward`` false: the ladder itself, no interior positions) or stay
+    the plain chunks with those positions recorded inside them.
+    """
+
+    if not capture_boundaries:
+        return list(_iter_prefill_chunk_spans(token_count, chunk_size=chunk_size)), ()
+    ladder = _prefill_spans_with_tail_grid(
+        token_count,
+        tail_interval=tail_interval,
+        mandatory_edges=mandatory_edges,
+        chunk_size=chunk_size,
+    )
+    if not inforward:
+        return ladder, ()
+    plain = list(_iter_prefill_chunk_spans(token_count, chunk_size=chunk_size))
+    plain_ends = {int(end) for _start, end in plain}
+    interior = tuple(
+        sorted(int(end) for _start, end in ladder if int(end) not in plain_ends)
+    )
+    return plain, interior
+
+
+def _boundary_snapshot_from_capture(
+    cache: list[Any], states: list[Any]
+) -> CacheSnapshot | None:
+    """A boundary snapshot laid out exactly like ``snapshot_untrimmable_cache``.
+
+    ``states`` is one in-forward capture: a state list per recurrent entry,
+    None for the entries that roll back by trimming.  None when the capture
+    does not cover every recurrent entry, so a partial capture can never
+    become a boundary.
+    """
+
+    from .cache_state import _clone_tree, _is_trimmable
+
+    if len(states) != len(cache):
+        return None
+    snapshot_states: list[Any] = []
+    meta_states: list[Any] = []
+    for entry, state in zip(cache, states):
+        if _is_trimmable(entry):
+            snapshot_states.append(None)
+            meta_states.append(None)
+            continue
+        if state is None:
+            return None
+        snapshot_states.append(list(state))
+        meta_states.append(_clone_tree(getattr(entry, "meta_state", None)))
+    return CacheSnapshot(states=tuple(snapshot_states), meta_states=tuple(meta_states))
+
+
+def _append_gdn_boundary_record(
+    sink: list[tuple[int, Any, Any]],
+    tokens_done: int,
+    snapshot: CacheSnapshot,
+    hidden_leaf: Any | None,
+) -> None:
+    """Append one boundary record and keep the geometric retention."""
+
+    sink.append((int(tokens_done), snapshot, hidden_leaf))
+    cap = _gdn_boundary_max_count()
+    if len(sink) > cap:
+        sink[:] = _thin_gdn_boundary_records(sink, cap)
+
+
+def _record_inforward_gdn_boundary(
+    sink: list[tuple[int, Any, Any]],
+    cache: list[Any],
+    states: list[Any],
+    *,
+    position: int,
+    row: int,
+    hidden_chunk: Any | None,
+) -> bool:
+    """Bank ONE in-forward capture; False when it does not cover every
+    recurrent entry.
+
+    The boundary at row ``row`` of the forward sits at prompt position
+    ``position`` and its hidden state is the chunk's row ``row - 1``: the same
+    leaf the ladder takes from the last row of a forward that ends there.
+    """
+
+    snapshot = _boundary_snapshot_from_capture(cache, states)
+    if snapshot is None:
+        return False
+    hidden_leaf = None
+    if hidden_chunk is not None:
+        hidden_leaf = detach_array_leaf(
+            hidden_chunk[:, row - 1 : row, :], mode="contiguous_eval"
+        )
+    _append_gdn_boundary_record(sink, position, snapshot, hidden_leaf)
+    return True
+
+
+@contextlib.contextmanager
+def _inforward_capture_scope(
+    hooks: Any, edges: tuple[int, ...], start: int, end: int
+):
+    """Arm the model for the boundary positions strictly inside ``[start, end)``.
+
+    Yields the row offsets asked for (empty when nothing is armed, which is
+    every forward of every request while the switch is off).
+    """
+
+    rows = (
+        tuple(int(edge) - int(start) for edge in edges if start < edge < end)
+        if hooks is not None
+        else ()
+    )
+    if not rows:
+        yield ()
+        return
+    with hooks[0](rows):
+        yield rows
+
+
+def _eval_prefill_chunk(
+    logits_chunk: Any, hidden_chunk: Any, cache: Any, captured: dict | None = None
+) -> None:
+    """The one blocking eval of a prefill chunk's trunk forward.
+
+    Roots: whatever the forward returned and the in-forward boundary captures
+    (they are slices of streams this eval is about to free).  A cache-only
+    forward returns nothing, so the whole cache is the root set, as before.
+    """
+
+    roots = [value for value in (logits_chunk, hidden_chunk) if value is not None]
+    extra = _tree_mx_arrays(captured) if captured else []
+    if roots:
+        _eval(*roots, *extra, _caller_depth=2)
+        return
+    if extra:
+        _eval(*extra, _caller_depth=2)
+    _eval_cache_roots(cache)
+
+
+def _bank_inforward_boundaries(
+    rt: Any,
+    sink: list[tuple[int, Any, Any]] | None,
+    cache: list[Any],
+    captured: dict,
+    rows: tuple[int, ...],
+    *,
+    span_start: int,
+    position_base: int,
+    hidden_chunk: Any | None,
+) -> int:
+    """Bank one forward's captures; a miss is counted and named, never silent.
+
+    Like ``_capture_gdn_boundary`` this never breaks the prefill that is
+    running: a boundary is an accelerator for a LATER turn.  Unlike it, a
+    failure lands on the demotion ledger (``/health``, the request log,
+    ``mtplx doctor``) with its reason, because a lost boundary is a slower
+    warm turn somebody will ask about.
+    """
+
+    if not rows or sink is None:
+        return 0
+    reason = "the model returned no complete capture for a requested row"
+    banked = 0
+    # Ascending, so the sink stays in position order and the geometric
+    # retention sees the records in the order the ladder appends them.
+    for row in sorted(int(row) for row in rows):
+        states = (captured or {}).get(row)
+        if states is None:
+            continue
+        try:
+            if _record_inforward_gdn_boundary(
+                sink,
+                cache,
+                states,
+                position=int(position_base) + int(span_start) + row,
+                row=row,
+                hidden_chunk=hidden_chunk,
+            ):
+                banked += 1
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+    if banked:
+        _runtime_count(rt, "prefill_inforward_boundary_captures", banked)
+    if banked < len(rows):
+        _note_demotion(
+            "inforward_boundary_capture_missed", reason, count=len(rows) - banked
+        )
+    return banked
 
 
 def _inherited_gdn_boundaries(entry: Any, restore_point: int) -> list:
@@ -6468,14 +6734,17 @@ def _prefill(
             and 0 < int(stable_prefix_len) < len(body)
         ):
             _cold_edges = (int(stable_prefix_len),)
-        spans = (
-            _prefill_spans_with_tail_grid(
-                len(body),
-                tail_interval=_gdn_boundary_tail_interval(),
-                mandatory_edges=_cold_edges,
-            )
+        _inforward_hooks = (
+            _resolve_inforward_boundary_hooks(rt, vision_splice=vision_splice)
             if capture_boundaries
-            else _iter_prefill_chunk_spans(len(body))
+            else None
+        )
+        spans, _inforward_edges = _prefill_boundary_plan(
+            len(body),
+            capture_boundaries=capture_boundaries,
+            inforward=_inforward_hooks is not None,
+            tail_interval=_gdn_boundary_tail_interval(),
+            mandatory_edges=_cold_edges,
         )
         for start, end in spans:
             _check_postcommit_abort(abort_check)
@@ -6488,17 +6757,33 @@ def _prefill(
                     rt.embed_tokens, chunk_array, vision_splice
                 )
             started = time.perf_counter()
-            with attention_phase("prefill"):
+            with (
+                attention_phase("prefill"),
+                _inforward_capture_scope(
+                    _inforward_hooks, _inforward_edges, start, end
+                ) as _capture_rows,
+            ):
                 prefill = _prefill_cache_only_forward(
                     rt, chunk_array, cache, input_embeddings=chunk_embeddings
                 )
-            if prefill is None:
-                _eval_cache_roots(cache)
-            else:
-                _eval(prefill)
+            _captured = _inforward_hooks[1](cache) if _capture_rows else {}
+            _eval_prefill_chunk(prefill, None, cache, _captured)
             _runtime_count(rt, "prefill_chunks")
             target_forward_time += time.perf_counter() - started
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
+            # No hidden on this lane: a record carries the recurrent state
+            # alone, as the span-end capture below does.
+            _bank_inforward_boundaries(
+                rt,
+                gdn_boundary_sink,
+                cache,
+                _captured,
+                _capture_rows,
+                span_start=start,
+                position_base=0,
+                hidden_chunk=None,
+            )
+            del _captured
             if capture_boundaries:
                 _capture_gdn_boundary(gdn_boundary_sink, end, cache)
             _check_postcommit_abort(abort_check)
@@ -6595,17 +6880,18 @@ def _prefill_committed_mtp_history_streaming(
         and 0 < int(stable_prefix_len) < len(body)
     ):
         _cold_edges = (int(stable_prefix_len),)
-    mtp_streaming_spans = (
-        _prefill_spans_with_tail_grid(
-            len(body),
-            tail_interval=_gdn_boundary_tail_interval(),
-            mandatory_edges=_cold_edges,
-            chunk_size=prefill_chunk_size,
-        )
+    _inforward_hooks = (
+        _resolve_inforward_boundary_hooks(rt, vision_splice=vision_splice)
         if capture_boundaries
-        else _iter_prefill_chunk_spans(
-            len(body), chunk_size=prefill_chunk_size
-        )
+        else None
+    )
+    mtp_streaming_spans, _inforward_edges = _prefill_boundary_plan(
+        len(body),
+        capture_boundaries=capture_boundaries,
+        inforward=_inforward_hooks is not None,
+        tail_interval=_gdn_boundary_tail_interval(),
+        mandatory_edges=_cold_edges,
+        chunk_size=prefill_chunk_size,
     )
     # PLE n-gram prefill lookahead (MTPLX_QWEN4_PLE_PREFILL_LOOKAHEAD, off
     # by default). Every prompt token is known here, so a worker thread can
@@ -6633,7 +6919,12 @@ def _prefill_committed_mtp_history_streaming(
                 )
             started = time.perf_counter()
             gather_before = _ple_stage_seconds()
-            with attention_phase("prefill"):
+            with (
+                attention_phase("prefill"),
+                _inforward_capture_scope(
+                    _inforward_hooks, _inforward_edges, start, end
+                ) as _capture_rows,
+            ):
                 if needs_history_hidden:
                     logits_chunk, hidden_chunk = rt.forward_ar(
                         chunk_array,
@@ -6648,15 +6939,10 @@ def _prefill_committed_mtp_history_streaming(
                     logits_chunk = _prefill_cache_only_forward(
                         rt, chunk_array, cache, input_embeddings=chunk_embeddings
                     )
-            if hidden_chunk is None:
-                if logits_chunk is None:
-                    _eval_cache_roots(cache)
-                else:
-                    _eval(logits_chunk)
-            elif logits_chunk is None:
-                _eval(hidden_chunk)
-            else:
-                _eval(logits_chunk, hidden_chunk)
+            _captured = (
+                _inforward_hooks[1](cache) if _capture_rows else {}
+            )
+            _eval_prefill_chunk(logits_chunk, hidden_chunk, cache, _captured)
             chunk_wall_s = time.perf_counter() - started
             target_forward_time += chunk_wall_s
             # Cheap: two perf_counter reads and one dict per chunk.  The PLE
@@ -6755,6 +7041,19 @@ def _prefill_committed_mtp_history_streaming(
                         input_embeddings=history_embeddings,
                     )
                     _check_postcommit_abort(abort_check)
+            _inforward_started = time.perf_counter()
+            _inforward_banked = _bank_inforward_boundaries(
+                rt,
+                gdn_boundary_sink,
+                cache,
+                _captured,
+                _capture_rows,
+                span_start=start,
+                position_base=0,
+                hidden_chunk=hidden_chunk,
+            )
+            _inforward_s = time.perf_counter() - _inforward_started
+            del _captured
             cursor += chunk_len
             boundary_hidden = (
                 hidden_chunk[:, -1:, :] if hidden_chunk is not None else None
@@ -6768,7 +7067,7 @@ def _prefill_committed_mtp_history_streaming(
                 _capture_gdn_boundary(
                     gdn_boundary_sink, cursor, cache, hidden_last=boundary_hidden
                 )
-            _boundary_s = time.perf_counter() - _boundary_started
+            _boundary_s = time.perf_counter() - _boundary_started + _inforward_s
             del boundary_hidden
             _check_postcommit_abort(abort_check)
             if _chunk_trace:
@@ -6776,6 +7075,7 @@ def _prefill_committed_mtp_history_streaming(
                     mtp_history_s=prompt_history_time - _history_before,
                     cleanup_s=_cleanup_s,
                     boundary_s=_boundary_s,
+                    inforward_boundaries=float(_inforward_banked),
                     iter_s=time.perf_counter() - _iter_started,
                     **_prefill_chunk_memory_fields(),
                 )
