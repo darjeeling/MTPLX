@@ -98,7 +98,15 @@ struct MTPLXApp: App {
         // without the signature-safe bytecode cache environment.
         _ = try? RuntimeSetupService.migrateLegacyTerminalShimIfNeeded()
         let languageStore = LanguageStore()
-        let backend = MTPLXBackendStore()
+        // The one place the real app is assembled, so the one place a failed
+        // start is written to the user's ~/.mtplx/logs (#504). Every other
+        // construction, tests included, keeps the supervisor's default of
+        // writing nothing.
+        let backend = MTPLXBackendStore(
+            supervisor: DaemonSupervisor(
+                startFailureReportURL: StartFailureReport.defaultURL()
+            )
+        )
         let hermesAgentStore = HermesAgentStore()
         let benchmarkOrchestrator = BenchmarkOrchestrator()
         let stopCoordinator = AppStopCoordinator()
