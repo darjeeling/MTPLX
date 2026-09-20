@@ -1490,9 +1490,13 @@ def _compiled_verify_max_context() -> int:
     return max(0, value)
 
 
-_FIXED_M4_DONATION_PROBE = str(
+_FIXED_M4_DONATION_PROBE_RAW = str(
     __import__("os").environ.get("MTPLX_FIXED_M4_DONATION_PROBE", "")
-).strip().lower() in ("1", "true", "yes", "on")
+).strip().lower()
+_FIXED_M4_DONATION_PROBE = _FIXED_M4_DONATION_PROBE_RAW in (
+    "1", "true", "yes", "on", "all"
+)
+_FIXED_M4_DONATION_PROBE_ALL = _FIXED_M4_DONATION_PROBE_RAW == "all"
 
 
 def _compiled_verify_boundary() -> str:
@@ -2371,6 +2375,67 @@ class CompiledVerifyBank:
             self.stats["fixed_m4_kv_bank_moves"] = (
                 int(self.stats.get("fixed_m4_kv_bank_moves", 0)) + 1
             )
+        if _FIXED_M4_DONATION_PROBE_ALL:
+            self._probe_fixed_m4_donation_all_leaves(dispatch)
+
+    def _probe_fixed_m4_donation_all_leaves(self, dispatch) -> None:
+        """MTPLX_FIXED_M4_DONATION_PROBE=all: which state leaves move per round?
+
+        The first-key-bank probe above cleared one leaf of one layer.  Every
+        other leaf the replay owns (values, the third KV leaf, raw keys, the
+        pooled bank, the GDN state) can still lose donation on its own, and a
+        context-sized leaf that is copied every round is a cost that grows
+        with the prompt.  Per leaf class this records how many rounds saw a
+        new device address and how many bytes those rounds re-wrote.
+        """
+
+        import numpy as np
+
+        names = ("kv0", "kv1", "kv2", "raw_keys", "pooled")
+        leaves: list[tuple[str, Any]] = []
+        for kind, entry, n_leaves in dispatch["state_plan"]:
+            if kind == VERIFY_SPEC_KIND_QSA:
+                leaves.extend(
+                    zip(
+                        names,
+                        (
+                            entry.kv.cache[0],
+                            entry.kv.cache[1],
+                            entry.kv.cache[2],
+                            entry.raw_keys,
+                            entry.pooled,
+                        ),
+                    )
+                )
+            else:
+                leaves.extend(("gdn", entry.cache[slot]) for slot in range(n_leaves))
+        mx.eval([leaf for _name, leaf in leaves if leaf is not None])
+        previous = dispatch.get("_probe_leaf_addresses")
+        current: list[int | None] = []
+        moves = self.stats.setdefault("fixed_m4_leaf_moves", {})
+        moved_bytes = self.stats.setdefault("fixed_m4_leaf_moved_bytes", {})
+        for index, (name, leaf) in enumerate(leaves):
+            if leaf is None or leaf.size == 0:
+                current.append(None)
+                continue
+            flat = leaf.view(mx.uint8) if leaf.dtype != mx.uint8 else leaf
+            address = int(
+                np.asarray(flat, copy=False).__array_interface__["data"][0]
+            )
+            current.append(address)
+            if (
+                previous is not None
+                and index < len(previous)
+                and previous[index] is not None
+                and previous[index] != address
+            ):
+                moves[name] = int(moves.get(name, 0)) + 1
+                moved_bytes[name] = int(moved_bytes.get(name, 0)) + int(leaf.nbytes)
+        dispatch["_probe_leaf_addresses"] = current
+        self.stats["fixed_m4_leaf_probe_rounds"] = (
+            int(self.stats.get("fixed_m4_leaf_probe_rounds", 0)) + 1
+        )
+        self.stats["fixed_m4_leaf_count"] = len(leaves)
 
     def forward_fixed_m4(
         self,
