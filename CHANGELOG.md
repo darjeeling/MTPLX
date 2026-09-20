@@ -39,6 +39,20 @@ All notable user-facing changes to MTPLX. The format is based on
   sets that allowance, and `0` is the strict comparison. The guard's log
   line and the `mem` block on `/health` now carry `phys_footprint_bytes`
   and `host_overhang_bytes`, so a memory report names its holder.
+- **A session over its cache budget continues instead of being read again**
+  (issue #499). On a 48 GB Mac one conversation may hold about 7.4 GB of
+  warm cache, and a 142,000-token session needs 11 GB, so the cache keeps a
+  reference to the live state instead of a copy. With speculative decoding
+  on, that entry dropped the draft head's history it was handed, so the
+  next turn's restore failed (`no_snapshot_coverage`), the copy on disk had
+  been written without the history and was refused
+  (`ssd_missing_mtp_history`), and the whole prompt was read again: 570 s
+  to the first token at 150,000 tokens in the report, on every turn. The
+  entry now keeps the history (about 4 KB per token, next to 64 KB per
+  token of main state) in memory and in its SSD copy, so the next turn
+  continues and a restart restores from disk. Copies written by older
+  versions lack the history; each long session reads its prompt once more
+  after the update.
 - **Long sessions no longer leak one whole KV cache per turn** (issue #456,
   diagnosed by peterloron; also the memory growth in #499 and #438). When a
   session's snapshot is over the per-session limit, the session cache keeps
