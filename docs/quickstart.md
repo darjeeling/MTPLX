@@ -25,6 +25,18 @@ mtplx pull --download-backend aria2 Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed
 `mtplx pull --download-backend aria2` requires aria2c and fails if it is missing; `--download-backend auto` uses aria2c when it is installed and the built-in downloader otherwise; `python` (the default) never touches aria2c.
 Hugging Face credentials are passed to aria2c through standard input and are never placed in the process arguments.
 
+**Behind a company proxy that inspects HTTPS.** If a download stops with `CERTIFICATE_VERIFY_FAILED` while `curl` reaches the same address, the proxy signs traffic with its own root certificate. macOS and `curl` trust it through the keychain; Python does not read the keychain. Either of these fixes it:
+
+```bash
+# 1. Let Python use the macOS keychain (what pip itself does). MTPLX picks it up when it is installed.
+python3 -m pip install truststore
+
+# 2. Or point Python at the proxy's root certificate (ask your IT team for the .pem file).
+export SSL_CERT_FILE=/path/to/proxy-root.pem REQUESTS_CA_BUNDLE=/path/to/proxy-root.pem
+```
+
+`MTPLX_SYSTEM_TRUST=0` keeps MTPLX on the bundled certificates even when `truststore` is installed.
+
 The GitHub release wheel remains available for reproducible installs:
 
 ```bash

@@ -25,6 +25,15 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **A download blocked by a company proxy now says what to do** (issue
+  #495). Behind a proxy that inspects HTTPS, model downloads stopped at
+  setup step 6 of 7 with `CERTIFICATE_VERIFY_FAILED` while `curl` worked,
+  because the proxy's root certificate is in the macOS keychain and Python
+  verifies against its own bundle. The error now explains that and names
+  both fixes (`SSL_CERT_FILE`, or the `truststore` package). When
+  `truststore` is installed, downloads verify through the keychain
+  automatically; MTPLX does not depend on it, and `MTPLX_SYSTEM_TRUST=0`
+  switches that off.
 - **The memory guards read the process's real footprint from macOS**
   (PR #500, Maikel Vos). Every guard compared MLX's own account of its
   allocations with the Metal limit. `mtplx/os_memory.py` now reads
