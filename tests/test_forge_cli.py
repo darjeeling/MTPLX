@@ -2220,6 +2220,72 @@ def test_embedded_bf16_mtp_extraction_does_not_require_torch(tmp_path):
     assert bool(mx.allclose(tensors["mtp.fc.weight"], mx.ones((2, 2), dtype=mx.bfloat16)).item())
 
 
+def test_embedded_mtp_extraction_from_a_single_file_checkpoint_without_an_index(tmp_path):
+    """Issue #492 (empero-ai/Qwen3.8-4B-Distill). A model small enough for one
+    ``model.safetensors`` ships no ``model.safetensors.index.json``. ``inspect``
+    reads the shard header in that case and reports the head as present, but
+    the extractor returned False without an index, so forge converted the
+    trunk, wrote no ``mtp.safetensors``, and the build died at calibration
+    with "return_hidden requires an MTP-patched runtime"."""
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _write_json(source / "config.json", _mtp_config())
+    mx.save_safetensors(
+        str(source / "model.safetensors"),
+        {
+            "mtp.fc.weight": mx.ones((2, 2), dtype=mx.bfloat16),
+            "mtp.layers.0.self_attn.q_proj.weight": mx.full((2, 2), 3.0, dtype=mx.bfloat16),
+            "model.layers.0.self_attn.q_proj.weight": mx.zeros((2, 2), dtype=mx.bfloat16),
+        },
+    )
+    assert not (source / "model.safetensors.index.json").exists()
+
+    assert forge._ensure_mtp_sidecar(source, destination) is True
+
+    tensors = mx.load(str(destination / "mtp.safetensors"))
+    assert sorted(tensors) == ["mtp.fc.weight", "mtp.layers.0.self_attn.q_proj.weight"]
+    assert bool(
+        mx.allclose(
+            tensors["mtp.layers.0.self_attn.q_proj.weight"],
+            mx.full((2, 2), 3.0, dtype=mx.bfloat16),
+        ).item()
+    )
+
+
+def test_embedded_mtp_extraction_without_an_index_reads_every_shard(tmp_path):
+    # No index and two shards: the head may sit in either.
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _write_json(source / "config.json", _mtp_config())
+    mx.save_safetensors(
+        str(source / "model-00001-of-00002.safetensors"),
+        {"model.layers.0.self_attn.q_proj.weight": mx.zeros((2, 2), dtype=mx.bfloat16)},
+    )
+    mx.save_safetensors(
+        str(source / "model-00002-of-00002.safetensors"),
+        {"mtp.fc.weight": mx.ones((2, 2), dtype=mx.bfloat16)},
+    )
+
+    assert forge._ensure_mtp_sidecar(source, destination) is True
+    assert sorted(mx.load(str(destination / "mtp.safetensors"))) == ["mtp.fc.weight"]
+
+
+def test_a_checkpoint_without_an_index_and_without_a_head_still_extracts_nothing(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _write_json(source / "config.json", _mtp_config())
+    mx.save_safetensors(
+        str(source / "model.safetensors"),
+        {"model.layers.0.self_attn.q_proj.weight": mx.zeros((2, 2), dtype=mx.bfloat16)},
+    )
+
+    assert forge._ensure_mtp_sidecar(source, destination) is False
+    assert not (destination / "mtp.safetensors").exists()
+
+
 def test_embedded_qwen_mtp_extraction_sanitizes_norm_weights(tmp_path):
     source = tmp_path / "source"
     destination = tmp_path / "destination"

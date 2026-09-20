@@ -1734,12 +1734,28 @@ def _extract_embedded_mtp(
     sanitize_values: bool = False,
 ) -> bool:
     index_path = source / "model.safetensors.index.json"
-    if not index_path.exists():
-        return False
-    index = _load_json(index_path)
-    weight_map = index.get("weight_map") if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict):
-        return False
+    if index_path.exists():
+        index = _load_json(index_path)
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict):
+            return False
+    else:
+        # A model small enough for one model.safetensors ships no index
+        # (#492, a 4B distill). inspect reads the shard headers in that case
+        # (artifacts._local_model_weight_keys) and reports the head as present,
+        # so forge went ahead, and this function then returned False for want
+        # of an index: the trunk was converted, no mtp.safetensors was written,
+        # and the build died at calibration with "return_hidden requires an
+        # MTP-patched runtime". Build the same map from the headers inspect
+        # reads, so the two agree about what a checkpoint contains.
+        weight_map = {}
+        for shard in sorted(source.glob("model*.safetensors")):
+            _header_size, header = _read_safetensors_header(shard)
+            for key in header:
+                if key != "__metadata__":
+                    weight_map[str(key)] = shard.name
+        if not weight_map:
+            return False
 
     if config is None:
         config_path = source / "config.json"
