@@ -4506,21 +4506,37 @@ class _SidecarGather:
         self.hot_misses = 0
         return cleared
 
-    def _warm(self, rows, *, counted: bool = True) -> None:
-        for future in self._submit_warm(rows, counted=counted):
+    def _warm(self, rows, *, counted: bool = True, only=None) -> None:
+        futures = (
+            self._submit_warm(rows, counted=counted)
+            if only is None
+            else self._submit_warm(rows, counted=counted, only=only)
+        )
+        for future in futures:
             future.result()
 
     def submit_warm(self, rows):
         """Submit page-warming reads without waiting for their completion."""
         return self._submit_warm(rows, counted=True)
 
-    def _submit_warm(self, rows, *, counted: bool):
+    def _submit_warm(self, rows, *, counted: bool, only=None):
         """The warm pass.  ``counted`` keeps the lookahead worker's batches out
         of ``prefetch_batches``: that counter is the decode-lane engagement
         receipt, and a worker thread incrementing it would both race the owner
-        thread and change what the existing receipts mean."""
+        thread and change what the existing receipts mean.
+
+        ``only`` names the maps to read (``cold_map_names``): the cost of this
+        pass is one syscall per row per map, so a map whose pages are already
+        in core is left out.  The planar layout keeps one record per map in
+        map order; the interleaved row file is a single record and is always
+        read whole."""
         fd = self._fd
         metas = self._row_meta
+        if only is not None and len(metas) == len(self._maps) > 1:
+            wanted = set(only)
+            metas = [
+                meta for name, meta in zip(self._maps, metas) if name in wanted
+            ]
 
         def touch(chunk):
             for r in chunk:
@@ -4561,7 +4577,11 @@ class _SidecarGather:
 
         import numpy as np
 
-        from mtplx.ple_row_gather import gather_matrices, warm_decision
+        from mtplx.ple_row_gather import (
+            cold_map_names,
+            gather_matrices,
+            warm_decision,
+        )
 
         uniq, inverse = np.unique(flat, return_inverse=True)
         if 0 < len(uniq) <= self._HOT_PATH_MAX_ROWS and self._hot_cap_rows:
@@ -4582,12 +4602,19 @@ class _SidecarGather:
             # at 1.40 GiB/s against pooled pread's 12.9, so guessing warm on a
             # cold table would stall the generation thread with the GIL held.
             path, fraction = warm_decision(list(maps.values()), uniq)
+            cold = None if path == "vectorized" else cold_map_names(maps, uniq)
+        else:
+            cold = None
         if path == "vectorized":
             self.vectorized_gathers += 1
         else:
             self.pread_gathers += 1
             if self._pool is not None and len(uniq):
-                self._warm(uniq, counted=False)
+                if cold:
+                    # Some maps are already in core: read only the others.
+                    self._warm(uniq, counted=False, only=cold)
+                else:
+                    self._warm(uniq, counted=False)
         if record is not None:
             record["path"] = path
             record["rows"] = int(len(uniq))
@@ -4604,6 +4631,7 @@ class _SidecarGather:
         uniq, inverse = np.unique(flat, return_inverse=True)
         if not (0 < len(uniq) <= self._HOT_PATH_MAX_ROWS and self._hot_cap_rows):
             from mtplx.ple_row_gather import (
+                cold_map_names,
                 enabled as _vectorized_enabled,
                 gather_matrices,
                 warm_decision,
@@ -4611,6 +4639,7 @@ class _SidecarGather:
 
             maps = {name: self._maps[name][0] for name in names}
             path = "pread"
+            cold = None
             # The probe costs ~0.5 ms; the warm pass it decides costs ~165 ms
             # per 32,768 rows.  Below the sidecar's own hot-row threshold the
             # ratio inverts (with MTPLX_NGRAM_HOT_MB=0 every decode gather
@@ -4624,12 +4653,17 @@ class _SidecarGather:
                 # verify-width gather -- so the ~165 ms per 32,768 rows the
                 # warm pass costs lands directly on the generation loop here.
                 path, _fraction = warm_decision(list(maps.values()), uniq)
+                if path != "vectorized":
+                    cold = cold_map_names(maps, uniq)
             if path == "vectorized":
                 self.vectorized_gathers += 1
             else:
                 self.pread_gathers += 1
                 if self._pool is not None and len(uniq):
-                    self._warm(uniq)
+                    if cold:
+                        self._warm(uniq, only=cold)
+                    else:
+                        self._warm(uniq)
             return gather_matrices(maps, uniq, inverse, names)
         hot = self._hot
         miss = [int(r) for r in uniq if int(r) not in hot]
@@ -5065,7 +5099,7 @@ class NGramEmbedding(nn.Module):
 
         import numpy as np
 
-        from mtplx.ple_row_gather import touch_rows, warm_decision
+        from mtplx.ple_row_gather import cold_map_names, touch_rows, warm_decision
 
         sidecar = self.ngram_embedding._sidecar
         if sidecar is None:
@@ -5088,7 +5122,11 @@ class NGramEmbedding(nn.Module):
         if path == "vectorized":
             touched = touch_rows(maps, rows)
         elif sidecar._pool is not None:
-            sidecar._submit_warm(rows, counted=False)
+            sidecar._submit_warm(
+                rows,
+                counted=False,
+                only=cold_map_names(dict(zip(names, maps)), rows),
+            )
             touched = int(rows.shape[0])
         else:
             # Cold rows and MTPLX_NGRAM_PREFETCH=0: reading them here would be

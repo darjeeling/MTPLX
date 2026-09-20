@@ -58,6 +58,7 @@ __all__ = [
     "madvise_choice",
     "mode_text",
     "apply_prewarm_choice",
+    "cold_map_names",
     "prewarm_at_load_enabled",
     "prewarm_file",
     "prewarm_skipped",
@@ -215,6 +216,29 @@ def warm_decision(memmaps, rows, *, sample: int = SAMPLE_ROWS):
     if worst >= RESIDENT_FRACTION_THRESHOLD:
         return "vectorized", worst
     return "pread", worst
+
+
+def cold_map_names(memmaps: dict, rows, *, sample: int = SAMPLE_ROWS):
+    """Names of the maps this gather would fault on, or None when unknown.
+
+    The warm pass is one ``pread`` per row PER MAP, and its cost is the syscall
+    count, not the I/O (module docstring).  Residency is a per-map fact: once
+    the pre-read has filled the two small maps (scales and biases, 3 GiB each)
+    they stay in core, and only the 24 GiB weight map is cold for a text the
+    engine has not seen.  Warming just the cold maps is a third of the
+    syscalls.  An empty list means every map is in core (the vectorised
+    gather needs no warm pass at all); None means residency could not be read
+    and the caller warms everything, as before.
+    """
+
+    cold = []
+    for name, memmap in memmaps.items():
+        fraction = resident_fraction(memmap, rows, sample=sample)
+        if fraction is None:
+            return None
+        if fraction < RESIDENT_FRACTION_THRESHOLD:
+            cold.append(name)
+    return cold
 
 
 def gather_matrices(memmaps: dict, uniq, inverse, names) -> dict:
