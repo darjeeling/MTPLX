@@ -2147,6 +2147,44 @@ class CompiledVerifyBank:
                 flush=True,
             )
 
+    def prefetch_fixed_m4_aux(
+        self,
+        host_input_prefix,
+        *,
+        completion_tokens,
+        committed_count: int,
+    ) -> int:
+        """Warm the n-gram rows of the next verify window's first tokens.
+
+        The verify replay opens with a host row gather that needs the draft
+        tokens, so the GPU sits idle for it every round.  The draft loop calls
+        this as each token becomes known, while the GPU is still drafting; the
+        replay's own gather then reads hot rows.  An instrument of timing
+        only: it returns a count, produces no array, and a failure here is
+        recorded and ignored because the gather does not depend on it.
+        """
+
+        dispatch = self._fixed_m4_dispatch
+        if dispatch is None:
+            return 0
+        prefetch = getattr(dispatch.get("prepare_aux"), "prefetch", None)
+        if prefetch is None:
+            return 0
+        try:
+            fetched = int(
+                prefetch(host_input_prefix, completion_tokens, committed_count)
+            )
+        except Exception as error:  # noqa: BLE001 - never on the decode path
+            self.stats["fixed_m4_aux_prefetch_error"] = repr(error)[:200]
+            return 0
+        self.stats["fixed_m4_aux_prefetch_calls"] = (
+            int(self.stats.get("fixed_m4_aux_prefetch_calls", 0)) + 1
+        )
+        self.stats["fixed_m4_aux_prefetch_rows"] = (
+            int(self.stats.get("fixed_m4_aux_prefetch_rows", 0)) + fetched
+        )
+        return fetched
+
     def reserve_fixed_m4_window(
         self,
         cache: Any,
