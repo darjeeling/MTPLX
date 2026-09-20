@@ -16739,6 +16739,18 @@ def _memory_attribution(state: Any) -> dict[str, Any]:
         attribution["generation_working_bytes"] = max(
             0, active - int(weights or 0) - bank_bytes
         )
+        # What the kernel holds for this process (the counter jetsam reads),
+        # and the part of it MLX's own account does not explain. Reported on
+        # every surface that carries this block so a memory report from the
+        # field names its holder: "active is fine and the Mac is full" and
+        # "active itself is high" are different defects (#456, PR #500).
+        footprint = phys_footprint_bytes()
+        attribution["phys_footprint_bytes"] = footprint
+        attribution["host_overhang_bytes"] = (
+            max(0, int(footprint) - active - int(_mx.get_cache_memory()))
+            if footprint
+            else None
+        )
     except Exception:
         attribution["generation_working_bytes"] = None
     return attribution
@@ -18514,6 +18526,84 @@ def _vision_bank_session_id(bank: Any, prompt_ids: list[int], splice: Any) -> st
     return entry.session_id
 
 
+# Memory a healthy daemon holds OUTSIDE MLX's own account (Python heap,
+# tokenizer, thread stacks, n-gram hot rows, the SSD writer's staged bytes).
+# Measured 3 to 6 GiB on a Flash-Next daemon on 2026-09-16 (phys_footprint
+# 88.58 GB, 77 GB of it weights), and the SSD writer alone may stage up to
+# MTPLX_SSD_WRITER_BACKLOG_BYTES (4 GiB). The floor below is that measurement
+# plus headroom; MTPLX_HOST_MEMORY_ALLOWANCE_BYTES overrides it.
+_HOST_MEMORY_ALLOWANCE_FLOOR_BYTES = 8 * 1024**3
+
+
+def _host_memory_allowance_bytes(state: Any, limit: int) -> int:
+    """How much process memory outside MLX's account is normal on this seat.
+
+    The allocator limit is not the process's budget. The memory plan fits
+    weights, KV, transients and the session cache inside the limit (75% of
+    RAM by default) and leaves the rest of the machine to macOS AND to what
+    this process holds outside Metal. Comparing the whole footprint with the
+    allocator limit therefore reads a session the plan itself sized to fit
+    as over the line: on a 48 GB Mac with the 27B, limit 36 GiB, a full
+    session plus 2 to 3 GiB of ordinary host memory is 1.06 to 1.08 of the
+    limit, which is CRITICAL at rest (the 2026-09-16 review of PR #500).
+
+    The allowance is the larger of two numbers. The plan's own headroom:
+    RAM (or the user's --memory-budget) minus the system reserve minus the
+    limit, 16 GiB on a default 128 GB seat. And a floor for the seats where
+    the limit already IS "everything outside the system reserve" (Flash-Next
+    on 96 GB, or an operator's explicit limit), where that difference is
+    zero and a healthy daemon would otherwise sit in WARNING for good.
+    WARNING halves the warm session cache, so a false one is a regression.
+
+    MTPLX_HOST_MEMORY_ALLOWANCE_BYTES=0 is the strict floor PR #500 proposed:
+    every byte of footprint above MLX's account counts.
+    """
+
+    raw = os.environ.get("MTPLX_HOST_MEMORY_ALLOWANCE_BYTES")
+    if raw is not None and raw.strip():
+        parsed = _parse_byte_limit(raw)
+        if parsed is not None and parsed >= 0:
+            return int(parsed)
+    allowance = int(_HOST_MEMORY_ALLOWANCE_FLOOR_BYTES)
+    total = 0
+    caps = getattr(state, "metal_memory_caps", None)
+    if isinstance(caps, dict) and isinstance(caps.get("total_ram_bytes"), int):
+        total = int(caps["total_ram_bytes"])
+    budget = getattr(state, "memory_budget_bytes", None)
+    if isinstance(budget, int) and budget > 0:
+        total = min(total, budget) if total > 0 else budget
+    if total > 0 and limit > 0:
+        from mtplx.memory_plan import system_reserve_bytes
+
+        allowance = max(allowance, total - system_reserve_bytes(total) - int(limit))
+    return int(allowance)
+
+
+def _footprint_floor(
+    state: Any, *, limit: int, allocator_bytes: int
+) -> tuple[int, dict[str, Any]]:
+    """``allocator_bytes`` raised by the footprint MLX cannot account for.
+
+    Returns the number every guard compares with the allocator limit, and
+    the fields that explain it. ``host_overhang_bytes`` is what the kernel
+    holds for this process beyond active + cache; only the part above the
+    seat's allowance is charged. A failed probe (no libproc, not Darwin)
+    returns ``allocator_bytes`` unchanged, as does any healthy process.
+    """
+
+    footprint = phys_footprint_bytes()
+    fields: dict[str, Any] = {"phys_footprint_bytes": footprint}
+    if not footprint:
+        return int(allocator_bytes), fields
+    overhang = max(0, int(footprint) - int(allocator_bytes))
+    allowance = _host_memory_allowance_bytes(state, int(limit))
+    charged = max(0, overhang - allowance)
+    fields["host_overhang_bytes"] = int(overhang)
+    fields["host_allowance_bytes"] = int(allowance)
+    fields["host_overhang_charged_bytes"] = int(charged)
+    return int(allocator_bytes) + int(charged), fields
+
+
 def _prefill_admission_shed_enabled() -> bool:
     return os.environ.get(
         "MTPLX_PREFILL_ADMISSION_SHED", "1"
@@ -18632,8 +18722,12 @@ def _prefill_admission_shed(
         # dangerous in reality is never judged safe by allocator bookkeeping
         # alone. A missing/failed probe (non-Darwin, no libproc) leaves
         # live_bytes identical to active+cache — byte-identical to before.
-        footprint = phys_footprint_bytes()
-        live_bytes = max(active + cache, int(footprint or 0))
+        #
+        # Re-based after review: the floor charges only the footprint beyond
+        # what this seat normally holds outside Metal (_footprint_floor).
+        live_bytes, footprint_fields = _footprint_floor(
+            state, limit=limit, allocator_bytes=active + cache
+        )
         plan = getattr(state, "memory_plan", None)
         per_token = 0
         transients = 0
@@ -18749,7 +18843,7 @@ def _prefill_admission_shed(
             "miss_tokens": int(miss_tokens),
             "active_bytes": int(active),
             "cache_bytes": int(cache),
-            "phys_footprint_bytes": footprint,
+            **footprint_fields,
             "projected_bytes": int(projected),
             "threshold_bytes": int(threshold),
             "limit_bytes": int(limit),
@@ -18767,12 +18861,12 @@ def _prefill_admission_shed(
             receipt["cache_cleared"] = False
             receipt["cache_clear_error"] = repr(exc)
         after_cache = _mlx_memory_stats_live()
-        footprint_after_cache = phys_footprint_bytes()
         if int(after_cache.get("active_memory_bytes") or 0) > 0:
-            live_after_cache = max(
-                int(after_cache["active_memory_bytes"])
+            live_after_cache, _ = _footprint_floor(
+                state,
+                limit=limit,
+                allocator_bytes=int(after_cache["active_memory_bytes"])
                 + int(after_cache.get("cache_memory_bytes") or 0),
-                int(footprint_after_cache or 0),
             )
             projected = live_after_cache + miss_tokens * per_token + transients
         receipt["projected_bytes_after_cache_clear"] = int(projected)
@@ -18869,14 +18963,19 @@ def _prefill_admission_shed(
         # Float the same phys_footprint floor in here too, or the refusal
         # this comment describes never actually fires for that failure
         # shape.
-        footprint_after = phys_footprint_bytes()
-        live_after = max(
-            int(after.get("active_memory_bytes") or 0)
+        live_after, footprint_fields_after = _footprint_floor(
+            state,
+            limit=limit,
+            allocator_bytes=int(after.get("active_memory_bytes") or 0)
             + int(after.get("cache_memory_bytes") or 0),
-            int(footprint_after or 0),
         )
         projected_after = live_after + miss_tokens * per_token + transients
-        receipt["phys_footprint_bytes_after"] = footprint_after
+        receipt["phys_footprint_bytes_after"] = footprint_fields_after.get(
+            "phys_footprint_bytes"
+        )
+        receipt["host_overhang_charged_bytes_after"] = footprint_fields_after.get(
+            "host_overhang_charged_bytes", 0
+        )
         receipt["projected_bytes_after"] = int(projected_after)
         if projected_after > limit and not bool(getattr(state, "allow_swap", False)):
             receipt["refused"] = True
@@ -18918,9 +19017,10 @@ def _allocator_pressure_level(state: "ServerState") -> tuple[int, float]:
     sub-WARNING, and both ended in a kernel panic (watchdog timeout, near-
     zero free pages) rather than the sustained-pressure abort this loop is
     meant to arm. ``phys_footprint_bytes()`` reads the same counter macOS's
-    own jetsam subsystem uses for this exact decision; taking the max with
-    the allocator's own number can only raise the reading, never lower it
-    below what the allocator already measured, so a healthy engine sees no
+    own jetsam subsystem uses for this exact decision. Only the footprint
+    beyond what this seat normally holds outside Metal is added
+    (``_footprint_floor``), so the reading can only rise, never fall below
+    what the allocator already measured, and a healthy engine sees no
     change. Returns (level, fraction).
     """
     caps = getattr(state, "metal_memory_caps", None)
@@ -18936,8 +19036,9 @@ def _allocator_pressure_level(state: "ServerState") -> tuple[int, float]:
     cache = stats.get("cache_memory_bytes") or 0
     if not active:
         return 1, 0.0
-    footprint = phys_footprint_bytes()
-    live_bytes = max(int(active) + int(cache), int(footprint or 0))
+    live_bytes, _ = _footprint_floor(
+        state, limit=limit, allocator_bytes=int(active) + int(cache)
+    )
     fraction = float(live_bytes) / float(limit)
     if fraction >= 1.02:
         return 4, fraction
@@ -19266,6 +19367,7 @@ async def _memory_pressure_loop(
                     "level": level,
                     "level_source": level_source,
                     "allocator_fraction": round(allocator_fraction, 3),
+                    "phys_footprint_bytes": phys_footprint_bytes(),
                     "bank_entries_evicted": evicted,
                     "bank_bytes_after": int(
                         getattr(bank, "total_nbytes", 0) or 0

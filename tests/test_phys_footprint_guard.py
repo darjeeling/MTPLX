@@ -69,6 +69,16 @@ def _pin_footprint(monkeypatch, value):
     monkeypatch.setattr(srv, "phys_footprint_bytes", lambda *a, **k: value)
 
 
+@pytest.fixture(autouse=True)
+def _strict_floor(monkeypatch):
+    """These tests pin the STRICT floor this PR proposed: every byte of
+    footprint above MLX's own account counts. It is still available as
+    MTPLX_HOST_MEMORY_ALLOWANCE_BYTES=0. The default charges only the
+    footprint beyond what a seat normally holds outside Metal; see
+    tests/test_host_memory_allowance.py for why and for that behaviour."""
+    monkeypatch.setenv("MTPLX_HOST_MEMORY_ALLOWANCE_BYTES", "0")
+
+
 def _shed(state, prompt_ids, bank=None, session_id=None):
     return srv._prefill_admission_shed(
         state,
