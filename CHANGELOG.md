@@ -25,6 +25,20 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
+- **Forge builds a model that ships as one weights file** (issue #492). A
+  model small enough for a single `model.safetensors` has no
+  `model.safetensors.index.json`. `mtplx inspect` read the file's header
+  and reported the draft head as present, but Forge looked for the head
+  through the index only, so it converted the model, wrote no
+  `mtp.safetensors`, and stopped at calibration with `return_hidden
+  requires an MTP-patched runtime`. Forge now reads the same headers
+  `inspect` does.
+- **`mtplx doctor` shows why the app could not start** (issue #504). When
+  the app's server stops before it is ready, the app showed one line and
+  cut it off, and nothing was written to disk. The app now writes the
+  server's last output to `~/.mtplx/logs/last-failed-start.log` (the launch
+  line has its secrets masked), and `mtplx doctor` includes the last 60
+  lines as `app.last_failed_start` when the file is less than 14 days old.
 - **A download blocked by a company proxy now says what to do** (issue
   #495). Behind a proxy that inspects HTTPS, model downloads stopped at
   setup step 6 of 7 with `CERTIFICATE_VERIFY_FAILED` while `curl` worked,
