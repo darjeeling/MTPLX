@@ -152,6 +152,9 @@ from mtplx.runtime_options import (
 )
 from mtplx.draft_lm_head import _install_draft_lm_head
 from mtplx import request_capture
+from mtplx.mlx_process_env import (
+    applied_command_buffer_mb as _applied_command_buffer_mb,
+)
 from mtplx.system_memory import (
     admission_shortfall_bytes as _system_admission_shortfall_bytes,
     read_system_memory as _read_system_memory,
@@ -18275,6 +18278,9 @@ def _mtplx_dashboard_snapshot(state: "ServerState") -> dict[str, Any]:
         "system_available_bytes": getattr(
             dashboard, "last_system_available_bytes", None
         ),
+        # What this process told MLX before its Metal device existed (MLX has
+        # no getter for it): see mtplx/mlx_process_env.py.
+        "mlx_command_buffer_mb": _applied_command_buffer_mb(),
         "memory_plan": (
             state.memory_plan.to_dict()
             if getattr(state, "memory_plan", None) is not None
