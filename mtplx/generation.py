@@ -602,6 +602,15 @@ def _qwen4_prefill_geometry(rt: Any) -> dict[str, int] | None:
     }
 
 
+def _qwen4_prefill_midloop_armed() -> bool:
+    try:
+        from mtplx.models.qwen4_exp import prefill_midloop_eval_setting
+
+        return int(prefill_midloop_eval_setting()) > 0
+    except Exception:
+        return False
+
+
 def _qwen4_dense_attention_keys(rows: int, prompt_tokens: int) -> int:
     """The longest key length a DENSE forward of ``rows`` rows can see.
 
@@ -628,13 +637,14 @@ def _qwen4_wide_prefill_need(
     """The bill for prefilling ``prompt_tokens`` in ``rows``-row forwards.
 
     Friday's flat 8 GiB was three things, none of which grows with the prompt:
-    the pre-conv streams the recurrent states kept alive (3.1 GB at 4,096
-    rows, gone now that the chunk eval names them), the score matrix stock
-    attention materializes below the sparse crossover (24 heads x rows x keys
-    in bf16: 3.2 GB at 4,096 rows and 16K keys), and the forward's own
-    intermediates (1.8 GB).  Each is charged for what it is, so a lower
-    crossover or a narrower rung is billed less and a Mac without the sparse
-    lane is billed the whole dense matrix.
+    the pre-conv streams the recurrent layers keep alive to the end of a
+    forward (3.1 GB at 4,096 rows; not charged while the model hands finished
+    layers to the GPU mid-loop, MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL), the score
+    matrix stock attention materializes below the sparse crossover (24 heads
+    x rows x keys in bf16: 3.2 GB at 4,096 rows and 16K keys), and the
+    forward's own intermediates (1.8 GB).  Each is charged for what it is, so
+    a lower crossover or a narrower rung is billed less and a Mac without the
+    sparse lane is billed the whole dense matrix.
 
     The score matrix and the expert intermediates belong to different blocks
     of a layer and the dense forwards run while the KV is still short, so the
@@ -668,11 +678,12 @@ def _qwen4_wide_prefill_need(
     )
     at_last_dense_forward = keys * per_token + dense + forward // 2
     at_last_forward = kv + forward
-    pinned = (
-        0
-        if _prefill_eval_recurrent_state_enabled()
-        else geometry["pinned_bytes_per_row"] * rows
-    )
+    # Naming the recurrent states in the chunk eval frees the pre-conv streams
+    # BETWEEN chunks; inside a forward they all live to the end of the tape
+    # unless the model hands finished layers to the GPU mid-loop (128K cold,
+    # 4,096 rows, states named, one eval per forward: process peak 4.8 GB over
+    # active memory, which is these 3.1 GB plus the forward's own 1.8).
+    pinned = 0 if _qwen4_prefill_midloop_armed() else geometry["pinned_bytes_per_row"] * rows
     need = max(at_last_dense_forward, at_last_forward) + pinned + _WIDE_PREFILL_FIXED_BYTES
     return {
         "kv_bytes": int(kv),

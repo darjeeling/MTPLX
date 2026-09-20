@@ -242,14 +242,20 @@ def test_the_measured_128_gb_seat(monkeypatch):
 
 # --- The itemized bill (2026-09-20) -----------------------------------------
 #
-# Friday's flat 8 GiB was three things: pre-conv streams the recurrent states
-# kept alive (3.1 GB at 4,096 rows, freed since the chunk eval names them),
-# the score matrix stock attention materializes below the sparse crossover
-# (3.2 GB at 4,096 rows and 16K keys) and the forward's own intermediates
-# (1.8 GB).  None of them grows with the prompt, so a flat charge on top of
-# the KV refused the 4,096-row chunk exactly where it pays most: 64K after a
-# few earlier cells (live 89.9 GB + need 10.5 over the 100.0 GB line) and
-# every 128K prompt.
+# Friday's flat 8 GiB was three things: pre-conv streams the recurrent layers
+# keep alive to the end of a forward (3.1 GB at 4,096 rows; the model's
+# mid-loop evals let each one die with its layer), the score matrix stock
+# attention materializes below the sparse crossover (3.2 GB at 4,096 rows and
+# 16K keys) and the forward's own intermediates (1.8 GB).  None of them grows
+# with the prompt, so a flat charge on top of the KV refused the 4,096-row
+# chunk exactly where it pays most: 64K after a few earlier cells (live
+# 89.9 GB + need 10.5 over the 100.0 GB line) and every 128K prompt.
+#
+# Measured on that seat with the states named in the chunk eval and ONE eval
+# per forward (n3-pfx2-memfix, both prompts forced onto 4,096 rows): process
+# peak 8.5 GB over the request's start at 64K and 9.6 GB at 128K, 100.8 GB
+# against the 100.0 GB line.  The bill without mid-loop evals is 10.5 and
+# 11.0 GB, so it refuses both, as it should.
 
 
 class _FlashNextArgs:
@@ -283,6 +289,7 @@ class _FlashNextRuntime:
 
 BILL_KEYS = (
     "MTPLX_QWEN4_PREFILL_WIDE_BILL",
+    "MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL",
     "MTPLX_PREFILL_EVAL_RECURRENT_STATE",
     "MTPLX_QSA_PREFILL_MIN_CONTEXT",
     "MTPLX_QSA_PREFILL_FLASH_MIN_CONTEXT",
@@ -341,7 +348,8 @@ def test_the_bill_names_each_term(monkeypatch):
 def test_tonights_refusals_become_grants_and_the_margin_is_stated(monkeypatch):
     """128 GB M5 Max, 2026-09-20, the founder's cell order: 64K met 89.9 GB
     live and 128K 90.8 GB, both refused by the flat charge (need 10.5 and
-    12.3 GB against the 100.0 GB line)."""
+    12.3 GB against the 100.0 GB line).  With the model's mid-loop evals the
+    pre-conv streams are no longer part of the peak."""
 
     rt = _itemized(monkeypatch)
     _memory(monkeypatch, limit=96 * GIB, live=int(89.9e9))
@@ -407,17 +415,45 @@ def test_a_lower_crossover_is_billed_less(monkeypatch):
     assert low["need_bytes"] <= high["need_bytes"]
 
 
-def test_the_old_eval_set_is_billed_its_pinned_streams(monkeypatch):
+def test_one_eval_per_forward_is_billed_its_pinned_streams(monkeypatch):
     rt = _itemized(monkeypatch)
     free = generation._qwen4_wide_prefill_need(
         rt, rows=4096, prompt_tokens=65_502, per_token=28_416
     )
-    monkeypatch.setenv("MTPLX_PREFILL_EVAL_RECURRENT_STATE", "0")
+    assert free["pinned_stream_bytes"] == 0
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL", "0")
     pinned = generation._qwen4_wide_prefill_need(
         rt, rows=4096, prompt_tokens=65_502, per_token=28_416
     )
     assert pinned["pinned_stream_bytes"] == 4096 * 2 * 37 * 10_240
     assert pinned["need_bytes"] == free["need_bytes"] + pinned["pinned_stream_bytes"]
+    # Naming the states in the chunk eval frees them between chunks only, so
+    # that switch does not move the bill.
+    monkeypatch.setenv("MTPLX_PREFILL_EVAL_RECURRENT_STATE", "0")
+    assert (
+        generation._qwen4_wide_prefill_need(
+            rt, rows=4096, prompt_tokens=65_502, per_token=28_416
+        )
+        == pinned
+    )
+
+
+def test_the_bill_without_mid_loop_evals_covers_the_measured_peaks(monkeypatch):
+    """n3-pfx2-memfix: 8.5 GB over the request's start at 64K, 9.6 GB at 128K,
+    on 4,096-row chunks with one eval per forward."""
+
+    rt = _itemized(monkeypatch)
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL", "0")
+    for prompt, measured in ((65_502, 8.5e9), (131_039, 9.6e9)):
+        bill = generation._qwen4_wide_prefill_need(
+            rt, rows=4096, prompt_tokens=prompt, per_token=28_416
+        )
+        assert measured < bill["need_bytes"] < measured + 2.5e9
+    # So tonight's two seats are refused without them, as the peaks say.
+    _memory(monkeypatch, limit=96 * GIB, live=int(89.9e9))
+    assert generation.qwen4_wide_prefill_chunk_tokens(rt, prompt_tokens=65_502) is None
+    _memory(monkeypatch, limit=96 * GIB, live=int(90.8e9))
+    assert generation.qwen4_wide_prefill_chunk_tokens(rt, prompt_tokens=131_039) is None
 
 
 def test_the_rungs_are_the_stamped_width_then_powers_of_two_down_to_4096():
