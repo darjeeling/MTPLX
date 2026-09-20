@@ -8,6 +8,7 @@ steps until those offsets become tensor inputs/outputs.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 import weakref
@@ -753,6 +754,41 @@ class TensorOffsetQSACache:
         self.fused_rows_gather_kv_m4 = bool(fused_rows_gather_kv_m4)
 
     @staticmethod
+    def _bank_capacity(
+        needed: int, ratio: int, kv_step: int, *, rows_gather: bool
+    ) -> int:
+        """Rows of a fixed bank that holds ``needed`` tokens.
+
+        Always a multiple of the QSA ratio. On the rows-gather lane also a
+        multiple of the K/V cache's growth step, so the K and V banks ARE the
+        step-rounded buffers and are never cut from them. MLX lets
+        ``slice_update`` write in place only when the array's buffer is at
+        most 16,384 bytes larger than the array, while its buffer cache hands
+        back a recycled buffer up to two pages (32,768 bytes) larger than
+        asked for. A bank cut to a multiple of 4 rows from a 256-row buffer
+        landed, after its first copy, in exactly such a buffer whenever the
+        cut was 17 to 47 rows short of the step: never donatable again, so
+        every K and V bank was copied on every verify round (24 x 135 MB at
+        128K: 7.8 ms against 0.6 ms for the 24 writes in isolation, 48
+        against 65 tok/s served, 2026-09-20). A capacity on the step is a
+        whole number of pages, where the worst recycled buffer is one page
+        larger and still donates.
+
+        Rows-gather only, on purpose: there each verify row attends over its
+        own selected rows and the index scores are per block, so the padded
+        tail never enters a value and the result is bit-identical. The dense
+        lane reduces over every row of the bank, and its last float32 bit
+        already depends on the padded length (capacity 28 and capacity 64
+        differ from the stock cache by 2e-8 on the tiny test geometry), so
+        its capacity is left exactly as it was.
+        """
+
+        quantum = max(1, int(ratio))
+        if rows_gather:
+            quantum = math.lcm(quantum, max(1, int(kv_step)))
+        return ((max(1, int(needed)) + quantum - 1) // quantum) * quantum
+
+    @staticmethod
     def _fixed_bank(value: mx.array, capacity: int, axis: int) -> mx.array:
         current = int(value.shape[axis])
         if current == capacity:
@@ -779,8 +815,22 @@ class TensorOffsetQSACache:
         if entry.kv.keys is None or entry.kv.values is None:
             raise ValueError("QSA attention state is empty")
 
+        from .models.qwen4_exp import (
+            _qsa_gather_enabled,
+            _qsa_gather_min_context,
+        )
+
+        rows_gather_enabled = _qsa_gather_enabled()
+        rows_gather_min_context = _qsa_gather_min_context()
+        rows_gather = rows_gather_enabled and offset >= rows_gather_min_context
+
         logical_capacity = offset + reserve_tokens
-        raw_capacity = ((logical_capacity + ratio - 1) // ratio) * ratio
+        raw_capacity = cls._bank_capacity(
+            logical_capacity,
+            ratio,
+            getattr(entry.kv, "step", 256),
+            rows_gather=rows_gather,
+        )
         pooled_capacity = raw_capacity // ratio
 
         kv = TensorOffsetKVCache.from_kv_cache(
@@ -790,14 +840,6 @@ class TensorOffsetQSACache:
         kv.values = cls._fixed_bank(kv.values, raw_capacity, 2)
         raw = cls._fixed_bank(entry.raw_keys, raw_capacity, 1)
         pooled = cls._fixed_bank(entry.pooled, pooled_capacity, 1)
-        from .models.qwen4_exp import (
-            _qsa_gather_enabled,
-            _qsa_gather_min_context,
-        )
-
-        rows_gather_enabled = _qsa_gather_enabled()
-        rows_gather_min_context = _qsa_gather_min_context()
-        rows_gather = rows_gather_enabled and offset >= rows_gather_min_context
         rows_gather_kv_m4 = entry.rows_gather_kv_m4
         fused_rows_gather_kv_m4 = _env_enabled("MTPLX_QSA_M4_FUSED_KV_GATHER")
         if fused_rows_gather_kv_m4:
@@ -848,11 +890,14 @@ class TensorOffsetQSACache:
     def ensure_capacity(self, needed: int) -> bool:
         """Grow this installed QSA generation without changing its offset."""
 
-        raw_capacity = (
-            (max(1, int(needed)) + self.ratio - 1) // self.ratio
-        ) * self.ratio
-        if raw_capacity <= self.capacity:
+        if int(needed) <= self.capacity:
             return False
+        raw_capacity = self._bank_capacity(
+            needed,
+            self.ratio,
+            getattr(self.kv, "step", 256),
+            rows_gather=self.fixed_rows_gather,
+        )
         pooled_capacity = raw_capacity // self.ratio
         self.kv.keys = self._fixed_bank(self.kv.keys, raw_capacity, 2)
         self.kv.values = self._fixed_bank(self.kv.values, raw_capacity, 2)
