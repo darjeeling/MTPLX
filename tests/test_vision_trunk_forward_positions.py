@@ -23,7 +23,9 @@ end here, with a synthetic image whose delta is -12. No pack and no tower.
   the scope around every trunk forward itself;
 * the structural test: every trunk forward call site in ``generate_mtpk``
   sits inside the one scope helper, which also covers the capture lane the
-  tiny model cannot run.
+  tiny model cannot run;
+* the bank tests: an entry keyed the way older builds keyed it cannot be
+  restored past its image, and text entries restore exactly as before.
 """
 
 from __future__ import annotations
@@ -60,8 +62,9 @@ from mtplx.models.qwen4_exp import (
 from mtplx.mtp_patch import MTPContract, validate_mtp_support
 from mtplx.runtime import MTPLXRuntime
 from mtplx.sampling import SamplerConfig
+from mtplx.session_bank import SessionBank
 from mtplx.vision.mrope import build_mrope_positions
-from mtplx.vision.splice import VisionSplice
+from mtplx.vision.splice import _BANK_KEY_FLAG, VisionSplice, vision_bank_key_ids
 
 VOCAB = 64
 PAD = VOCAB - 1
@@ -704,3 +707,78 @@ def test_every_trunk_forward_call_site_sits_inside_the_scope_helper():
     assert len(scopes) >= 8  # today's census; a new trunk forward adds one
     for node in scopes:
         assert [ast.unparse(arg) for arg in node.args] == ["vision_splice"]
+
+
+# -- 4. the session bank --------------------------------------------------------------
+
+
+def _bank_turn(model, bank: SessionBank, prompt: list[int], *, image: bool = True):
+    return _generate(
+        _runtime(model),
+        splice=_splice(prompt) if image else None,
+        prompt=prompt,
+        max_tokens=6,
+        session_bank=bank,
+        session_id="conversation",
+        session_template_hash="template",
+        session_draft_head_identity="draft-head",
+        session_policy_fingerprint="policy",
+        commit_prompt_state_to_bank=True,
+    )
+
+
+def test_an_entry_banked_by_an_older_build_cannot_be_restored_past_its_image(
+    model, monkeypatch
+):
+    import mtplx.vision.splice as splice_module
+
+    bank = SessionBank()
+    second = [*PROMPT, 9, 10, 11, 12]
+    third = [*second, 13, 14]
+    fourth = [*third, 15, 16]
+
+    # Builds up to 2.11.3 keyed an image row by its pixels and row index
+    # only, whatever positions its rows were roped at.
+    with monkeypatch.context() as older_build:
+        older_build.setattr(
+            splice_module, "_position_scheme_salts", lambda _splice, images: [0] * images
+        )
+        older_key = vision_bank_key_ids(PROMPT, _splice())
+        assert _bank_turn(model, bank, PROMPT).stats.cached_tokens == 0
+        # Control: under that key the next turn restores through the image.
+        assert _bank_turn(model, bank, second).stats.cached_tokens == len(PROMPT)
+
+    # This build: the rows those entries hold past the prompt may be
+    # misplaced, so nothing at or past the image may come back from them.
+    key = vision_bank_key_ids(PROMPT, _splice())
+    pads = [index for index, token in enumerate(PROMPT) if token == PAD]
+    assert all(key[index] != older_key[index] for index in pads)
+    assert all(key[index] & _BANK_KEY_FLAG for index in pads)
+    assert [key[i] for i in range(len(PROMPT)) if i not in pads] == [
+        older_key[i] for i in range(len(PROMPT)) if i not in pads
+    ]
+    assert _bank_turn(model, bank, third).stats.cached_tokens <= FIRST_IMAGE
+    # The entries this build writes restore warm, through the image.
+    assert _bank_turn(model, bank, fourth).stats.cached_tokens == len(third)
+    # Nothing was deleted to get there: the older entries are still banked
+    # and age out through normal eviction.
+    assert bank.longest_prefix(older_key) is not None
+
+
+def test_text_entries_are_keyed_and_restored_exactly_as_before(model, monkeypatch):
+    import mtplx.vision.splice as splice_module
+
+    def never_for_text(*_args, **_kwargs):
+        raise AssertionError("a text request reached the vision key derivation")
+
+    # The salt lives in the vision key function, which a text request never
+    # calls: its key cannot have moved.
+    monkeypatch.setattr(splice_module, "vision_bank_key_ids", never_for_text)
+    bank = SessionBank()
+    text = [token for token in PROMPT if token != PAD]
+    assert _bank_turn(model, bank, text, image=False).stats.cached_tokens == 0
+    # A text request is keyed by its token ids, untouched.
+    entry = bank.longest_prefix(text)
+    assert entry is not None and list(entry.token_ids) == text
+    longer = [*text, 9, 10, 11, 12]
+    assert _bank_turn(model, bank, longer, image=False).stats.cached_tokens == len(text)

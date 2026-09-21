@@ -5294,18 +5294,26 @@ def _vision_rope_scope_for(vision_splice: Any | None):
     splice (mtplx.dense_mrope) and arms that instead; a splice holds one or
     the other, never both.
     """
+    if vision_splice is None:
+        # Text request: nothing to read, and the vision package stays
+        # unimported.
+        return contextlib.nullcontext()
     dense_mrope = _dense_mrope_state_of(vision_splice)
     if dense_mrope is not None:
         from .dense_mrope import dense_mrope_scope
 
         return dense_mrope_scope(dense_mrope)
-    table = getattr(vision_splice, "mrope_table", None) if vision_splice else None
-    delta = int(getattr(vision_splice, "mrope_delta", 0) or 0) if vision_splice else 0
-    if table is None and delta == 0:
+    from mtplx.vision.splice import mrope_rope_state
+
+    # The one predicate the session bank key is salted on as well, so a
+    # request that ropes through this scope can never share a key with one
+    # that does not.
+    state = mrope_rope_state(vision_splice)
+    if state is None:
         return contextlib.nullcontext()
     from .attention_context import vision_rope
 
-    return vision_rope(table, delta)
+    return vision_rope(*state)
 
 
 def _decode_trunk_scope(vision_splice: Any | None):
