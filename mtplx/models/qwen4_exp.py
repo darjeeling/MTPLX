@@ -355,6 +355,64 @@ def _vision_position_cos_sin(positions, inv_freq, axes, scaling=1.0):
     return cos * scaling, sin * scaling
 
 
+def _vision_chunk_cos_sin(
+    table: mx.array | None,
+    delta: int,
+    pos_start: int,
+    rows: int,
+    inv_freq: mx.array,
+    axes: mx.array,
+    attention_scaling: float = 1.0,
+) -> tuple[mx.array, mx.array]:
+    """Attention rope tables for rows ``[pos_start, pos_start + rows)`` of an
+    image request on a stock cache.
+
+    The rule is per row. A row inside the request's M-RoPE table rotates at
+    its (t, h, w) table position; a row past the table is equal-axes at
+    ``index + delta``, which is plain rope shifted by the delta. One forward
+    can hold both: a chunk that straddles the end of the table, which is what
+    a state rebase feeds when it re-prefills the prompt together with the
+    tokens generated so far. Choosing one rule for the whole chunk (the code
+    before this function did, by ``end <= table length``) put every table row
+    of such a chunk at ``index + delta``, the image rows included.
+
+    A chunk wholly inside the table, or wholly past it, builds exactly the
+    table it always built (same call, same operands), so nothing changes for
+    a request that never straddles. The straddling chunk is the row-wise
+    concatenation of those same two tables, a copy, so each of its rows holds
+    the bits the unstraddled forward of that row would have held. The QSA
+    indexer makes the same per-row choice (``_vision_position_cos_sin``).
+
+    The amplitude scaling of a scaled rope type applies to every row, as in
+    the reference rotary embedding and as the indexer does; the table rows
+    used to miss it. The shipped packs are ``rope_type: default`` (1.0), for
+    which the multiplication is not built at all.
+    """
+
+    table_len = int(table.shape[1]) if table is not None else 0
+    inside = max(0, min(pos_start + rows, table_len) - pos_start)
+    past = rows - inside
+    cos_in = sin_in = None
+    if inside:
+        cos_in, sin_in = _mrope_cos_sin(
+            table[:, pos_start : pos_start + inside], inv_freq, axes
+        )
+        if attention_scaling != 1.0:
+            cos_in = cos_in * float(attention_scaling)
+            sin_in = sin_in * float(attention_scaling)
+        if not past:
+            return cos_in, sin_in
+    first_past = pos_start + inside + delta
+    positions = mx.arange(first_past, first_past + past, dtype=mx.int32)
+    cos_past, sin_past = _rope_cos_sin(positions, inv_freq, attention_scaling)
+    if not inside:
+        return cos_past, sin_past
+    return (
+        mx.concatenate([cos_in, cos_past], axis=0),
+        mx.concatenate([sin_in, sin_past], axis=0),
+    )
+
+
 def _apply_partial_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
     """Rotate the first `2 * inv_freq.size` features of the last axis of
     x[..., S, H, D] with per-position tables cos/sin of shape [S, rot]."""
@@ -4126,19 +4184,17 @@ class Attention(nn.Module):
             # derived per request from content, so nothing new rides banked
             # cache state. (A fixed bank carries that same delta as its rotary
             # origin for the life of the request and drops it at demotion.)
+            # The choice is per row: a chunk may straddle the end of the table.
             table, delta = vrope
-            end = pos_start + S
-            if table is not None and end <= int(table.shape[1]):
-                cos, sin = _mrope_cos_sin(
-                    table[:, pos_start:end], self._inv_freq, self._mrope_axes
-                )
-            else:
-                positions = mx.arange(
-                    pos_start + delta, pos_start + delta + S, dtype=mx.int32
-                )
-                cos, sin = _rope_cos_sin(
-                    positions, self._inv_freq, self._rope_attention_scaling
-                )
+            cos, sin = _vision_chunk_cos_sin(
+                table,
+                delta,
+                pos_start,
+                int(S),
+                self._inv_freq,
+                self._mrope_axes,
+                self._rope_attention_scaling,
+            )
         elif vrope is None and self._verify_glue_rope(int(S)):
             # MTPLX_QWEN4_VERIFY_GLUE item 'qsa_rope': the table build and
             # both rotations as ONE dispatch. Same arithmetic, same order --
