@@ -112,6 +112,15 @@ def test_quality_refuses_q8_table_before_reading_source_or_writing_output(tmp_pa
     assert not (tmp_path / "output").exists()
 
 
+def test_a_custom_recipe_may_still_choose_another_table_layout():
+    """The refusal belongs to the published Quality pack. The generic lane keeps
+    what it could do before: build the layout it was asked for and warn that
+    the fixed-M4 verify lane will decline it."""
+    params = recipe_params({"body_bits": 8, "body_group_size": 64, "body_mode": "affine",
+                            "ngram": {"bits": 8, "group_size": 64}})
+    assert (params["ngram_bits"], params["ngram_group"]) == (8, 64)
+
+
 def test_quality_refuses_precision_overrides():
     recipe = named_recipe(QUALITY_RECIPE)
     recipe["module_overrides"] = [{"suffix": "gate_proj", "bits": 4}]

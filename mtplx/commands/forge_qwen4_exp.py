@@ -136,12 +136,16 @@ def recipe_params(recipe: dict[str, Any]) -> dict[str, int]:
     ngram = recipe.get("ngram") if isinstance(recipe.get("ngram"), dict) else {}
     ngram_bits = int(NGRAM_PRODUCTION_LAYOUT[0] if ngram.get("bits") is None else ngram.get("bits"))
     ngram_group = int(ngram.get("group_size") or NGRAM_PRODUCTION_LAYOUT[1])
-    if (ngram_bits, ngram_group) != NGRAM_PRODUCTION_LAYOUT:
-        raise Qwen4ForgeError(
-            "Flash-Next requires a 4-bit/g32 n-gram table: the fixed-M4 verifier "
-            f"cannot serve {ngram_bits}-bit/g{ngram_group}. Build refused before conversion."
-        )
     if recipe.get("name") == QUALITY_RECIPE:
+        # The published Quality pack must run the fixed-M4 verify lane, which
+        # serves the 4-bit/g32 table only. Refuse here, before any byte of the
+        # 360 GB source is read. A custom recipe may still choose another
+        # table layout; it is warned below that the lane will decline it.
+        if (ngram_bits, ngram_group) != NGRAM_PRODUCTION_LAYOUT:
+            raise Qwen4ForgeError(
+                "The Quality pack requires a 4-bit/g32 n-gram table: the fixed-M4 verifier "
+                f"cannot serve {ngram_bits}-bit/g{ngram_group}. Build refused before conversion."
+            )
         expected = NAMED_RECIPES[QUALITY_RECIPE]
         if any(recipe.get(k) != v for k, v in expected.items()) or recipe.get("module_overrides"):
             raise Qwen4ForgeError("The named Quality recipe cannot be overridden; use its Q8/g64 contract")
@@ -221,8 +225,9 @@ def write_ngram_sidecar(
         dim = int(header[key]["shape"][1])
     rows = sum(rows_per)
     if (bits, group) != NGRAM_PRODUCTION_LAYOUT:
-        raise Qwen4ForgeError(
-            f"Flash-Next requires a 4-bit/g32 n-gram table; fixed-M4 cannot serve {bits}-bit/g{group}"
+        _log(
+            f"n-gram sidecar {bits}-bit/g{group} is outside the production layout "
+            f"{NGRAM_PRODUCTION_LAYOUT}; the fixed-M4 verify lane will refuse it"
         )
     header = ngram_sidecar_layout(rows, dim, bits=bits, group=group)
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")

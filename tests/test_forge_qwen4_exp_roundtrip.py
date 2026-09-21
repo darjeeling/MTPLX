@@ -369,7 +369,8 @@ def test_quality_pack_loaded_roundtrip_checks_every_stored_tensor_class(tmp_path
         expected = "BF16" if cls in BF16_CLASSES else "I64" if cls == "ple_integer_buffers" else (
             "Q4/g32 affine; BF16 scales and biases" if cls == "ngram_table" else "Q8/g64 affine; BF16 scales and biases")
         assert info["stored_precision"] == expected, cls
-    loaded, _ = load_model(pack, lazy=True, get_model_classes=lambda _: (Model, ModelArgs))
+    # mlx_lm calls the hook by keyword: get_model_classes(config=config).
+    loaded, _ = load_model(pack, lazy=True, get_model_classes=lambda config: (Model, ModelArgs))
     assert loaded.attach_mtp(pack)
     headers, _ = inventory(pack)
     actual = dict(tree_flatten(loaded.parameters()))
