@@ -259,10 +259,14 @@ def _write_publish(
 
 
 def _read_recipe(raw: str) -> dict[str, Any]:
+    from mtplx.commands.forge_qwen4_exp import NAMED_RECIPES, named_recipe
+
+    if raw in NAMED_RECIPES:
+        return named_recipe(raw)
     try:
         value = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:
-        raise ForgeError(f"--recipe must be JSON: {exc}", code=2) from exc
+        raise ForgeError(f"--recipe must be JSON or a named preset ({', '.join(NAMED_RECIPES)}): {exc}", code=2) from exc
     if not isinstance(value, dict):
         raise ForgeError("--recipe must decode to an object", code=2)
     return value
@@ -991,6 +995,10 @@ def _cmd_verify(args: Any) -> int:
     else:
         run = _run_dir(Path("outputs/forge-verify"), f"verify-{int(time.time())}")
     existing = _read_runtime(model_path)
+    if (existing or {}).get("quality_pack"):
+        from mtplx.commands.forge_qwen4_audit import verify_pack_checksums
+
+        verify_pack_checksums(model_path, existing["quality_pack"]["files"])
     mtp_contract = _runtime_or_default_mtp_contract(existing, model_path)
     rows = _run_verify(
         model_path,
@@ -1002,6 +1010,10 @@ def _cmd_verify(args: Any) -> int:
     )
     payload: dict[str, Any] = {"rows": rows}
     if rows and bool(getattr(args, "stamp", False)):
+        if (existing or {}).get("quality_pack"):
+            _require_verify_rows(rows, require_all_depths=_build_requires_all_depths(model_path),
+                                 verify_depths=_forge_verify_depths(model_path))
+            _require_speed_win_or_write_outcome(model_path, run, rows)
         # In-place first-load smoke stamp: the same metadata stamper the
         # build lane uses, fed by the rows just measured — no rebuild, no
         # tree copy. This is what clears the 'unverified' marker on packs
@@ -1020,7 +1032,7 @@ def _cmd_verify(args: Any) -> int:
             source_repo=source_repo,
             source_sha=str(existing_provenance.get("source_sha") or ""),
             source_format=str(probe.get("source_format") or SOURCE_UNKNOWN),
-            recipe={},
+            recipe=existing_provenance.get("forge_recipe") or {},
             forge_inputs={"lane": "verify-stamp"},
             rows=rows,
             mtp_contract=mtp_contract,
@@ -1037,11 +1049,21 @@ def _cmd_verify(args: Any) -> int:
 
 
 def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
+    from mtplx.commands.forge_qwen4_exp import QUALITY_RECIPE, recipe_params
+
     recipe = _read_recipe(args.recipe)
     if getattr(args, "dtype", None):
         recipe["body_dtype"] = str(args.dtype)
     _body_dtype(recipe)  # validate early, before any download starts
     _guard_degraded_mtp(recipe, allow=bool(getattr(args, "allow_degraded_mtp", False)))
+    quality = recipe.get("name") == QUALITY_RECIPE
+    verification = getattr(args, "verification", "full-load")
+    if verification not in ("full-load", "streaming"):
+        raise ForgeError(f"Unknown verification mode: {verification}", code=2)
+    if quality:
+        recipe_params(recipe)  # fail incompatible named recipes before touching output
+    elif verification == "streaming":
+        raise ForgeError("--verification streaming currently requires flash-next-optimized-quality", code=2)
     run = _run_dir(args.out, args.run_id)
     branded_name = _sanitize_branded_name(args.branded_name)
     if not branded_name:
@@ -1068,6 +1090,18 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
     )
     if _cancel_requested(args.run_id):
         raise ForgeError("forge cancelled", code=130)
+
+    quality_source = None
+    if quality:
+        from mtplx.commands.forge_qwen4_audit import source_identity, validate_bf16_source
+
+        if probe.get("source_format") != SOURCE_BF16_NATIVE or probe.get("recommended_backend") != "qwen4_exp":
+            raise ForgeError("The Quality preset requires an original BF16 qwen4_exp source; a quantized pack cannot be upgraded", code=2)
+        validate_bf16_source(source_path)
+        quality_source = source_identity(source_path)
+        source_sha = quality_source["revision"]
+        source_repo = quality_source["repo"] or source_repo
+        atomic_write_json(run / "source_manifest.json", quality_source)
 
     destination = _unique_model_dir(
         branded_name,
@@ -1132,14 +1166,54 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
     _ensure_vision_tower(source_path, destination)
     _validate_vision_payload(source_path, destination)
 
-    _calibrate_sidecar(
-        source_path,
-        destination,
-        recipe=recipe,
-        run=run,
-    )
+    if not quality:
+        _calibrate_sidecar(
+            source_path,
+            destination,
+            recipe=recipe,
+            run=run,
+        )
 
-    existing_runtime = _read_runtime(destination) or _read_runtime(source_path)
+    if quality:
+        from mtplx.commands.forge_qwen4_audit import audit_pack, checksum, quality_metadata
+
+        checksums = {p.name: checksum(p) for p in sorted(destination.glob("*.safetensors"))}
+        atomic_write_json(run / "converted_checksums.json", checksums)
+        audit = audit_pack(source_path, destination, recipe, expected_checksums=checksums)
+        # The native head is already written. Its pre-FC norms are deliberately
+        # zero-centred, so generic sidecar "repair" must not re-extract or
+        # reinterpret them. Source parity and complete header accounting above
+        # validate this head; the full-load contract probe still follows below.
+        _write_progress(run, "calibrate", progress=1.0 if verification == "streaming" else 0.75,
+                        label="native_mtp_source_audited", finished=verification == "streaming")
+        atomic_write_json(run / "streaming_audit.json", audit)
+        config = _load_json(destination / "config.json")
+        config["mtplx_quality"] = quality_metadata(quality_source, audit)
+        atomic_write_json(destination / "config.json", config)
+        if verification == "streaming":
+            # Do not calibrate, load the model, or reuse a source's serving stamp.
+            runtime_metadata = {
+                "mtplx_version": __version__,
+                "min_engine_version": config["mtplx_quality"]["min_engine_version"],
+                "quality_pack": config["mtplx_quality"],
+                "verification": {"mode": "streaming", "status": "streaming-audited",
+                                 "full_load_verified": False, "audit": "streaming_audit.json"},
+                "forge_provenance": {
+                    "source_repo": source_repo or source_path.name, "source_sha": source_sha,
+                    "source_format": source_format, "forge_recipe": recipe,
+                    "forged_at": _now_iso(), "mtplx_version": __version__, "forged_locally": True,
+                },
+            }
+            atomic_write_json(destination / "streaming_audit.json", audit)
+            atomic_write_json(destination / "mtplx_runtime.json", runtime_metadata)
+            _write_brand(run, branded_name, runtime_metadata)
+            _write_forge(run, destination, runtime_metadata)
+            _err("[forge] streaming-audited: full-load serving verification still required; no verified stamp written")
+            if bool(getattr(args, "json", False)):
+                _json_out({"local_path": str(destination), "runtime_metadata": runtime_metadata})
+            return 0
+
+    existing_runtime = None if quality else (_read_runtime(destination) or _read_runtime(source_path))
     require_all_depths = _build_requires_all_depths(destination)
     verify_depths = _forge_verify_depths(destination)
     rows = _verify_rows_from_runtime(existing_runtime)
@@ -3539,6 +3613,11 @@ def _stamp_runtime_metadata(
         "macos": platform.mac_ver()[0],
         "model": branded_name,
     }
+    metadata["verification"] = {"mode": "full-load", "status": "verified", "full_load_verified": True}
+    if config.get("mtplx_quality"):
+        metadata["quality_pack"] = config["mtplx_quality"]
+        metadata["min_engine_version"] = config["mtplx_quality"]["min_engine_version"]
+        metadata["served_model_id"] = config["mtplx_quality"]["served_id"]
     metadata.setdefault("exactness_baseline", {})
     speed_evidence = _speed_evidence(rows)
     artifact_fingerprint = _verification_artifact_fingerprint(model_path)

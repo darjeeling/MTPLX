@@ -1,12 +1,10 @@
-"""Unit coverage for the Forge qwen4_exp (Qwen3.8-Flash-Next) convert lane.
-
-Pure-arithmetic pieces only: the sidecar header, the MTP key layout and the
-per-module quant rules. The streaming conversions need the 335 GB source.
-"""
+"""CPU header, precision and corruption checks for the Flash-Next forge lane."""
 
 from __future__ import annotations
 
 import pytest
+import json
+import struct
 
 from mtplx.commands.forge_qwen4_exp import (
     NGRAM_PRODUCTION_LAYOUT,
@@ -16,6 +14,9 @@ from mtplx.commands.forge_qwen4_exp import (
     mtp_module_rule,
     ngram_sidecar_layout,
     recipe_params,
+    named_recipe,
+    QUALITY_RECIPE,
+    run_lane,
 )
 
 # Qwen3.8-Flash-Next: 128 shards x 2,500,012 rows x 160 = the official pack's row count.
@@ -93,3 +94,188 @@ def test_mtp_rules_mirror_trunk_recipe() -> None:
     assert rule("layers.0.attn_hyper_connection.input_mix_weight_down.weight") is None
     assert rule("fc_hidden.weight") is None
     assert mtp_module_rule("layers.0.mlp.switch_mlp.up_proj.weight", mtp_bits=0, mtp_group=32) is None
+
+
+def test_named_quality_is_the_decided_recipe_and_is_not_mutable_global_state():
+    recipe = named_recipe(QUALITY_RECIPE)
+    assert recipe_params(recipe) == {"body_bits": 8, "body_group": 64, "ngram_bits": 4,
+                                      "ngram_group": 32, "mtp_bits": 8, "mtp_group": 64}
+    recipe["ngram"]["bits"] = 8
+    assert named_recipe(QUALITY_RECIPE)["ngram"]["bits"] == 4
+
+
+def test_quality_refuses_q8_table_before_reading_source_or_writing_output(tmp_path):
+    recipe = named_recipe(QUALITY_RECIPE)
+    recipe["ngram"]["bits"] = 8
+    with pytest.raises(Qwen4ForgeError, match="4-bit/g32.*fixed-M4"):
+        run_lane(tmp_path / "missing-source", tmp_path / "output", recipe=recipe)
+    assert not (tmp_path / "output").exists()
+
+
+def test_quality_refuses_precision_overrides():
+    recipe = named_recipe(QUALITY_RECIPE)
+    recipe["module_overrides"] = [{"suffix": "gate_proj", "bits": 4}]
+    with pytest.raises(Qwen4ForgeError, match="cannot be overridden"):
+        recipe_params(recipe)
+
+
+def _write_tensors(path, tensors):
+    """Independent safetensors writer: these audits need no MLX or Metal."""
+    offset, header, data = 0, {}, []
+    for name, (dtype, array) in tensors.items():
+        payload = array.tobytes()
+        header[name] = {"dtype": dtype, "shape": list(array.shape), "data_offsets": [offset, offset + len(payload)]}
+        offset += len(payload)
+        data.append(payload)
+    encoded = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"".join(data))
+
+
+def _audit_fixture(tmp_path):
+    import numpy as np
+    from mtplx.commands.forge_qwen4_audit import tensor_class, BF16_CLASSES
+    from mtplx.commands.forge_qwen4_exp import NGRAM_KEY
+
+    source, pack = tmp_path / "source", tmp_path / "pack"
+    source.mkdir()
+    pack.mkdir()
+    raw, body, mtp, table = {}, {}, {}, {}
+    keys = [
+        "language_model.model.embed_tokens.weight", "language_model.lm_head.weight",
+        "language_model.model.layers.0.linear_attn.in_proj_qkv.weight",
+        "language_model.model.layers.0.linear_attn.conv1d.weight",
+        "language_model.model.layers.0.linear_attn.A_log", "language_model.model.layers.0.linear_attn.dt_bias",
+        "language_model.model.layers.0.ple.key_proj.weight", "language_model.model.layers.0.ple.norm_key.weight",
+        "language_model.model.layers.0.ple.ple_embedding.layer_multipliers", "vision_tower.patch_embed.proj.weight",
+        "mtp.fc_hidden.weight",
+    ]
+    for prefix in ("language_model.model.", "mtp."):
+        keys += [prefix + "layers.0." + suffix for suffix in (
+            "mlp.switch_mlp.gate_proj.weight", "mlp.shared_expert.down_proj.weight", "mlp.gate.weight",
+            "self_attn.q_proj.weight", "self_attn.indexer.index_qk_proj.weight",
+            "attn_hyper_connection.input_mix_weight_down.weight", "self_attn.q_norm.weight")]
+    for key in keys:
+        cls = tensor_class(key)
+        dst = mtp if key.startswith("mtp.") else body
+        if cls == "ple_integer_buffers":
+            raw[key] = dst[key] = ("I64", np.arange(3, dtype="<i8"))
+        elif cls in BF16_CLASSES:
+            shifted_norm = key.endswith(("q_norm.weight", "norm_key.weight"))
+            shape = (4,) if "norm" in cls or cls in ("gdn_A_log", "gdn_dt_bias") else (2, 3, 1) if cls == "gdn_conv" else (2, 64)
+            raw[key] = ("BF16", np.zeros(shape, dtype="<u2"))
+            dst[key] = ("BF16", np.full(shape, 0x3f80 if shifted_norm else 0, dtype="<u2"))
+        else:
+            shape = (2, 3, 64) if "routed" in cls else (3, 64)
+            codes = np.broadcast_to(np.arange(64, dtype=np.uint32) % 16, shape)
+            values = codes.astype(np.float32) / 16 - 0.5
+            raw[key] = ("BF16", (values.view(np.uint32) >> 16).astype("<u2"))
+            packed = np.sum(codes.reshape(*shape[:-1], -1, 4) << np.arange(0, 32, 8, dtype=np.uint32), axis=-1).astype("<u4")
+            dst[key] = ("U32", packed)
+            base = key.removesuffix(".weight")
+            dst[base + ".scales"] = ("BF16", np.full((*shape[:-1], 1), 0x3d80, dtype="<u2"))
+            dst[base + ".biases"] = ("BF16", np.full((*shape[:-1], 1), 0xbf00, dtype="<u2"))
+    for i, rows in enumerate((3, 2)):
+        raw[NGRAM_KEY.format(layer=1, index=i)] = ("BF16", np.zeros((rows, 160), dtype="<u2"))
+    table["ngram.weight"] = ("U32", np.zeros((5, 20), dtype="<u4"))
+    table["ngram.scales"] = ("BF16", np.zeros((5, 5), dtype="<u2"))
+    table["ngram.biases"] = ("BF16", np.zeros((5, 5), dtype="<u2"))
+    raw = {k.replace("language_model.model.", "model.language_model.", 1): v for k, v in raw.items()}
+    _write_tensors(source / "source.safetensors", raw)
+    (source / "config.json").write_text(json.dumps({"model_type": "qwen4_exp", "text_config": {"hidden_size": 64}}))
+    (source / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {k: "source.safetensors" for k in raw}}))
+    # Split every affine triple across different body shards.
+    weight_map = {}
+    for i, suffix in enumerate((".weight", ".scales", ".biases")):
+        chunk = {k: v for k, v in body.items() if k.endswith(suffix) or (i == 0 and not k.endswith((".weight", ".scales", ".biases")))}
+        filename = f"model-{i}.safetensors"
+        _write_tensors(pack / filename, chunk)
+        weight_map.update({k: filename for k in chunk})
+    _write_tensors(pack / "mtp.safetensors", mtp)
+    _write_tensors(pack / "ngram-table.safetensors", table)
+    (pack / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    return source, pack
+
+
+def test_streaming_audit_reads_all_classes_and_cross_shard_affine_triples(tmp_path):
+    from mtplx.commands.forge_qwen4_audit import audit_pack, checksum
+
+    source, pack = _audit_fixture(tmp_path)
+    report = audit_pack(source, pack, named_recipe(QUALITY_RECIPE),
+                        expected_checksums={p.name: checksum(p) for p in pack.glob("*.safetensors")})
+    assert report["passed"]
+    assert len(report["stored_precision"]) == 25
+    assert set(report["samples"]) == set(report["stored_precision"])
+    assert report["samples"]["ngram_table"][0]["rows"] == [[0], [2], [3], [4]]
+    assert report["stored_precision"]["routed_experts"]["stored_precision"].startswith("Q8/g64")
+    assert report["stored_precision"]["mtp_fc"]["stored_precision"] == "BF16"
+
+
+@pytest.mark.parametrize("damage", ["checksum", "payload", "precision", "index"])
+def test_streaming_audit_refuses_corrupt_or_mislabelled_artifacts(tmp_path, damage):
+    from mtplx.commands.forge_qwen4_audit import audit_pack, checksum, inventory
+
+    source, pack = _audit_fixture(tmp_path)
+    hashes = {p.name: checksum(p) for p in pack.glob("*.safetensors")}
+    if damage == "checksum":
+        hashes["mtp.safetensors"] = "0" * 64
+    elif damage in ("payload", "precision"):
+        tensors, _ = inventory(pack)
+        key = "language_model.model.embed_tokens.weight"
+        info = tensors[key]
+        path = pack / info["file"]
+        if damage == "payload":
+            with path.open("r+b") as handle:
+                handle.seek(info["start"] + info["data_offsets"][0])
+                handle.write(b"\xff" * 4)
+        else:
+            content = path.read_bytes()
+            # Same item width, syntactically valid header, wrong precision.
+            path.write_bytes(content.replace(b'"U32"', b'"F32"', 1))
+    else:
+        index = json.loads((pack / "model.safetensors.index.json").read_text())
+        index["weight_map"].pop(next(iter(index["weight_map"])))
+        (pack / "model.safetensors.index.json").write_text(json.dumps(index))
+    with pytest.raises(Qwen4ForgeError, match="Checksum|parity|shape|precision|Unindexed"):
+        audit_pack(source, pack, named_recipe(QUALITY_RECIPE), expected_checksums=hashes)
+
+
+def test_streaming_build_never_loads_or_reuses_a_verified_stamp(tmp_path, monkeypatch):
+    import shutil
+    from mtplx.commands import forge, forge_qwen4_exp
+    from mtplx.cli import build_parser
+
+    source, fixture = _audit_fixture(tmp_path)
+    config = json.loads((source / "config.json").read_text())
+    (fixture / "config.json").write_text(json.dumps(config))
+    (source / "mtplx_runtime.json").write_text(json.dumps({"verified_on": {"model": "old"}}))
+    monkeypatch.setattr(forge, "probe_source", lambda _: {"forgeable": True, "source_format": "bf16_native", "recommended_backend": "qwen4_exp"})
+    monkeypatch.setattr(forge_qwen4_exp, "run_lane", lambda src, dst, **kw: shutil.copytree(fixture, dst))
+    monkeypatch.setattr(forge, "_ensure_vision_tower", lambda *a: None)
+    monkeypatch.setattr(forge, "_validate_vision_payload", lambda *a: None)
+    def forbidden(*a, **kw):
+        pytest.fail("Streaming verification tried to load/calibrate or stamp the model")
+    for name in ("_run_verify", "_calibrate_sidecar", "_calibrate_mtp_contract", "_stamp_runtime_metadata"):
+        monkeypatch.setattr(forge, name, forbidden)
+    common = ["forge", "build", "--repo", str(source), "--out", str(tmp_path / "runs"),
+              "--run-id", "audit", "--branded-name", "Quality", "--recipe", QUALITY_RECIPE]
+    parser = build_parser()
+    assert parser.parse_args(common).verification == "full-load"
+    args = parser.parse_args([*common, "--verification", "streaming"])
+    assert forge._cmd_build(args, model_root=tmp_path / "models") == 0
+    meta = json.loads((tmp_path / "models/Quality/mtplx_runtime.json").read_text())
+    assert meta["verification"]["status"] == "streaming-audited"
+    assert meta["verification"]["full_load_verified"] is False
+    assert "verified_on" not in meta and "speed_evidence" not in meta
+    assert meta["quality_pack"]["min_engine_version"] == "2.11.4"
+    assert meta["quality_pack"]["source"]["revision"].startswith("sha256:")
+    assert meta["forge_provenance"]["forge_recipe"]["name"] == QUALITY_RECIPE
+    # Moving to a bigger machine does not authorize stamping changed bytes.
+    from mtplx.commands.forge_qwen4_audit import verify_pack_checksums
+    built = tmp_path / "models/Quality"
+    verify_pack_checksums(built, meta["quality_pack"]["files"])
+    with (built / "mtp.safetensors").open("ab") as handle:
+        handle.write(b"corrupt")
+    verify_args = parser.parse_args(["forge", "verify", str(built), "--stamp",
+                                    "--out", str(tmp_path / "runs"), "--run-id", "promote"])
+    with pytest.raises(Qwen4ForgeError, match="Checksum mismatch before full-load"):
+        forge._cmd_verify(verify_args)
