@@ -1925,8 +1925,22 @@ def test_thinking_stream_splitter_keeps_tool_call_markup_out_of_reasoning():
     assert "<function=read>" in content
 
 
-def test_thinking_stream_splitter_keeps_orphan_parameter_markup_out_of_reasoning():
-    splitter = _ThinkingContentStreamSplitter(thinking_enabled=True)
+def test_thinking_stream_splitter_keeps_orphan_parameter_markup_in_reasoning():
+    """The tail of a call with no opener is not a call.
+
+    Until 2.11.4 any tool-control tag ended the thinking block, so this tail
+    was pushed to the content channel, where nothing could parse it either.
+    The same rule sent the rest of a think block to the visible chat whenever
+    the model quoted ``</parameter>`` from a pasted traceback. A thinking
+    block now ends at ``</think>`` or at the opener of a real call, and at
+    nothing else (tests/test_thinking_splitter_marker_quotes.py).
+    """
+    # Constructed the way the stream lane does: no end-of-turn recovery of
+    # unclosed reasoning, so the channels show what the splitter decided.
+    splitter = _ThinkingContentStreamSplitter(
+        thinking_enabled=True,
+        recover_unclosed_reasoning_as_content=False,
+    )
 
     chunks = []
     chunks.extend(splitter.feed("I should inspect the tool result.\n\n<par"))
@@ -1938,10 +1952,9 @@ def test_thinking_stream_splitter_keeps_orphan_parameter_markup_out_of_reasoning
     content = "".join(text for field, text in chunks if field == "content")
 
     assert "I should inspect the tool result." in reasoning
-    assert "<parameter=keys>" not in reasoning
-    assert "</parameter>" not in reasoning
-    assert "<parameter=keys>" in content
-    assert "</tool_call>" in content
+    assert "<parameter=keys>" in reasoning
+    assert "</tool_call>" in reasoning
+    assert content == ""
 
 
 def _no_tools_splitter():

@@ -6227,6 +6227,104 @@ def test_pi_tool_result_orphan_tool_tail_retries_without_stream_leak(monkeypatch
     assert final[-1]["mtplx_stats"]["raw_tool_markup_suppressed"] is True
 
 
+def test_reasoning_only_turn_that_quotes_tool_markup_is_still_repaired(monkeypatch):
+    """A quoted tool tag is prose, not an attempted call.
+
+    2.11.4 user-seat probe: with tools declared, the model quoted
+    ``</parameter>`` from a pasted traceback a few words into its thinking and
+    then ended the turn. The reasoning-only repair stood down because the raw
+    text contained a tool tag, and the client received an empty message.
+    """
+    state = _fake_streaming_session_state()
+    state.args.stream_interval = 1
+    state.args.stats_footer = False
+    client = TestClient(create_app(state))
+    texts = [
+        "The traceback shows a stray `</parameter>` on line 1785, then `</function>` and `",
+        "Line 1785 is leftover tool markup. Delete the last three lines of the file.",
+    ]
+    calls: list[str] = []
+
+    def fake_run_generation(_state, prompt_ids, **kwargs):
+        text = texts[len(calls)]
+        calls.append(text)
+        tokens = [ord(char) for char in text]
+        token_callback = kwargs.get("token_callback")
+        if token_callback is not None:
+            for token in tokens:
+                token_callback([token])
+        return {
+            "text": text,
+            "tokens": tokens,
+            "stats": {
+                **(kwargs.get("request_observability") or {}),
+                "generation_mode": kwargs["generation_mode"],
+                "mtp_depth": kwargs["depth"],
+                "completion_tokens": len(tokens),
+                "decode_tok_s": 24.0,
+            },
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": len(tokens),
+            "finish_reason": "stop",
+        }
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass", "x-mtplx-client": "pi"},
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Line 1785 of the file is literally </parameter>. What went wrong?",
+                },
+            ],
+            "tools": [_tool_schema()],
+            "tool_choice": "auto",
+            "stream": True,
+            "max_tokens": 128,
+            "enable_thinking": True,
+        },
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    payloads = _stream_payloads(body)
+    reasoning = "".join(
+        choice.get("delta", {}).get("reasoning_content", "")
+        for payload in payloads
+        for choice in payload.get("choices", [])
+    )
+    content = "".join(
+        choice.get("delta", {}).get("content", "")
+        for payload in payloads
+        for choice in payload.get("choices", [])
+    )
+    final = [payload for payload in payloads if payload["choices"][0]["finish_reason"]]
+
+    assert calls == texts
+    assert "`</parameter>`" in reasoning
+    assert "</parameter>" not in content
+    assert content.strip() == texts[1]
+    assert final[-1]["mtplx_stats"]["reasoning_completion_repair_attempted"] is True
+    assert final[-1]["mtplx_stats"]["reasoning_completion_repair_succeeded"] is True
+
+
+def test_attempted_tool_call_still_stands_the_reasoning_repair_down():
+    """The other half of the rule: a call that opens inside thinking, or any
+    tool markup after the thinking block, is an attempt and keeps belonging
+    to the tool-parse fallbacks."""
+    attempts = openai._generated_text_attempts_tool_call
+    common = dict(thinking_enabled=True, start_inside_thinking=True, tool_names=["read"])
+    assert not attempts("The error names `</parameter>` and `</tool_call>`.", **common)
+    assert not attempts("Notes.\n</parameter>\n</function>\n</tool_call>", **common)
+    assert attempts("Reading it.\n<tool_call>\n<function=read>\n<parameter=filePath>", **common)
+    assert attempts("Done thinking.</think>\n\n<function=read>\n<parameter=filePath>", **common)
+    assert attempts("Done thinking.</think>\n\nsrc/Game.ts\n</parameter>\n</function>", **common)
+
+
 def test_pi_tool_result_reasoning_only_final_turn_repairs_without_visible_leak(
     monkeypatch,
 ):

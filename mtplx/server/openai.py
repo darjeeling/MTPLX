@@ -7436,10 +7436,18 @@ def _canonical_tool_name_for_model_output(
     name: str,
     tools: list[dict[str, Any]],
 ) -> str | None:
+    return _canonical_tool_name_among(name, _tool_names(tools))
+
+
+def _canonical_tool_name_among(name: str, known: Sequence[str]) -> str | None:
+    """Map a tool name as the model spelled it onto a declared tool name.
+
+    Shared by the tool-call parser and the thinking splitter, so both agree
+    on what counts as a call to a declared tool.
+    """
     raw = str(name or "").strip()
     if not raw:
         return None
-    known = _tool_names(tools)
     if raw in known:
         return raw
     casefolded = {tool_name.casefold(): tool_name for tool_name in known}
@@ -27385,6 +27393,15 @@ class _ThinkingContentStreamSplitter:
         "</function>",
         "</tool_call>",
     )
+    # Inside a thinking block only these can begin a tool call. The closers
+    # and "<parameter=" appear in the middle of a call, never at its start,
+    # so a model that merely quotes one of them (a pasted traceback, a note
+    # about the protocol) must not leave the thinking state (2.11.3 leak:
+    # the rest of the think block streamed as visible chat text).
+    _THINKING_EXIT_OPENERS = ("<tool_call", "<function=")
+    # Lookahead bounds for deciding whether an opener is a real call.
+    _CALL_LOOKAHEAD_WHITESPACE_MAX = 64
+    _CALL_FUNCTION_NAME_MAX = 128
 
     def __init__(
         self,
@@ -27394,6 +27411,7 @@ class _ThinkingContentStreamSplitter:
         start_inside_thinking: bool = True,
         suppress_orphan_tool_markup: bool = False,
         trim_visible_content_edges: bool = False,
+        tool_names: Iterable[str] | None = None,
     ) -> None:
         # Live-SSE lanes only (stream/non-stream text parity): the
         # non-stream cleaner ends with a global strip(), so streamed
@@ -27424,6 +27442,18 @@ class _ThinkingContentStreamSplitter:
         # through unfiltered, mirroring _strip_orphan_tool_markup.
         self._orphan_fence_open = False
         self._inside_thinking = thinking_enabled and start_inside_thinking
+        # Tool names the request declared, as the stream lane knows them.
+        # None means the caller did not say (older construction sites and
+        # tests): a bare "<function=NAME>" is then judged by its shape alone.
+        self._tool_names: tuple[str, ...] | None = (
+            None if tool_names is None else tuple(tool_names)
+        )
+        # Where the current thinking block's text stands, so a tool-call
+        # opener is only honored where a call can really begin: at the start
+        # of a line, outside a code fence.
+        self._think_line_has_text = False
+        self._think_line_prefix = ""
+        self._think_fence_open = False
         self._inside_tool_call = False
         self._tool_call_tail = ""
         self._pending = ""
@@ -27729,6 +27759,107 @@ class _ThinkingContentStreamSplitter:
                 ]
             chunks.append((field, cleaned))
 
+    def _reset_thinking_line_state(self) -> None:
+        self._think_line_has_text = False
+        self._think_line_prefix = ""
+        self._think_fence_open = False
+
+    def _note_thinking_text(self, text: str) -> None:
+        """Track line starts and code fences across the thinking block."""
+        for char in text:
+            if char == "\n":
+                if self._think_line_prefix.startswith(("```", "~~~")):
+                    self._think_fence_open = not self._think_fence_open
+                self._think_line_has_text = False
+                self._think_line_prefix = ""
+                continue
+            if char in " \t\r" and not self._think_line_has_text:
+                continue
+            self._think_line_has_text = True
+            if len(self._think_line_prefix) < 3:
+                self._think_line_prefix += char
+
+    def _emit_thinking_text(self, chunks: list[tuple[str, str]], text: str) -> None:
+        self._note_thinking_text(text)
+        self._append_chunk(chunks, "reasoning_content", text)
+
+    @classmethod
+    def _thinking_exit_opener_index(cls, text: str) -> int:
+        text_lower = text.lower()
+        indexes = [
+            index
+            for marker in cls._THINKING_EXIT_OPENERS
+            if (index := text_lower.find(marker)) >= 0
+        ]
+        return min(indexes) if indexes else -1
+
+    @classmethod
+    def _thinking_exit_opener_has_partial_prefix(cls, text: str) -> bool:
+        text_lower = text.lower()
+        return any(
+            marker.startswith(text_lower) for marker in cls._THINKING_EXIT_OPENERS
+        )
+
+    def _thinking_exit_verdict(self, *, final: bool) -> str:
+        """Judge the tool-call opener at the head of ``_pending``.
+
+        Returns "call" (a real tool call begins here: leave thinking), "text"
+        (the model is writing about the markup: it stays reasoning) or "hold"
+        (not decidable until more text arrives).
+
+        A call can begin only where the chat template puts one: the request
+        declared tools, the opener starts a line, the reasoning is not inside
+        a code fence, and the opener is shaped like a call. "<tool_call>" must
+        be followed by a JSON object or a "<function=" element; a bare
+        "<function=NAME>" must name a declared tool when the names are known.
+        """
+        if self._suppress_orphan_tool_markup:
+            # No tools declared: nothing the model writes can be a call.
+            return "text"
+        if self._think_line_has_text or self._think_fence_open:
+            return "text"
+        pending = self._pending
+        lower = pending.lower()
+        undecided = "text" if final else "hold"
+        if lower.startswith("<function="):
+            rest = pending[len("<function=") :]
+            match = re.match(r"([^\s<>]+)\s*>", rest)
+            if match is None:
+                name_so_far = re.match(r"[^\s<>]*\s*", rest)
+                complete_prefix = name_so_far is not None and name_so_far.end() == len(
+                    rest
+                )
+                if complete_prefix and len(rest) <= self._CALL_FUNCTION_NAME_MAX:
+                    return undecided
+                return "text"
+            name = match.group(1).strip("\"'")
+            if len(name) > self._CALL_FUNCTION_NAME_MAX:
+                return "text"
+            if self._tool_names is None:
+                return "call"
+            if _canonical_tool_name_among(name, self._tool_names) is not None:
+                return "call"
+            return "text"
+        rest = pending[len("<tool_call") :]
+        if not rest:
+            return undecided
+        if rest[0] != ">":
+            return "text"
+        after = rest[1:]
+        body = after.lstrip(" \t\r\n")
+        if len(after) - len(body) > self._CALL_LOOKAHEAD_WHITESPACE_MAX:
+            return "text"
+        if not body:
+            return undecided
+        if body[0] == "{":
+            return "call"
+        body_lower = body.lower()
+        if body_lower.startswith("<function="):
+            return "call"
+        if "<function=".startswith(body_lower):
+            return undecided
+        return "text"
+
     @classmethod
     def _tool_control_marker_index(cls, text: str) -> int:
         text_lower = text.lower()
@@ -27981,30 +28112,47 @@ class _ThinkingContentStreamSplitter:
                 pending_lower = self._pending.lower()
                 close_match = QWEN_STYLE_REASONING_CLOSE_RE.search(self._pending)
                 close_index = -1 if close_match is None else close_match.start()
-                tool_control_index = self._tool_control_marker_index(self._pending)
-                if tool_control_index >= 0 and (
-                    close_index < 0 or tool_control_index < close_index
+                opener_index = self._thinking_exit_opener_index(self._pending)
+                if opener_index >= 0 and (
+                    close_index < 0 or opener_index < close_index
                 ):
-                    if tool_control_index > 0:
-                        self._append_chunk(
-                            chunks,
-                            "reasoning_content",
-                            self._pending[:tool_control_index],
+                    if opener_index > 0:
+                        # Text ahead of the opener is reasoning whatever the
+                        # opener turns out to be; emitting it first also
+                        # brings the line and fence state up to the opener.
+                        self._emit_thinking_text(
+                            chunks, self._pending[:opener_index]
                         )
-                        self._pending = self._pending[tool_control_index:]
+                        self._pending = self._pending[opener_index:]
+                        continue
+                    verdict = self._thinking_exit_verdict(final=final)
+                    if verdict == "hold":
+                        break
+                    if verdict == "text":
+                        # Quoted or discussed markup: it stays reasoning.
+                        # Consume the opener so the scan moves past it.
+                        opener = next(
+                            marker
+                            for marker in self._THINKING_EXIT_OPENERS
+                            if pending_lower.startswith(marker)
+                        )
+                        self._emit_thinking_text(
+                            chunks, self._pending[: len(opener)]
+                        )
+                        self._pending = self._pending[len(opener) :]
                         continue
                     self._inside_thinking = False
                     self._inside_tool_call = True
                     self._tool_call_tail = ""
-                    # Exited thinking on a tool-control marker, not an
-                    # explicit close: the reasoning accumulated so far was
-                    # auto-routed pre-tool-call preamble (F40).
+                    # Exited thinking on a real tool call, not an explicit
+                    # close: the reasoning accumulated so far was auto-routed
+                    # pre-tool-call preamble (F40).
                     self._tool_call_interrupted_thinking = True
                     continue
                 if (
                     not final
                     and pending_lower
-                    and self._tool_control_marker_has_partial_prefix(pending_lower)
+                    and self._thinking_exit_opener_has_partial_prefix(pending_lower)
                 ):
                     break
                 open_match_at_start = QWEN_STYLE_REASONING_OPEN_RE.match(self._pending)
@@ -28025,16 +28173,13 @@ class _ThinkingContentStreamSplitter:
                     )
                     if emit_len <= 0:
                         break
-                    self._append_chunk(
-                        chunks, "reasoning_content", self._pending[:emit_len]
-                    )
+                    self._emit_thinking_text(chunks, self._pending[:emit_len])
                     self._pending = self._pending[emit_len:]
                     break
-                self._append_chunk(
-                    chunks, "reasoning_content", self._pending[:close_index]
-                )
+                self._emit_thinking_text(chunks, self._pending[:close_index])
                 self._pending = self._pending[close_match.end() :].lstrip()
                 self._inside_thinking = False
+                self._reset_thinking_line_state()
                 # An explicit close ended this block: the accumulated
                 # reasoning is a real think block, never recovered as
                 # content at finish (F40).
@@ -28102,6 +28247,7 @@ class _ThinkingContentStreamSplitter:
             self._append_chunk(chunks, "content", self._pending[: open_match.start()])
             self._pending = self._pending[open_match.end() :]
             self._inside_thinking = True
+            self._reset_thinking_line_state()
             self._reentry_count += 1
             self._saw_explicit_reasoning_marker = True
         return chunks
@@ -28127,6 +28273,7 @@ def _stream_splitter_for_state(
     recover_unclosed_reasoning_as_content: bool = True,
     start_inside_thinking: bool = True,
     suppress_orphan_tool_markup: bool = False,
+    tool_names: Iterable[str] | None = None,
 ) -> Any:
     parser = _reasoning_parser_for_state(state)
     if parser == "gemma4":
@@ -28137,6 +28284,39 @@ def _stream_splitter_for_state(
         start_inside_thinking=start_inside_thinking,
         suppress_orphan_tool_markup=suppress_orphan_tool_markup,
         trim_visible_content_edges=True,
+        tool_names=tool_names,
+    )
+
+
+def _generated_text_attempts_tool_call(
+    text: str,
+    *,
+    thinking_enabled: bool,
+    start_inside_thinking: bool,
+    tool_names: Iterable[str] | None,
+) -> bool:
+    """True when generated text holds tool markup where a call can begin.
+
+    Asks the thinking splitter, so there is one rule: markup the model only
+    quotes inside its thinking is prose, while a call that opens in thinking
+    (without ``</think>``) or any tool markup after the thinking block is an
+    attempt at a call, well formed or not, and belongs to the tool-parse
+    fallbacks.
+    """
+    probe = _ThinkingContentStreamSplitter(
+        thinking_enabled=thinking_enabled,
+        recover_unclosed_reasoning_as_content=False,
+        start_inside_thinking=start_inside_thinking,
+        suppress_orphan_tool_markup=False,
+        tool_names=tool_names,
+    )
+    chunks = [*probe.feed(text), *probe.finish()]
+    if probe._tool_call_interrupted_thinking:
+        return True
+    content = "".join(part for field, part in chunks if field == "content").lower()
+    return any(
+        marker in content
+        for marker in _ThinkingContentStreamSplitter._TOOL_CONTROL_MARKERS
     )
 
 
@@ -33177,15 +33357,25 @@ def create_app(state: ServerState) -> FastAPI:
                     stream=True,
                 )
                 decoder = _IncrementalTokenDecoder(state.runtime.tokenizer)
-                splitter = _stream_splitter_for_state(
-                    state,
-                    thinking_enabled=thinking_enabled,
-                    recover_unclosed_reasoning_as_content=False,
-                    start_inside_thinking=not aime_visible_working,
-                    # No declared tools: raw tool-call XML must not stream
-                    # to the user as visible content (#160).
-                    suppress_orphan_tool_markup=not tools_active,
-                )
+
+                def new_stream_splitter() -> Any:
+                    return _stream_splitter_for_state(
+                        state,
+                        thinking_enabled=thinking_enabled,
+                        recover_unclosed_reasoning_as_content=False,
+                        start_inside_thinking=not aime_visible_working,
+                        # No declared tools: raw tool-call XML must not stream
+                        # to the user as visible content (#160).
+                        suppress_orphan_tool_markup=not tools_active,
+                        # Declared names let the splitter tell a real call
+                        # from tool markup the model is only quoting in its
+                        # thinking.
+                        tool_names=(
+                            _tool_names(tool_specs) if tools_active else None
+                        ),
+                    )
+
+                splitter = new_stream_splitter()
                 # Client stop sequences gate the visible content channel.
                 # Forced final-answer turns own their visibility through the
                 # buffered marker path, so they bypass stop monitoring (the
@@ -33452,7 +33642,10 @@ def create_app(state: ServerState) -> FastAPI:
                             ),
                         }
                     )
-                    queue.put(("reset_orphan_stream_guards", None))
+                    # The degenerate attempt is thrown away and the turn is
+                    # generated again from a prompt that re-opens <think>:
+                    # the stream starts over too (guards, decoder, splitter).
+                    queue.put(("discard_stream_attempt", None))
                     retry_generated = _run_generation_dispatched(
                         state,
                         repair_prompt_ids,
@@ -33571,17 +33764,19 @@ def create_app(state: ServerState) -> FastAPI:
                     )
                     if not first_text.strip():
                         return generated
-                    # Tool-control markup — even unclosed — belongs to the
-                    # established tool-parse fallback machinery
-                    # (orphan/unclosed_tool_call), not this repair. The
-                    # thinking splitter classifies markup after a pre-opened
-                    # <think> as reasoning, which would otherwise read here
-                    # as a reasoning-only turn.
-                    if any(
-                        marker in first_text
-                        for marker in (
-                            _ThinkingContentStreamSplitter._TOOL_CONTROL_MARKERS
-                        )
+                    # An attempted tool call, even an unclosed one, belongs
+                    # to the established tool-parse fallback machinery
+                    # (orphan/unclosed_tool_call), not this repair. Markup
+                    # the model only QUOTES in its thinking is not an
+                    # attempt: until 2.11.4 any tool tag in the raw text
+                    # stood this repair down, so a turn that quoted
+                    # "</parameter>" from a pasted traceback and then hit
+                    # end-of-turn inside thinking reached the client empty.
+                    if _generated_text_attempts_tool_call(
+                        first_text,
+                        thinking_enabled=thinking_enabled,
+                        start_inside_thinking=not aime_visible_working,
+                        tool_names=_tool_names(tool_specs) if tools_active else None,
                     ):
                         return generated
                     raw_reasoning_text, raw_content_text = _tool_extraction_text_parts(
@@ -36016,6 +36211,21 @@ def create_app(state: ServerState) -> FastAPI:
                                     yield mark_sse_sent(chunk)
                             break
                         elif kind == "reset_orphan_stream_guards":
+                            reset_orphan_stream_guards()
+                            continue
+                        elif kind == "discard_stream_attempt":
+                            # Whatever the decoder and the splitter still
+                            # hold belongs to an attempt the worker discarded
+                            # (empty, or nothing but dangling tool markup).
+                            # Carrying the splitter over used to work by
+                            # accident: the old rule had left thinking at the
+                            # dangling tag, so its held tail sat in the tool
+                            # channel. A splitter that stays in thinking
+                            # would flush that tail into the retry's
+                            # reasoning.
+                            pending_stream_tokens.clear()
+                            decoder = _IncrementalTokenDecoder(state.runtime.tokenizer)
+                            splitter = new_stream_splitter()
                             reset_orphan_stream_guards()
                             continue
                         elif kind == "close_unclosed_reasoning_for_repair":
