@@ -54,26 +54,40 @@ mtplx start
 
 or `python3 -m pip install mtplx` if you prefer pip. All releases are listed at [mtplx.com/releases](https://mtplx.com/releases/).
 
-Requirements: Apple Silicon (M1 or newer), macOS 14+. 16 GB of memory runs the
-4B and 9B models comfortably. Qwen 3.8 Optimized Speed is recommended on Macs
-with 32 GB or more; on M1 and M2 the app and CLI pick its FP16 build (same
-weights, native precision for those chips) automatically. Both check your Mac
-before recommending anything.
+Requirements: Apple Silicon (M1 or newer), macOS 14+. The app and CLI use
+one recommendation policy on modern chips: 4B Speed below 16 GB, Bonsai 2
+from 16 to under 32 GB, Qwen 3.8 27B Optimized Speed from 32 to under 256 GB,
+and Flash-Next Optimized Quality from 256 GB. Flash-Next options appear from
+96 GB when their catalog memory requirement fits. M1/M2 retain their FP16
+recommendations. Installed models and explicit selections remain available.
+
+Bonsai 2 and Flash-Next Optimized Quality require MTPLX 2.11.4. Their catalog
+figures are provisional pending the final artifact and memory audit; this
+recommendation policy does not establish runtime qualification on each Mac.
 
 ## Qwen 3.8 Flash Next on a Mac
 
-Qwen 3.8 Flash Next is Qwen's 125B-A6B preview of the Qwen4 architecture: a hybrid GatedDeltaNet mixture of experts with Qwen Sparse Attention and a 51B-parameter n-gram table. MTPLX 2.10.0 was the first Apple Silicon backend for the family, and it runs the model's own MTP head as an exact speculative decoder. Two packs, both for Macs with 96 GB of unified memory or more:
+Qwen 3.8 Flash Next is Qwen's 125B-A6B preview of the Qwen4 architecture: a hybrid GatedDeltaNet mixture of experts with Qwen Sparse Attention and a 51B-parameter n-gram table. MTPLX 2.10.0 was the first Apple Silicon backend for the family, and it runs the model's own MTP head as an exact speculative decoder. The Speed packs are offered from 96 GB of unified memory. Version 2.11.4 adds Optimized Quality, which leads the recommendations from 256 GB:
 
-- `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed`: dynamic 4-bit with the sparse-attention projections at 8-bit. The recommended build. 115.1 GB download including the 32 GB n-gram table, about 83 GB resident.
+- `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed`: dynamic 4-bit with the sparse-attention projections at 8-bit. 115.1 GB download including the 32 GB n-gram table, about 83 GB resident.
 - `Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed`: flat 4-bit, the quickest build. 106.3 GB download, about 74 GB resident.
+- `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality`: 8-bit group-64 body and MTP head, BF16 structural tensors, and a 4-bit group-32 n-gram table. Download and 128K planner figures are calculated until the artifact is measured; see the [catalog figures](mtplx/model_catalog.py).
 
-The n-gram table streams from SSD by default, so the weights stay resident and the table does not have to. Context window 262,144 tokens; 261,120-token prompts decode on 2.11.3. Image input works. In the app, pick "Qwen 3.8 Flash-Next Optimized Speed"; from the terminal:
+The n-gram table can stream from SSD; its resident-versus-streamed policy depends on the machine. Context window 262,144 tokens; 261,120-token prompts decode on 2.11.3. Image input works. In the app, pick "Qwen 3.8 Flash-Next Optimized Speed"; from the terminal:
 
 ```bash
 mtplx serve --model Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed
 ```
 
 Then point OpenCode, Pi, Hermes, Claude Code, Cline, Cursor or anything that speaks the OpenAI or Anthropic API at `http://127.0.0.1:8000`. The guide with every measured number and its conditions: [mtplx.com/models/qwen3.8-flash-next](https://mtplx.com/models/qwen3.8-flash-next/).
+
+## Bonsai 2 on a Mac
+
+`Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` is a compact ternary 27B
+model from Prism ML with vision and MTP. It leads the modern-chip 16 to under
+32 GB tier. The old `Bonsai-3.8-27B-MTPLX-Optimized-Speed` folder and
+`mtplx-bonsai-38-27b-optimized-speed` served ID resolve to the same entry;
+clients use `mtplx-bonsai-2-27b-optimized-speed`.
 
 ## Qwen 3.8 27B on a Mac
 
@@ -87,12 +101,13 @@ The guide: [mtplx.com/models/qwen3.8-27b](https://mtplx.com/models/qwen3.8-27b/)
 
 ## Models and recommended settings
 
-Every model here is an official MTPLX pack on Hugging Face under [Youssofal](https://huggingface.co/Youssofal). "Fits" is the memory the pack actually peaks at while serving, next to the smallest Mac the app and CLI will offer it on. The preset column is what MTPLX resolves by itself, so this table is what you get by doing nothing.
+The catalog lists MTPLX packs under [Youssofal](https://huggingface.co/Youssofal). For measured packs, "Fits" is the catalog peak while serving, next to the smallest Mac the app and CLI will offer it on. The preset column is what MTPLX resolves by itself, so this table is what you get by doing nothing.
 
 | Model (`Youssofal/...`) | Fits | What it is for | Preset |
 |---|---|---|---|
 | `Qwen3.5-4B-MTPLX-Optimized-Speed` | 8 GB and up, peaks at 2.9 GiB | 4-bit. The fastest fit for smaller Macs. | Sustained, depth 3 |
 | `Qwen3.5-4B-MTPLX-Optimized-Quality` | 8 GB and up, peaks at 4.8 GiB | 8-bit. The highest-fidelity 4B. | Sustained, depth 3 |
+| `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` | 16 GB tier; [provisional catalog figures](mtplx/model_catalog.py) | Prism ML ternary 27B with vision and MTP. | Artifact/runtime policy; qualification pending |
 | `Qwen3.5-9B-MTPLX-Optimized-Speed` | 16 GB and up, peaks at 10.0 GiB | 6-bit. The strong small-Mac speed pick. | Turbo. Tuning this one on a 16 GB M4 Mac mini lands on depth 1 |
 | `Qwen3.8-27B-MTPLX-Bare-Speed` | 32 GB and up, peaks at 20.0 GiB | Quickest burst chat speeds. Lower quality and slower on long coding tasks. | Turbo, depth 3 |
 | `Qwen3.8-27B-MTPLX-Optimized-Speed` | 32 GB and up, peaks at 25.0 GiB | 4-bit dynamic quant. Great coding speeds and good quality. The recommended coding model. | Turbo, depth 3 |
@@ -101,10 +116,11 @@ Every model here is an official MTPLX pack on Hugging Face under [Youssofal](htt
 | `Qwen3.8-27B-MTPLX-Optimized-Speed-FP16` | 32 GB and up, peaks at 25.0 GiB | The recommended coding model for M1 and M2. | Turbo, depth 3 |
 | `Qwen3.8-27B-MTPLX-Optimized-Quality-FP16` | 36 GB and up, peaks at 33.0 GiB | The Optimized Quality pack for M1 and M2. | Turbo, depth 3 |
 | `Qwen3.8-Flash-Next-MTPLX-Optimized-Speed` | 96 GB and up, peaks at 87 GiB resident | The 125B MoE, dynamic 4-bit with 8-bit attention. Its 32 GB n-gram table streams from SSD instead of taking RAM. 125.8 tok/s on an OpenCode request on an M5 Max. | Turbo, depth 3. This family accepts up to depth 5 |
+| `Qwen3.8-Flash-Next-MTPLX-Optimized-Quality` | First choice from 256 GB; [provisional catalog figures](mtplx/model_catalog.py) | 8-bit body and MTP head, BF16 structural tensors, 4-bit n-gram table. | Artifact/runtime policy; qualification pending |
 | `Gemma4-MTPLX-Optimized-Speed` | 32 GB and up, peaks at 18.0 GiB | High quality, moderate speeds. Runs as an assistant pair, so the tuned control is the draft block size rather than depth. | Sustained |
 | **What the author runs** | M5 Max, 128 GB | Flash-Next Optimized Speed, for everything | Turbo, depth 3 |
 
-Depth 3 is the launch default. `mtplx tune --retune` measures autoregressive decoding against each depth on your own Mac and saves a shallower one when a shallower one wins, which is why the 9B row above is depth 1 on a Mac mini. M1 and M2 Macs are offered the FP16 builds and every other Mac the bf16 parents, so you never pick the precision by hand. The "fits" numbers are peak serving memory, not download size, and they are the same numbers MTPLX checks your Mac against before it offers you anything.
+Depth 3 is the launch default. `mtplx tune --retune` measures autoregressive decoding against each depth on your own Mac and saves a shallower one when a shallower one wins, which is why the 9B row above is depth 1 on a Mac mini. M1 and M2 Macs are offered the FP16 builds and every other Mac the bf16 parents, so you never pick the precision by hand. The measured "fits" numbers are peak serving memory, not download size, and they are the same numbers MTPLX checks your Mac against before it offers you anything.
 
 Qwen 3.6 is still published and still supported: 27B in speed and quality builds, and the 35B MoE in speed and balance builds. The 3.8 packs above replaced it as the default recommendation, and the app and CLI still list the 3.6 packs below them.
 
