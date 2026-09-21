@@ -317,8 +317,11 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Bonsai 2 27B Optimized Speed",
         detail="Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
         hf_model_id="Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
-        # Conservative GiB reading of an unverified measurement unit; a measured memory table will replace it.
-        size_bytes=8_200_000_000, peak_memory_gib=10.32,
+        # size_bytes: exact byte sum of the pack built on 2026-09-18 (8.24 GiB); the
+        # published repo's sum replaces it after the upload. peak_memory_gib: the
+        # conservative reading of an earlier measurement; the measured memory table
+        # (scripts/bonsai_memory_table.py) replaces it.
+        size_bytes=8_847_819_423, peak_memory_gib=10.32,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
             "mtplx-bonsai-2-27b-optimized-speed",
