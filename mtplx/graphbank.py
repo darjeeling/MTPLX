@@ -716,6 +716,33 @@ class TensorOffsetKVCache:
         return entry
 
 
+def as_rope_delta(value: Any) -> mx.array | None:
+    """The rotary delta of an image request as one int32 value, or None.
+
+    The delta is a graph input of the compiled verify step and the position
+    operand of the two rope kernels, whose contract is one int32 value
+    (``kernels/qwen4_m4_rope._as_i32_scalar``). Anything else is refused
+    here, where the request is admitted, instead of inside a trace. A host
+    integer becomes a one-element array; an array is checked, never read, so
+    a tracer passes through.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, mx.array):
+        if value.dtype != mx.int32 or int(value.size) != 1:
+            raise TypeError(
+                "rope_delta must be one int32 value; got "
+                f"dtype={value.dtype}, shape={tuple(value.shape)}"
+            )
+        return value.reshape((1,))
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            f"rope_delta must be an int or a one-element int32 array; got {value!r}"
+        )
+    return mx.array([int(value)], dtype=mx.int32)
+
+
 class TensorOffsetQSACache:
     """Fixed-capacity Qwen4 QSA state for compiled target verification.
 
@@ -724,6 +751,20 @@ class TensorOffsetQSACache:
     length is always ``offset // ratio`` and therefore does not need a second
     mutable offset.  All buffers are granted once when the verifier bank is
     constructed; the enabled path only performs fixed-shape slice updates.
+
+    The bank also owns its ROTARY ORIGIN, next to the logical offset. A text
+    request rotates row ``i`` of a forward at ``offset + i``. An image request
+    rotates it at ``offset + rope_delta + i``: past the last image every
+    position of the request's table is the sequence index plus one constant
+    (``mtplx/vision/mrope.py``), so the whole table collapses to that delta
+    for every row a decode forward can write. ``rope_delta`` shifts rotary
+    positions ONLY. ``offset`` keeps driving the masks, the block selection,
+    the tail start and every slice write, which are KV indices.
+
+    Because the origin rides the cache, the fixed lane never reads the
+    request context (``attention_context.vision_rope_state``): a table or a
+    delta read inside a verify trace would be baked into a graph that every
+    request of the process replays.
     """
 
     fixed_capacity = True
@@ -741,6 +782,7 @@ class TensorOffsetQSACache:
         rows_gather_enabled: bool = False,
         rows_gather_min_context: int = 0,
         fused_rows_gather_kv_m4: bool = False,
+        rope_delta: mx.array | int | None = None,
     ) -> None:
         self.kv = kv
         self.raw_keys = raw_keys
@@ -752,6 +794,30 @@ class TensorOffsetQSACache:
         self.rows_gather_enabled = bool(rows_gather_enabled)
         self.rows_gather_min_context = max(0, int(rows_gather_min_context))
         self.fused_rows_gather_kv_m4 = bool(fused_rows_gather_kv_m4)
+        self.rope_delta = rope_delta
+
+    @property
+    def rope_delta(self) -> mx.array | None:
+        """One int32 value for an image request, None for a text request."""
+
+        return self._rope_delta
+
+    @rope_delta.setter
+    def rope_delta(self, value: mx.array | int | None) -> None:
+        self._rope_delta = as_rope_delta(value)
+
+    @property
+    def rope_offset(self):
+        """Rotary position of the next row this bank writes.
+
+        For a text request this IS ``offset``, the same array object, so the
+        text verify trace holds exactly the nodes it held before image
+        requests could reach this lane.
+        """
+
+        if self._rope_delta is None:
+            return self.kv.offset
+        return self.kv.offset + self._rope_delta
 
     @staticmethod
     def _bank_capacity(
@@ -981,6 +1047,14 @@ class TensorOffsetQSACache:
         return int(self.kv.nbytes + self.raw_keys.nbytes + self.pooled.nbytes)
 
     def demote(self):
+        """Hand the state back as a stock ``QSACache``.
+
+        The rotary delta does not travel: keys and pooled keys are stored
+        already rotated, and the delta is a function of the request's own
+        ids and image grids, recomputed by the next request. Nothing of it
+        reaches the session bank, RAM or SSD.
+        """
+
         from .models.qwen4_exp import QSACache
 
         offset = self.kv.size()
@@ -1878,8 +1952,19 @@ class CompiledVerifyBank:
         parity: bool = False,
         parity2: bool = False,
         restored_tokens: int = 0,
+        rope_delta: mx.array | int | None = None,
     ) -> None:
         self.runtime = runtime
+        # The request's rotary delta (an image request on the QSA family) or
+        # None (every text request). The bank is built per request, so this is
+        # request state: every fixed QSA bank it promotes carries the delta
+        # (``TensorOffsetQSACache.rope_delta``) and every verify step it
+        # compiles for this request takes it as a graph INPUT, never as a
+        # captured constant: two image requests with different deltas replay
+        # one trace.
+        self._rope_delta: mx.array | None = None
+        self._rope_delta_value: int | None = None
+        self._adopt_rope_delta(rope_delta)
         if max_verify_len is None:
             raw = os.environ.get("MTPLX_COMPILED_VERIFY_MAX_LEN", "").strip()
             max_verify_len = int(raw) if raw else 6
@@ -1980,7 +2065,7 @@ class CompiledVerifyBank:
             raise TypeError(
                 "compiled verify auxiliary preparation requires a compiled_aux input"
             )
-        self._compiled: dict[tuple[int, str, int], Any] = {}
+        self._compiled: dict[tuple[int, str, int, int], Any] = {}
         self._spec: list[tuple[int, str, int]] | None = None
         self._shadow: list[Any] | None = None
         self._shadow_signature: tuple[Any, ...] | None = None
@@ -2053,19 +2138,79 @@ class CompiledVerifyBank:
             return compiled_route
         return "not_run"
 
+    def _adopt_rope_delta(self, value: mx.array | int | None) -> None:
+        """Bind this request's rotary delta once; a second value must agree."""
+
+        delta = as_rope_delta(value)
+        if delta is None:
+            return
+        number = int(value) if isinstance(value, int) else int(delta.item())
+        if self._rope_delta is not None:
+            if number != self._rope_delta_value:
+                raise ValueError(
+                    "this verify bank already carries rope_delta="
+                    f"{self._rope_delta_value}; a request has one delta, got {number}"
+                )
+            return
+        mx.eval(delta)
+        self._rope_delta = delta
+        self._rope_delta_value = number
+
+    def _stamp_rope_delta(self, cache: Any) -> None:
+        """Every fixed QSA bank of this request owns the request's rotary origin."""
+
+        delta = self._rope_delta
+        for entry in cache or []:
+            if isinstance(entry, TensorOffsetQSACache):
+                entry.rope_delta = delta
+
+    def _verify_key(
+        self, length: int, hidden_variant: str | None, bucket: int
+    ) -> tuple[int, str, int, int]:
+        """Per-bank key of one compiled verify step.
+
+        The last element says whether the step takes the rotary delta as an
+        input. A text request and an image request never share a trace: the
+        text trace has no such input and stays the graph it always was.
+        """
+
+        return (
+            int(length),
+            str(hidden_variant or ""),
+            int(bucket),
+            int(self._rope_delta is not None),
+        )
+
+    def _rope_args(self) -> tuple[mx.array, ...]:
+        """The delta as a positional graph input, or nothing for text."""
+
+        return () if self._rope_delta is None else (self._rope_delta,)
+
     def install_fixed_m4(
         self,
         cache: Any,
         *,
         prompt_ids,
         hidden_variant: str | None,
+        rope_delta: mx.array | int | None = None,
     ) -> None:
-        """Install the exact Qwen4 physical-M4 replay once after prefill."""
+        """Install the exact Qwen4 physical-M4 replay once after prefill.
+
+        ``rope_delta`` admits an image request: every QSA bank of the cache
+        rotates at ``offset + rope_delta`` and the replayed graph takes the
+        delta as an input. None is a text request and installs the text
+        trace.
+        """
 
         if not self.strict_no_fallback:
             raise ValueError("fixed-M4 installation requires the Qwen4 runtime route")
-        if self.parity or self.parity2:
-            raise ValueError("fixed-M4 direct replay is disabled in parity modes")
+        if self.parity:
+            raise ValueError(
+                "fixed-M4 direct replay has no eager-authoritative parity mode; "
+                "MTPLX_COMPILED_VERIFY=parity2 compares every round against the "
+                "eager verifier"
+            )
+        self._adopt_rope_delta(rope_delta)
 
         class _M4Shape:
             shape = (1, 4)
@@ -2094,7 +2239,7 @@ class CompiledVerifyBank:
         if not qsa_entries:
             raise RuntimeError("qwen4 fixed-M4 installation found no QSA state")
         route_key = int(all(entry.fixed_rows_gather for entry in qsa_entries))
-        key = (4, str(hidden_variant or ""), route_key)
+        key = self._verify_key(4, hidden_variant, route_key)
         fn = self._compiled.get(key)
         if fn is None:
             fn = self._shared_or_new_verify_step(key, 4, hidden_variant)
@@ -2172,10 +2317,20 @@ class CompiledVerifyBank:
                 if pending_route_thresholds
                 else None
             ),
+            # parity2 reads the pre-round leaves after the replay, so nothing
+            # may be donated into it.
             "donate": (
                 _compiled_verify_donation_enabled()
                 and boundary in ("both", "post")
+                and not self.parity2
             ),
+            # The replay's positional inputs after the auxiliary: the delta
+            # of an image request, nothing for text. Built once here so the
+            # round itself assembles no tuple and the text call is the call
+            # it always was.
+            "rope_args": self._rope_args(),
+            "rope_delta": self._rope_delta_value,
+            "parity2": bool(self.parity2),
         }
         # Engagement receipt (counters law): the request report carries the
         # bound auxiliary route (to_dict -> compiled_verify.fixed_m4) and the
@@ -2188,7 +2343,9 @@ class CompiledVerifyBank:
             print(
                 "[qwen4-fixed-M4-verify] replay installed: "
                 f"aux={aux_route} inputs={aux_inputs} boundary={boundary} "
-                f"donate={self._fixed_m4_dispatch['donate']} kv_gather={kv_gather}",
+                f"donate={self._fixed_m4_dispatch['donate']} kv_gather={kv_gather} "
+                "positions="
+                + ("text" if self._rope_delta is None else "vision_delta"),
                 flush=True,
             )
 
@@ -2303,7 +2460,7 @@ class CompiledVerifyBank:
         self._shadow_signature = None
         self._ensure_shadow(cache)
         route_key = int(all(entry.fixed_rows_gather for entry in qsa_entries))
-        key = (4, str(dispatch["hidden_variant"] or ""), route_key)
+        key = self._verify_key(4, dispatch["hidden_variant"], route_key)
         fn = self._compiled.get(key)
         if fn is None:
             fn = self._shared_or_new_verify_step(
@@ -2388,7 +2545,11 @@ class CompiledVerifyBank:
         if boundary in ("both", "pre"):
             mx.async_eval(compiled_aux, *state_in)
         t2 = clock()
-        outputs = dispatch["fn"](input_ids, compiled_aux, *state_in)
+        # Argument order is the trace's contract (``_make_verify_step``):
+        # ids, the auxiliary, the rotary delta of an image request, the state.
+        outputs = dispatch["fn"](
+            input_ids, compiled_aux, *dispatch["rope_args"], *state_in
+        )
         t3 = clock()
         host_split["aux"] += t1 - t0
         host_split["input_eval"] += t2 - t1
@@ -2398,6 +2559,21 @@ class CompiledVerifyBank:
         logits, hidden = outputs[:2]
         captures_flat = outputs[2:capture_end]
         state_out = outputs[capture_end:]
+
+        if dispatch.get("parity2"):
+            # The real entries still hold the pre-round leaves here: parity2
+            # installs without donation and the commit below has not run.
+            self._fixed_m4_parity2_round(
+                dispatch,
+                cache,
+                input_ids,
+                compiled_aux=compiled_aux,
+                candidate_logits=logits,
+                candidate_hidden=hidden,
+                candidate_captures=self._named_fixed_m4_captures(captures_flat),
+                candidate_state=list(state_out),
+                committed_count=committed_count,
+            )
 
         if not donate and boundary in ("both", "post"):
             mx.async_eval(*outputs)
@@ -2725,6 +2901,313 @@ class CompiledVerifyBank:
             hidden_variant=hidden_variant,
         )
 
+    # -- parity2 on the installed fixed-M4 lane ---------------------------------
+    #
+    # MTPLX_COMPILED_VERIFY=parity2 on this lane: the installed bank stays
+    # authoritative (the stream advances on its state) and every forward that
+    # runs over it, the compiled width-4 replay and the eager short windows
+    # alike, is replayed once more the way the EAGER VERIFIER would have run
+    # it: on a stock-cache copy of the pre-round state, in the request context
+    # the caller has open. Logits, hidden rows, captured rows and every state
+    # leaf are compared on the device; only scalars cross to the host unless
+    # a round diverges. A measuring instrument: it copies the whole QSA state
+    # every round and blocks on it, so it never runs in a product lane.
+    #
+    # The reference takes its positions from the CALLER'S scope (the
+    # generation loop opens it from the request's own splice), never from the
+    # delta this bank was handed. The two are independent on purpose: a wrong
+    # delta at the admission, or one baked into a trace, shows up as a
+    # divergence instead of being mirrored by its own reference.
+
+    def _named_fixed_m4_captures(self, captures_flat) -> dict[str, Any]:
+        named: dict[str, Any] = {}
+        pos = 0
+        for idx, names in self._extra_capture_layout:
+            for key_name in names:
+                named[f"capture[{idx}].{key_name}"] = captures_flat[pos]
+                pos += 1
+        return named
+
+    def _named_eager_captures(self, captures: Any) -> dict[str, Any]:
+        named: dict[str, Any] = {}
+        if not isinstance(captures, dict):
+            return named
+        for idx, names in self._extra_capture_layout:
+            layer_capture = captures.get(idx) or {}
+            for key_name in names:
+                named[f"capture[{idx}].{key_name}"] = layer_capture.get(key_name)
+        return named
+
+    def _fixed_m4_state_leaves(self) -> list[Any]:
+        """The installed plan's live leaves, in replay output order."""
+
+        leaves: list[Any] = []
+        for kind, entry, n_leaves in self._fixed_m4_dispatch["state_plan"]:
+            if kind == VERIFY_SPEC_KIND_QSA:
+                leaves.extend(
+                    (
+                        entry.kv.cache[0],
+                        entry.kv.cache[1],
+                        entry.kv.cache[2],
+                        entry.raw_keys,
+                        entry.pooled,
+                    )
+                )
+            else:
+                leaves.extend(entry.cache[:n_leaves])
+        return leaves
+
+    def _fixed_m4_parity2_clone(self, cache: Any) -> list[Any]:
+        """The pre-round state as the eager verifier would hold it.
+
+        Leaf copies of every entry (``_parity2_clone_cache``), with each fixed
+        QSA bank demoted to the stock ``QSACache``: a host offset, no rotary
+        delta, the stock gather. Materialized at once, because the forward
+        that follows may write the source buffers in place.
+        """
+
+        clone = self._parity2_clone_cache(cache, 0)
+        for idx, entry in enumerate(clone):
+            if isinstance(entry, TensorOffsetQSACache):
+                clone[idx] = entry.demote()
+        leaves: list[mx.array] = []
+        for entry in clone:
+            if entry is None:
+                continue
+            kv = getattr(entry, "kv", None)
+            if kv is not None:
+                leaves.extend(
+                    leaf
+                    for leaf in (kv.keys, kv.values, entry.raw_keys, entry.pooled)
+                    if isinstance(leaf, mx.array)
+                )
+            else:
+                leaves.extend(
+                    leaf for leaf in entry.cache if isinstance(leaf, mx.array)
+                )
+        if leaves:
+            mx.eval(*leaves)
+        return clone
+
+    def _fixed_m4_parity2_round(self, dispatch, cache, input_ids, **candidate) -> None:
+        self._fixed_m4_parity2_compare(
+            dispatch, self._fixed_m4_parity2_clone(cache), input_ids, **candidate
+        )
+
+    def _fixed_m4_parity2_compare(
+        self,
+        dispatch,
+        clone: list[Any],
+        input_ids,
+        *,
+        compiled_aux,
+        candidate_logits,
+        candidate_hidden,
+        candidate_captures: dict[str, Any],
+        candidate_state: list[Any],
+        committed_count: int | None,
+    ) -> None:
+        from .attention_context import vision_rope_state
+
+        rope_delta = dispatch["rope_delta"]
+        # Read here, on the host, in the instrument: the fixed lane itself
+        # never reads the request context.
+        reference_scope = vision_rope_state()
+        with attention_phase("decode_verify"):
+            eager_logits, eager_hidden, eager_captures = self._runtime_forward(
+                input_ids,
+                cache=clone,
+                return_hidden=True,
+                hidden_variant=dispatch["hidden_variant"],
+                compiled_aux=compiled_aux,
+            )
+
+        # (name, reference leaf, candidate leaf); the two lanes may hold
+        # different capacities, the state they share is the common prefix.
+        pairs: list[tuple[str, Any, Any]] = [
+            ("logits", eager_logits, candidate_logits),
+            ("hidden", eager_hidden, candidate_hidden),
+        ]
+        reference_captures = self._named_eager_captures(eager_captures)
+        for name in sorted(set(reference_captures) | set(candidate_captures)):
+            pairs.append(
+                (name, reference_captures.get(name), candidate_captures.get(name))
+            )
+        offsets: list[tuple[str, int, Any]] = []
+        pos = 0
+        for idx, kind, n_leaves in self._spec or []:
+            entry = clone[idx]
+            prefix = f"state[{idx}:{kind}]"
+            if kind == VERIFY_SPEC_KIND_QSA:
+                reference = (
+                    entry.kv.keys, entry.kv.values, None, entry.raw_keys, entry.pooled
+                )
+                offsets.append(
+                    (f"{prefix}.2", int(entry.kv.offset), candidate_state[pos + 2])
+                )
+                for leaf_idx, axis in ((0, 2), (1, 2), (3, 1), (4, 1)):
+                    ref = reference[leaf_idx]
+                    cand = candidate_state[pos + leaf_idx]
+                    rows = min(int(ref.shape[axis]), int(cand.shape[axis]))
+                    index = [slice(None)] * ref.ndim
+                    index[axis] = slice(0, rows)
+                    pairs.append(
+                        (f"{prefix}.{leaf_idx}", ref[tuple(index)], cand[tuple(index)])
+                    )
+            else:
+                for leaf_idx in range(n_leaves):
+                    pairs.append(
+                        (
+                            f"{prefix}.{leaf_idx}",
+                            entry.cache[leaf_idx],
+                            candidate_state[pos + leaf_idx],
+                        )
+                    )
+            pos += n_leaves
+
+        comparable = [
+            (name, ref, cand)
+            for name, ref, cand in pairs
+            if isinstance(ref, mx.array)
+            and isinstance(cand, mx.array)
+            and ref.shape == cand.shape
+            and ref.dtype == cand.dtype
+        ]
+        flags = [mx.array_equal(ref, cand) for _name, ref, cand in comparable]
+        ref32 = eager_logits.astype(mx.float32)
+        cand32 = candidate_logits.astype(mx.float32)
+        log_p = ref32 - mx.logsumexp(ref32, axis=-1, keepdims=True)
+        log_q = cand32 - mx.logsumexp(cand32, axis=-1, keepdims=True)
+        max_kl = mx.max(mx.sum(mx.exp(log_p) * (log_p - log_q), axis=-1))
+        logits_diff = mx.max(mx.abs(ref32 - cand32))
+        hidden_diff = mx.max(
+            mx.abs(
+                eager_hidden.astype(mx.float32) - candidate_hidden.astype(mx.float32)
+            )
+        )
+        offset_values = [value for _name, _expected, value in offsets]
+        mx.eval(flags, max_kl, logits_diff, hidden_diff, offset_values)
+
+        mismatched: list[tuple[str, Any, Any]] = [
+            (name, ref, cand)
+            for name, ref, cand in pairs
+            if not (
+                isinstance(ref, mx.array)
+                and isinstance(cand, mx.array)
+                and ref.shape == cand.shape
+                and ref.dtype == cand.dtype
+            )
+            and not (ref is None and cand is None)
+        ]
+        mismatched.extend(
+            pair for pair, flag in zip(comparable, flags) if not bool(flag.item())
+        )
+        mismatched.extend(
+            (name, expected, int(value.item()))
+            for name, expected, value in offsets
+            if int(value.item()) != expected
+        )
+
+        width = str(_decode_length(input_ids))
+        record = self.stats.setdefault(
+            "fixed_m4_parity2",
+            {
+                "positions": "text" if rope_delta is None else "vision_delta",
+                "rope_delta": rope_delta,
+                # Rounds of an image request whose caller had no request scope
+                # open: their reference ran at text positions, so they read
+                # as divergent and say nothing about the lane.
+                "reference_scope_missing_rounds": 0,
+                "rounds": 0,
+                "rounds_by_width": {},
+                "divergent_rounds": 0,
+                "divergent_rounds_by_width": {},
+                "compared_leaves_per_round": 0,
+                "logits_max_abs_diff": 0.0,
+                "logits_max_kl": 0.0,
+                "hidden_max_abs_diff": 0.0,
+                "state_max_abs_diff": 0.0,
+                "capture_max_abs_diff": 0.0,
+                "first_divergence": None,
+            },
+        )
+        record["rounds"] += 1
+        record["rounds_by_width"][width] = record["rounds_by_width"].get(width, 0) + 1
+        if rope_delta is not None and reference_scope is None:
+            record["reference_scope_missing_rounds"] += 1
+        record["compared_leaves_per_round"] = len(pairs) + len(offsets)
+        record["logits_max_abs_diff"] = max(
+            record["logits_max_abs_diff"], float(logits_diff.item())
+        )
+        record["logits_max_kl"] = max(record["logits_max_kl"], float(max_kl.item()))
+        record["hidden_max_abs_diff"] = max(
+            record["hidden_max_abs_diff"], float(hidden_diff.item())
+        )
+        self.stats["parity2_calls"] += 1
+        if not mismatched:
+            return
+
+        record["divergent_rounds"] += 1
+        record["divergent_rounds_by_width"][width] = (
+            record["divergent_rounds_by_width"].get(width, 0) + 1
+        )
+        self.stats["parity2_divergent_calls"] += 1
+        # Size of every divergence, still on the device: one scalar per leaf.
+        sized = [
+            (name, mx.max(mx.abs(ref.astype(mx.float32) - cand.astype(mx.float32))))
+            for name, ref, cand in mismatched
+            if isinstance(ref, mx.array)
+            and isinstance(cand, mx.array)
+            and ref.shape == cand.shape
+        ]
+        mx.eval([diff for _name, diff in sized])
+        for name, diff in sized:
+            family = _artifact_kind(name)
+            if family in ("state", "capture"):
+                key = f"{family}_max_abs_diff"
+                record[key] = max(record[key], float(diff.item()))
+        if record["first_divergence"] is None:
+            # The readable lines cross to the host, so only the first
+            # divergent round writes them and only for its first few leaves
+            # (one K bank is hundreds of megabytes at long context).
+            detailed = mismatched[:8]
+            report = compare_verify_outputs(
+                {name: ref for name, ref, _cand in detailed},
+                {name: cand for name, _ref, cand in detailed},
+                max_report_lines=len(detailed) + 2,
+            )
+            first_name = mismatched[0][0]
+            record["first_divergence"] = {
+                "round": int(record["rounds"]),
+                "width": int(width),
+                "context": (
+                    int(dispatch["base_offset"]) + int(committed_count)
+                    if committed_count is not None
+                    else None
+                ),
+                "leaf": first_name,
+                "artifact": _artifact_kind(first_name),
+                "mismatched_leaves": len(mismatched),
+                "report": report,
+            }
+            self.stats["parity2_first_divergence"] = {
+                "call": int(self.stats["calls"]),
+                "context": record["first_divergence"]["context"],
+                "artifact": _artifact_kind(first_name),
+                "leaf": first_name,
+                "max_abs_diff": _leaf_max_abs_diff(mismatched[0][1], mismatched[0][2]),
+                "mismatched_leaves": len(mismatched),
+            }
+        if record["divergent_rounds"] <= 10:
+            print(
+                f"[parity2] fixed-M4 divergence round={record['rounds']} "
+                f"width={width} positions={record['positions']} "
+                f"leaf={mismatched[0][0]} mismatched_leaves={len(mismatched)} "
+                f"logits_max_abs_diff={float(logits_diff.item()):.3e} "
+                f"kl={float(max_kl.item()):.3e}",
+                flush=True,
+            )
+
     def forward_ar_capture(
         self,
         input_ids,
@@ -2770,25 +3253,41 @@ class CompiledVerifyBank:
                 self.last_fallback_reason = "fixed_m4_host_inputs_missing"
                 self.last_fallback_transition = False
                 _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_NO_HOST_INPUTS_REASON)
-                return self._runtime_forward(
-                    input_ids,
-                    cache=cache,
-                    return_hidden=return_hidden,
-                    hidden_variant=hidden_variant,
-                )
-            # Shorter adaptive windows take the normal family capture route.
-            # Not a fallback (no counter), but the Route Tape must still
-            # see that this call ran eager through the bank.
-            self.last_dispatch_kind = "eager"
-            self.last_fallback_reason = "fixed_m4_short_window"
-            self.last_fallback_transition = False
-            _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_OTHER_WIDTH_REASON)
-            return self._runtime_forward(
+            else:
+                # Shorter adaptive windows take the normal family capture
+                # route. Not a fallback (no counter), but the Route Tape must
+                # still see that this call ran eager through the bank.
+                self.last_dispatch_kind = "eager"
+                self.last_fallback_reason = "fixed_m4_short_window"
+                self.last_fallback_transition = False
+                _note_demotion("fixed_m4_uncompiled_round", _FIXED_M4_OTHER_WIDTH_REASON)
+            # Either way the forward runs eager ON the promoted bank, where an
+            # image request rotates at the bank's own origin. parity2 checks
+            # that forward too, against the stock cache in the request scope.
+            parity2_clone = (
+                self._fixed_m4_parity2_clone(cache)
+                if self._fixed_m4_dispatch.get("parity2") and return_hidden
+                else None
+            )
+            result = self._runtime_forward(
                 input_ids,
                 cache=cache,
                 return_hidden=return_hidden,
                 hidden_variant=hidden_variant,
             )
+            if parity2_clone is not None:
+                self._fixed_m4_parity2_compare(
+                    self._fixed_m4_dispatch,
+                    parity2_clone,
+                    input_ids,
+                    compiled_aux=None,
+                    candidate_logits=result[0],
+                    candidate_hidden=result[1],
+                    candidate_captures=self._named_eager_captures(result[2]),
+                    candidate_state=self._fixed_m4_state_leaves(),
+                    committed_count=committed_count,
+                )
+            return result
         if (
             not _PREWARM_DONE
             and not self.parity
@@ -2929,7 +3428,7 @@ class CompiledVerifyBank:
                 # donation. The traced body re-seeds every slot from the
                 # explicit inputs before any read, so the held refs are dead.
                 self._clear_shadow_leaf_refs()
-            key = (length, str(hidden_variant or ""), int(bucket))
+            key = self._verify_key(length, hidden_variant, bucket)
             fn = self._compiled.get(key)
             if fn is None:
                 fn = self._shared_or_new_verify_step(key, length, hidden_variant)
@@ -2953,10 +3452,13 @@ class CompiledVerifyBank:
                     *((compiled_aux,) if compiled_aux is not None else ()),
                     *state_in,
                 )
+            # Same positional contract as the installed replay: ids, the
+            # auxiliary when the runtime prepares one, the rotary delta of an
+            # image request, the state leaves.
             outputs = (
-                fn(input_ids, compiled_aux, *state_in)
+                fn(input_ids, compiled_aux, *self._rope_args(), *state_in)
                 if compiled_aux is not None
-                else fn(input_ids, *state_in)
+                else fn(input_ids, *self._rope_args(), *state_in)
             )
             logits, hidden, captures_flat, state_out = self._unpack_outputs(outputs)
             if donate:
@@ -3184,7 +3686,7 @@ class CompiledVerifyBank:
                 continue
             try:
                 self._apply_bucket(cache, bucket)
-                key = (length, variant_key, int(bucket))
+                key = self._verify_key(length, hidden_variant, bucket)
                 fn = self._compiled.get(key)
                 if fn is None:
                     # Shared-registry compile (F6): a bare per-bank
@@ -3196,7 +3698,7 @@ class CompiledVerifyBank:
                     fn = self._shared_or_new_verify_step(key, length, hidden_variant)
                     self._compiled[key] = fn
                 bucket_started = time.perf_counter()
-                outputs = fn(input_ids, *state_in)
+                outputs = fn(input_ids, *self._rope_args(), *state_in)
                 # Synchronous eval: the compile cost is paid HERE, and no
                 # graph is left pending, so no held-reference bookkeeping
                 # is needed. Outputs are dropped, never committed.
@@ -3291,13 +3793,13 @@ class CompiledVerifyBank:
                 if state_in is None:
                     report["skipped"].append(f"m{length}:empty_state_leaf")
                     continue
-                key = (length, variant_key, int(bucket))
+                key = self._verify_key(length, hidden_variant, bucket)
                 fn = self._compiled.get(key)
                 if fn is None:
                     fn = self._shared_or_new_verify_step(key, length, hidden_variant)
                     self._compiled[key] = fn
                 length_started = time.perf_counter()
-                outputs = fn(probe, *state_in)
+                outputs = fn(probe, *self._rope_args(), *state_in)
                 mx.eval(*outputs)
                 report["lengths"].append(
                     {
@@ -3424,7 +3926,8 @@ class CompiledVerifyBank:
         data["compiled_entry_count"] = len(self._compiled)
         data["compiled_keys"] = [
             f"m{length}:{variant or 'default'}:b{bucket}"
-            for length, variant, bucket in sorted(self._compiled)
+            + (":rope_delta" if rope_delta_input else "")
+            for length, variant, bucket, rope_delta_input in sorted(self._compiled)
         ]
         dispatch = self._fixed_m4_dispatch
         if dispatch is not None:
@@ -3444,6 +3947,10 @@ class CompiledVerifyBank:
                 "base_offset": int(dispatch["base_offset"]),
                 "capacity": int(dispatch["capacity"]),
                 "growth_tokens": int(dispatch["growth_tokens"]),
+                # Image requests replay the trace that takes the rotary delta
+                # as an input; text requests replay the text trace.
+                "rope_delta_input": bool(dispatch["rope_args"]),
+                "rope_delta": dispatch["rope_delta"],
             }
         return data
 
@@ -3530,6 +4037,7 @@ class CompiledVerifyBank:
             initial_reserve_tokens=max(length, self.growth_reserve_tokens),
         )
         self.stats["promoted"] += promoted
+        self._stamp_rope_delta(cache)
         for entry in cache:
             if isinstance(entry, TensorOffsetKVCache) and entry.growth_after_grant:
                 # A dense leaf outgrew its first-promotion grant: every
@@ -3682,6 +4190,7 @@ class CompiledVerifyBank:
                     rows_gather_enabled=entry.rows_gather_enabled,
                     rows_gather_min_context=entry.rows_gather_min_context,
                     fused_rows_gather_kv_m4=entry.fused_rows_gather_kv_m4,
+                    rope_delta=entry.rope_delta,
                 )
             elif kind == VERIFY_SPEC_KIND_FULL_ATTN:
                 if isinstance(entry, TensorOffsetKVCache):
@@ -3741,8 +4250,13 @@ class CompiledVerifyBank:
         request's containers.
         """
 
+        rope_delta_input = bool(key[3])
         if not _env_enabled("MTPLX_COMPILED_VERIFY_SHARED_TRACES", default=True):
-            return mx.compile(self._make_verify_step(length, hidden_variant))
+            return mx.compile(
+                self._make_verify_step(
+                    length, hidden_variant, rope_delta_input=rope_delta_input
+                )
+            )
         spec_sig = tuple(self._spec or [])
         from .attention_context import exact_verify_required
 
@@ -3762,6 +4276,11 @@ class CompiledVerifyBank:
             # vice versa. Without this key a t=0.6 request's shared trace
             # would silently serve a t=0 request with non-exact kernels.
             bool(exact_verify_required()),
+            # Input-signature dimension: an image request's step takes the
+            # rotary delta as one more graph input. The VALUE never keys
+            # anything, so every image request of the process shares one
+            # trace whatever its delta, and text requests keep theirs.
+            rope_delta_input,
         )
         entry = _SHARED_VERIFY_STEPS.get(global_key)
         if entry is not None:
@@ -3777,7 +4296,12 @@ class CompiledVerifyBank:
         # The dispatch owns the bank; the process cache owns only the program.
         host = {"bank_ref": weakref.ref(self)}
         fn = mx.compile(
-            self._make_verify_step(length, hidden_variant, trace_host=host)
+            self._make_verify_step(
+                length,
+                hidden_variant,
+                trace_host=host,
+                rope_delta_input=rope_delta_input,
+            )
         )
         def release_program(reference, *, key=global_key):
             # Compiled graphs may hold weight arrays even after their Python
@@ -3796,8 +4320,24 @@ class CompiledVerifyBank:
         length: int,
         hidden_variant: str | None,
         trace_host: dict[str, Any] | None = None,
+        rope_delta_input: bool = False,
     ):
+        """The pure verify step: ``(input_ids, [aux], [rope_delta], *state)``.
+
+        ``rope_delta_input`` adds the rotary delta of an image request as a
+        graph input, after the auxiliary and before the state leaves. It must
+        be an input: a delta closed over as a Python value would be folded
+        into the trace and replayed, stale, for the next image request.
+        """
+
         spec = list(self._spec or [])
+        if rope_delta_input and not any(
+            kind == VERIFY_SPEC_KIND_QSA for _idx, kind, _n in spec
+        ):
+            raise ValueError(
+                "rope_delta has no consumer: only fixed QSA banks carry a "
+                "rotary origin"
+            )
         layout = self._capture_layout()
         static_host = {"bank_ref": weakref.ref(self)}
         host = trace_host if trace_host is not None else static_host
@@ -3813,6 +4353,10 @@ class CompiledVerifyBank:
             else:
                 compiled_aux = None
                 state_in = args
+            if rope_delta_input:
+                rope_delta, *state_in = state_in
+            else:
+                rope_delta = None
             live.stats["traces"] += 1
             if _decode_length(input_ids) != length:
                 raise ValueError("compiled verify length mismatch")
@@ -3830,6 +4374,10 @@ class CompiledVerifyBank:
                     entry.pooled = state_in[pos + 4]
                     for slot in range(len(entry.kv.rollback_state)):
                         entry.kv.rollback_state[slot] = None
+                    # The rotary origin is re-seeded like every other leaf:
+                    # the traced input for an image request, None on the text
+                    # trace, never whatever the twin held before.
+                    entry.rope_delta = rope_delta
                 elif kind == VERIFY_SPEC_KIND_FULL_ATTN:
                     for slot in range(n_leaves):
                         entry.cache[slot] = state_in[pos + slot]
@@ -4001,6 +4549,9 @@ class CompiledVerifyBank:
                     entry.kv.rollback_state[slot] = None
                 entry.raw_keys = None
                 entry.pooled = None
+                # A twin holds the traced delta after a trace; like the other
+                # slots it is re-seeded from the inputs before any read.
+                entry.rope_delta = None
                 continue
             cache_list = getattr(entry, "cache", None)
             if isinstance(cache_list, list):
@@ -4221,6 +4772,9 @@ class CompiledVerifyBank:
                     rows_gather_enabled=entry.rows_gather_enabled,
                     rows_gather_min_context=entry.rows_gather_min_context,
                     fused_rows_gather_kv_m4=entry.fused_rows_gather_kv_m4,
+                    # The eager leg of the generic parity modes runs on this
+                    # fixed twin, so it rotates where the real entry does.
+                    rope_delta=entry.rope_delta,
                 )
             elif kind == VERIFY_SPEC_KIND_FULL_ATTN:
                 if isinstance(entry, TensorOffsetKVCache):

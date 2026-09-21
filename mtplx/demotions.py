@@ -78,8 +78,10 @@ KINDS: dict[str, str] = {
         "ran the stock path."
     ),
     "vision_request_eager_verify": (
-        "An image request ran on the eager verifier (the compiled verifier "
-        "cannot carry the image position offsets)."
+        "An image request ran on the eager verifier. Flash-Next image requests "
+        "take the compiled verifier; this one was kept off it by its prompt "
+        "shape, a diagnostic setting or the kill switch, or it ran on the "
+        "dense path, which has no compiled image route (see the reason line)."
     ),
     "vision_request_eager_draft": (
         "An image request ran the draft head on the stock route (the compiled "

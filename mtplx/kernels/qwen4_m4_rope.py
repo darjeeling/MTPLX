@@ -29,8 +29,15 @@ WHAT IT DOES NOT DO
   indexer's ``head_dim`` is 128 and MLX's ``rms_single_row`` reduction (32
   lanes x 4 contiguous values) is reproducible exactly only up to 128.  The
   attention head_dim here is **256**, so ``q_norm``/``k_norm`` stay outside.
-* **No M-RoPE.**  The vision (t, h, w) path keeps the stock chain; the caller
-  routes around this kernel when ``vision_rope_state()`` is live.
+* **No M-RoPE tables.**  A row whose three position axes differ (an image
+  row, which only a prefill forward can write) keeps the stock chain; on a
+  stock cache the caller routes around this kernel while
+  ``vision_rope_state()`` is live.  The decode rows of an image request DO
+  come through here on the fixed lane: past the last image all three axes are
+  the sequence index plus one delta, which is this kernel's own arithmetic at
+  ``pos_start = offset + delta``.  The caller passes the bank's rotary origin
+  (``TensorOffsetQSACache.rope_offset``, one int32 value, a graph input of the
+  verify trace) and this module never reads the request context.
 * **No indexer query prep and no pooled bank row.**  Those two rope sites of
   the same QSA layer already have shipped, pinned-bit-exact kernels
   (``qsa_indexer_prepare_queries_metal`` and ``qsa_m4_pooled_row``); see
