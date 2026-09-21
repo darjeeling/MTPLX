@@ -28143,12 +28143,13 @@ def _stream_splitter_for_state(
 def _finish_stream_splitter(
     splitter: Any, *, recover_unclosed_reasoning: bool
 ) -> list[tuple[str, str]]:
-    try:
-        return splitter.finish(
-            recover_unclosed_reasoning_as_content=recover_unclosed_reasoning
-        )
-    except TypeError:
-        return splitter.finish()
+    # Every splitter takes the keyword: it is part of the contract on
+    # ReasoningContentStreamSplitter. The former ``except TypeError`` retry
+    # hid the drift behind #517 and would also have swallowed a real
+    # TypeError raised inside a codec's finish().
+    return splitter.finish(
+        recover_unclosed_reasoning_as_content=recover_unclosed_reasoning
+    )
 
 
 def _reasoning_completion_repair_needed(
