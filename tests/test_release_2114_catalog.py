@@ -51,3 +51,59 @@ def test_legacy_bonsai_runtime_identity_and_family(tmp_path):
     }))
     assert public_model_id_for_ref(pack) == "mtplx-bonsai-2-27b-optimized-speed"
     assert model_family_from_inspection(model_ref=str(pack)) == "qwen3_8"
+
+MATRIX = json.loads((Path(__file__).parent / "fixtures/release_2114_recommendations.json").read_text())
+
+
+@pytest.mark.parametrize("row", MATRIX, ids=lambda r: f"{r['tier']}-{r['ram_gib']}")
+def test_app_cli_ram_matrix(row, monkeypatch):
+    from mtplx import default_models as defaults
+    from mtplx.model_catalog import recommended_catalog_ids, recommended_models
+    from mtplx.ui import onboarding
+
+    monkeypatch.setenv(defaults.QWEN38_OPTIMIZED_SPEED_MODEL_ENV, "off")
+    monkeypatch.setenv(defaults.SPEED_MODEL_ENV, "off")
+    monkeypatch.delenv(defaults.DEFAULT_MODEL_VARIANT_ENV, raising=False)
+    monkeypatch.setattr(defaults, "_QWEN38_OPTIMIZED_SPEED_FP16_LOCAL_CANDIDATES", ())
+    args = dict(memory_gib=row["ram_gib"], chip_tier=row["tier"])
+    assert recommended_catalog_ids(**args) == row["raw"]
+    assert [m.id for m in recommended_models(**args)] == row["visible"]
+    hardware = dict(apple_silicon_generation="m2" if row["tier"] == "legacy" else "m5", memory_gib=row["ram_gib"])
+    if row["default"] is None:
+        with pytest.raises(defaults.DefaultModelUnavailable):
+            defaults.select_default_model(hardware=hardware)
+        return
+    selection = defaults.select_default_model(hardware=hardware)
+    assert catalog_model_matching(selection.hf_model).id == row["default"]
+    monkeypatch.setattr(onboarding, "_verified_default_selection", lambda: selection)
+    panels = []
+    monkeypatch.setattr(onboarding, "_step_panel", lambda **kw: panels.extend(kw["options"]))
+    monkeypatch.setattr(onboarding, "_prompt_choice", lambda *args, **kw: kw["default"])
+    assert onboarding.screen_model(installed=[]) == selection.model
+    offered = [title.split("  ·")[0] for _, title, _ in panels[:-2]]
+    expected = [catalog_model_with_id(i).display_name for i in row["visible"]]
+    # Older CLI labels omit a space in Qwen3.5; the actual catalog identities agree.
+    assert [x.replace("Qwen3.5", "Qwen 3.5") for x in offered] == expected
+
+
+def test_bonsai_bound_matches_swift_and_can_move_to_24(monkeypatch):
+    import re
+    from mtplx import model_catalog as catalog
+    from mtplx.default_models import select_default_model
+    swift = Path("apps/MTPLXApp/Sources/MTPLXAppCore/Models/MTPLXModelOption.swift").read_text()
+    bound = float(re.search(r"bonsaiRecommendationMinGiB: Double = ([0-9.]+)", swift)[1])
+    assert bound == catalog.BONSAI_RECOMMENDATION_MIN_GIB == 16
+    monkeypatch.setattr(catalog, "BONSAI_RECOMMENDATION_MIN_GIB", 24)
+    for ram, winner in [(16, "qwen35-9b-optimized-speed"), (18, "qwen35-9b-optimized-speed"), (24, "bonsai-2-27b-optimized-speed")]:
+        offered = catalog.recommended_catalog_ids(memory_gib=ram, chip_tier="modern")
+        assert offered[0] == winner
+        assert "bonsai-2-27b-optimized-speed" in offered
+        assert catalog_model_matching(select_default_model(hardware={"apple_silicon_generation": "m5", "memory_gib": ram}).hf_model).id == winner
+
+
+@pytest.mark.parametrize("ram,peak,verdict", [(256, 170.7, "tight_fit"), (256, 170.6, "recommended"), (16, 10.7, "tight_fit"), (16, 10.6, "recommended")])
+def test_badge_safety_boundaries(ram, peak, verdict):
+    from dataclasses import replace
+    from mtplx.model_catalog import evaluate_feasibility
+    model = replace(catalog_model_with_id("bonsai-2-27b-optimized-speed"), peak_memory_gib=peak)
+    assert evaluate_feasibility(model, chip_tier="modern", ram_gib=ram, disk_free_gib=1000).verdict == verdict

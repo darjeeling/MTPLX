@@ -128,6 +128,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "qwen35-9b-optimized-speed-fp16"
     ]
     assert recommended_catalog_ids(memory_gib=24, chip_tier=MODERN_TIER) == [
+        "bonsai-2-27b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",
@@ -148,17 +149,13 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "gemma4-optimized-speed",
         "qwen36-35b-a3b-optimized-speed",
         "optimized-quality",
+        "bonsai-2-27b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",
     ]
     assert recommended_catalog_ids(memory_gib=32, chip_tier=MODERN_TIER)[:3] == trio38
     assert recommended_catalog_ids(memory_gib=64, chip_tier=MODERN_TIER) == [
         *trio38,
-        # Flash-Next rides behind the trio in the id order everywhere >=48;
-        # the peak-memory filter (78/87 GiB) cuts it from recommended_models
-        # below ~96 GB, same mechanism that drops Quality from the 32-47 band.
-        "flash-next-bare-speed",
-        "flash-next-optimized-speed",
         "optimized-speed-v2",
         "optimized-speed",
         "optimized-quality",
@@ -166,6 +163,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
         "qwen35-9b-optimized-speed",
+        "bonsai-2-27b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",
     ]
@@ -198,6 +196,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         *trio38,
         "flash-next-bare-speed",
         "flash-next-optimized-speed",
+        "flash-next-optimized-quality",
         "optimized-speed-v2",
         "optimized-speed",
         "optimized-quality",
@@ -205,6 +204,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
         "qwen35-9b-optimized-speed",
+        "bonsai-2-27b-optimized-speed",
     ]
     assert recommended_catalog_ids(
         memory_gib=None, chip_tier=LEGACY_TIER
@@ -219,6 +219,7 @@ def test_recommended_models_filter_by_peak_memory():
     ]
     models = recommended_models(memory_gib=24, chip_tier=MODERN_TIER)
     assert [model.id for model in models] == [
+        "bonsai-2-27b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",
@@ -454,8 +455,8 @@ def test_select_default_model_routes_small_macs_to_packs_that_fit(monkeypatch):
             "memory_gib": 24.0,
         }
     )
-    assert small_modern.model == QWEN35_9B_OPTIMIZED_SPEED_HF_MODEL_ID
-    assert small_modern.hf_model == QWEN35_9B_OPTIMIZED_SPEED_HF_MODEL_ID
+    assert small_modern.model == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
+    assert small_modern.hf_model == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
     assert small_modern.variant == "speed"
     assert "9B" in small_modern.reason
     assert small_modern.display_name == "Qwen3.5 9B Optimized Speed"

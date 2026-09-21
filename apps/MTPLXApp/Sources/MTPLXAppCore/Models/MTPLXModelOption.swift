@@ -1083,7 +1083,12 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     /// pair stays discoverable as the fast-small pick everywhere. No
     /// fp16 4B siblings exist yet, so the legacy (M1/M2) matrix keeps
     /// its fp16-only entries.
-    public static func recommendedCatalogIDs(for hardware: DetectedHardware?) -> [String] {
+    public static let bonsaiRecommendationMinGiB: Double = 16.0
+
+    public static func recommendedCatalogIDs(
+        for hardware: DetectedHardware?,
+        bonsaiMinimumGiB: Double = bonsaiRecommendationMinGiB
+    ) -> [String] {
         guard let hardware else { return modernTopRecommendationIDs }
         switch hardware.tier {
         case .intel:
@@ -1114,11 +1119,21 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 quality27: "optimized-quality",
                 trio38: qwen38TrioIDs
             )
-            // Flash-Next rides right behind the 3.8 trio on big modern
-            // Macs. Modern tier only (bf16 packs, no fp16 sibling); the
-            // peak-memory filter hides both entries below ~96 GB unified.
-            if let trioEnd = ids.lastIndex(where: { qwen38TrioIDs.contains($0) }) {
+            let bonsai = "bonsai-2-27b-optimized-speed"
+            if hardware.unifiedMemoryGiB < 32 {
+                let position = hardware.unifiedMemoryGiB >= bonsaiMinimumGiB ? 0 : 1
+                ids.insert(bonsai, at: position)
+            } else {
+                ids.append(bonsai)
+            }
+            // The raw list and the peak-filtered list both mirror Python.
+            if hardware.unifiedMemoryGiB >= 96,
+               let trioEnd = ids.lastIndex(where: { qwen38TrioIDs.contains($0) }) {
                 ids.insert(contentsOf: flashNextIDs, at: ids.index(after: trioEnd))
+            }
+            if hardware.unifiedMemoryGiB >= 256 {
+                ids.removeAll { $0 == "flash-next-optimized-quality" }
+                ids.insert("flash-next-optimized-quality", at: 0)
             }
             ids.append(contentsOf: tinyIDs)
             return ids
@@ -1139,6 +1154,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen38-27b-optimized-quality",
         "flash-next-bare-speed",
         "flash-next-optimized-speed",
+        "flash-next-optimized-quality",
         "optimized-speed-v2",
         "optimized-speed",
         "optimized-quality",
@@ -1146,6 +1162,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
         "qwen35-9b-optimized-speed",
+        "bonsai-2-27b-optimized-speed",
     ]
 
     /// Qwen 3.8 trio (2026-08-15 release): Optimized Speed is the
@@ -1166,6 +1183,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     private static let flashNextIDs = [
         "flash-next-bare-speed",
         "flash-next-optimized-speed",
+        "flash-next-optimized-quality",
     ]
 
     private static func recommendationIDs(

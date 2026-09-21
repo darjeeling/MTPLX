@@ -26,6 +26,8 @@ from mtplx.hf_loader import cached_model_is_complete, model_library_roots
 
 MEMORY_SAFETY_FACTOR = 1.5
 DISK_MULTIPLIER = 2.5
+# Change this single bound when the measured memory table is available.
+BONSAI_RECOMMENDATION_MIN_GIB = 16.0
 
 MODERN_TIER = "modern"
 LEGACY_TIER = "legacy"
@@ -504,6 +506,7 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "qwen38-27b-optimized-quality",
     "flash-next-bare-speed",
     "flash-next-optimized-speed",
+    "flash-next-optimized-quality",
     "optimized-speed-v2",
     "optimized-speed",
     "optimized-quality",
@@ -511,6 +514,7 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "qwen36-35b-a3b-optimized-balance",
     "gemma4-optimized-speed",
     "qwen35-9b-optimized-speed",
+    "bonsai-2-27b-optimized-speed",
 )
 
 # Qwen 3.8 Flash-Next pair (2026-08-27): Bare Speed first (the fast
@@ -519,6 +523,7 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
 _FLASH_NEXT_IDS = (
     "flash-next-bare-speed",
     "flash-next-optimized-speed",
+    "flash-next-optimized-quality",
 )
 
 
@@ -618,7 +623,11 @@ def recommended_catalog_ids(
     if memory_gib < 16:
         return tiny_ids or [small]
     if memory_gib < 32:
-        return [small, *tiny_ids]
+        if chip_tier == LEGACY_TIER:
+            return [small]
+        bonsai = "bonsai-2-27b-optimized-speed"
+        leading = [bonsai, small] if memory_gib >= BONSAI_RECOMMENDATION_MIN_GIB else [small, bonsai]
+        return [*leading, *tiny_ids]
     if memory_gib < 48:
         if speed27_v2 is None:
             return [*trio38, small, speed27, "gemma4-optimized-speed", speed35, quality27]
@@ -630,13 +639,18 @@ def recommended_catalog_ids(
             "gemma4-optimized-speed",
             speed35,
             quality27,
+            "bonsai-2-27b-optimized-speed",
             *tiny_ids,
         ]
-    # Flash-Next rides right behind the 3.8 trio on big modern Macs.
-    # Modern tier only (bf16 packs, no fp16 sibling); the peak-memory
-    # filter in recommended_models hides both entries below ~96 GB.
-    flash_next = list(_FLASH_NEXT_IDS) if chip_tier != LEGACY_TIER else []
+    # Offer Flash-Next from 96 GiB; Quality leads from 256 GiB.
+    # The normal peak-memory filter still applies to every pack.
+    flash_next = list(_FLASH_NEXT_IDS) if chip_tier != LEGACY_TIER and memory_gib >= 96 else []
+    leading = []
+    if chip_tier != LEGACY_TIER and memory_gib >= 256:
+        leading = ["flash-next-optimized-quality"]
+        flash_next.remove(leading[0])
     return [
+        *leading,
         *trio38,
         *flash_next,
         *([speed27_v2] if speed27_v2 else []),
@@ -646,6 +660,7 @@ def recommended_catalog_ids(
         balance35,
         "gemma4-optimized-speed",
         small,
+        *(["bonsai-2-27b-optimized-speed"] if chip_tier != LEGACY_TIER else []),
         *tiny_ids,
     ]
 

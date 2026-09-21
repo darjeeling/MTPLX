@@ -789,7 +789,7 @@ private struct PreparedRecommendedModelRow: Identifiable, Equatable, Sendable {
     let isUsable: Bool
 }
 
-private struct RecommendedModelRow: Identifiable, Sendable {
+struct RecommendedModelRow: Identifiable, Sendable {
     var id: String { modelID }
     let choice: ModelPickChoice
     let modelID: String
@@ -806,6 +806,14 @@ private struct RecommendedModelRow: Identifiable, Sendable {
 
     static func row(for catalogID: String) -> RecommendedModelRow? {
         switch catalogID {
+        case "qwen35-4b-optimized-speed":
+            return .qwen4BSpeed
+        case "qwen35-4b-optimized-quality":
+            return .qwen4BQuality
+        case "bonsai-2-27b-optimized-speed":
+            return .bonsaiOptimizedSpeed
+        case "flash-next-optimized-quality":
+            return .flashNextOptimizedQuality
         case "qwen35-9b-optimized-speed", "qwen35-9b-optimized-speed-fp16":
             return .qwen9B
         case "qwen38-27b-optimized-speed", "qwen38-27b-optimized-speed-fp16":
@@ -834,6 +842,38 @@ private struct RecommendedModelRow: Identifiable, Sendable {
             return nil
         }
     }
+
+    static let qwen4BSpeed = RecommendedModelRow(
+        choice: .curatedQwen35FourBit,
+        modelID: "qwen35-4b-optimized-speed",
+        logo: .qwen,
+        title: "Qwen 3.5 4B Optimized Speed",
+        detailLocalizationKey: "4-bit quantization. Fastest fit for smaller Macs."
+    )
+
+    static let qwen4BQuality = RecommendedModelRow(
+        choice: .curatedQwen35FourBQuality,
+        modelID: "qwen35-4b-optimized-quality",
+        logo: .qwen,
+        title: "Qwen 3.5 4B Optimized Quality",
+        detailLocalizationKey: "8-bit quantization. Highest-fidelity 4B; 2x MTP multiplier."
+    )
+
+    static let bonsaiOptimizedSpeed = RecommendedModelRow(
+        choice: .curatedBonsaiOptimizedSpeed,
+        modelID: "bonsai-2-27b-optimized-speed",
+        logo: .qwen,
+        title: "Bonsai 2 27B Optimized Speed",
+        detailLocalizationKey: "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs."
+    )
+
+    static let flashNextOptimizedQuality = RecommendedModelRow(
+        choice: .curatedFlashNextOptimizedQuality,
+        modelID: "flash-next-optimized-quality",
+        logo: .qwen,
+        title: "Qwen 3.8 Flash-Next Optimized Quality",
+        detailLocalizationKey: "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build."
+    )
 
     static let qwen9B = RecommendedModelRow(
         choice: .curatedQwen35NineBSpeed,

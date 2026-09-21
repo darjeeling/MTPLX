@@ -87,7 +87,7 @@ SMALL_DEFAULT_MEMORY_FLOOR_GIB = 32.0
 # the first of these the app's tiers offer this machine; with unreadable
 # memory it is the last one. There is no FP16 4B build, so M1/M2 Macs stop
 # at the 9B.
-_SMALL_SPEED_CATALOG_IDS = ("qwen35-9b-optimized-speed", "qwen35-4b-optimized-speed")
+_SMALL_SPEED_CATALOG_IDS = ("bonsai-2-27b-optimized-speed", "qwen35-9b-optimized-speed", "qwen35-4b-optimized-speed")
 _SMALL_FP16_CATALOG_IDS = ("qwen35-9b-optimized-speed-fp16",)
 INTEL_REFUSAL_MESSAGE = (
     "MTPLX runs on Apple Silicon Macs (M1 and later); this Mac has an Intel "
@@ -238,6 +238,10 @@ class DefaultModelSelection:
 
     @property
     def display_name(self) -> str:
+        for model_id in ("bonsai-2-27b-optimized-speed", "flash-next-optimized-quality"):
+            pack = catalog_model_with_id(model_id)
+            if pack and self.hf_model == pack.hf_model_id:
+                return pack.display_name
         if "4B" in self.hf_model:
             return "Qwen3.5 4B Optimized Speed"
         if "9B" in self.hf_model:
@@ -335,6 +339,21 @@ def _complete_local_model_ref(candidates: tuple[str, ...]) -> str | None:
         if _is_complete_local_model(path):
             return str(path)
     return None
+
+
+def catalog_model_ref(pack: CatalogModel) -> str:
+    """Prefer a complete copy in configured libraries, including released aliases."""
+    from mtplx.hf_loader import model_library_roots
+
+    basename = Path(pack.hf_model_id).name
+    names = (pack.hf_model_id.replace("/", "--"), basename,
+             *(alias for alias in pack.aliases if "MTPLX" in alias and " " not in alias))
+    for root in model_library_roots():
+        for name in names:
+            candidate = root / name
+            if _is_complete_local_model(candidate):
+                return str(candidate)
+    return pack.hf_model_id
 
 
 def _optimized_speed_model_ref(
@@ -854,6 +873,8 @@ def _small_pack_offered_first(variant: str, memory_gib: float) -> CatalogModel |
 def _small_pack_precision(pack: CatalogModel, variant: str) -> str:
     if variant == "fp16":
         return "FP16"
+    if pack.id == "bonsai-2-27b-optimized-speed":
+        return pack.detail
     return QWEN35_4B_SPEED_DESCRIPTION if "4B" in pack.hf_model_id else QWEN35_9B_SPEED_DESCRIPTION
 
 
@@ -944,7 +965,7 @@ def select_default_model(
                 chip=chip,
                 memory_gib=memory_gib,
             )
-        size_label = "4B" if "4B" in small_pack.hf_model_id else "9B"
+        size_label = small_pack.display_name
         reason = f"{reason}; routed to {size_label} for {memory_gib:.0f} GiB unified memory"
 
     qwen38_model = qwen38_optimized_speed_model_ref()
@@ -966,8 +987,18 @@ def select_default_model(
             or memory_gib >= OPTIMIZED_SPEED_V2_MEMORY_FLOOR_GIB
         )
     )
-    if small_pack is not None:
-        model = small_pack.hf_model_id
+    large_pack = None
+    if variant == "speed" and not legacy_speed_override and memory_gib is not None:
+        candidate = recommended_models(memory_gib=memory_gib, chip_tier=MODERN_TIER)[0]
+        explicit_speed = str(os.environ.get(QWEN38_OPTIMIZED_SPEED_MODEL_ENV) or "").strip()
+        if candidate.id == "flash-next-optimized-quality" and (not explicit_speed or _env_ref_disabled(explicit_speed)):
+            large_pack = candidate
+    if large_pack is not None:
+        model = catalog_model_ref(large_pack)
+        hf_model = large_pack.hf_model_id
+        precision = large_pack.detail
+    elif small_pack is not None:
+        model = catalog_model_ref(small_pack)
         hf_model = small_pack.hf_model_id
         precision = _small_pack_precision(small_pack, variant)
     elif variant == "fp16":
@@ -1025,6 +1056,8 @@ def verified_default_refs() -> set[str]:
     local_qwen38_bare = qwen38_bare_speed_model_ref()
     local_speed = optimized_speed_model_ref()
     refs = {
+        BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
         DEFAULT_HF_MODEL_ID,
         DEFAULT_FP16_HF_MODEL_ID,
         DEFAULT_MODEL_ID,
