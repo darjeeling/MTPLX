@@ -133,6 +133,7 @@ public enum RuntimeSetupEvent: Equatable, Sendable {
 //   never block — the app itself always resolves its own venv first.
 
 public struct RuntimeSetupService: Sendable {
+    /// Installer callbacks supply localization keys so stored snapshots follow language changes.
     public typealias EngineInstaller = @Sendable (@escaping @Sendable (String) -> Void) throws -> URL
     public typealias FanControlEnsurer = @Sendable (URL, @escaping @Sendable (String) -> Void) -> FanControlSetupResult
     public typealias HomebrewUpgrader = @Sendable () throws -> URL

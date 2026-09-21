@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3倍高速";
 "30 competition problems" = "コンテスト問題30問";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4ビット動的量子化。優れたコーディング速度と良好な品質。M1およびM2 Mac向けのFP16ビルド。おすすめ。";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4ビット動的量子化。優れたコーディング速度と良好な品質。おすすめ。";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4ビット動的量子化。優れたコーディング速度と良好な品質。M1およびM2 Mac向けのFP16ビルド。";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4ビット動的量子化。優れたコーディング速度と良好な品質。";
 "4-bit quantization. Blazingly fast and quite smart." = "4ビット量子化。非常に高速で、かなり賢いモデルです。";
 "4-bit quantization. Fastest fit for smaller Macs." = "4ビット量子化。小容量のMacに最適な最速の選択肢です。";
 "5-min Min/Max" = "5分間の最小/最大";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "このセッションのキャッシュ済みプレフィックスを破棄";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "非量子化の重みのdtypeです。ネイティブBF16のないM1/M2 Macでは、FP16の方がプロンプト処理が高速です。";
 "DURATION" = "所要時間";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "8ビットアテンション付きの動的4ビット量子化。より高品質でわずかに低速。おすすめ。";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "8ビットアテンション付きの動的4ビット量子化。より高品質でわずかに低速。";
 "Earlier heavy history hidden" = "以前の大きな履歴は非表示";
 "Edit" = "編集";
 "effective %@" = "有効 %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "%@が見つかりましたが、バージョンを読み取れませんでした。アプリはいずれの場合も独自のランタイムを使用します。";
 "Found %lld results — %@" = "%lld件の結果が見つかりました — %@";
 "Found your sweet spot." = "最適な設定が見つかりました。";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "M1およびM2 Macに推奨されるFP16品質アーティファクト。";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "M1およびM2 Macに推奨されるFP16速度アーティファクト。";
+"FP16 quality artifact for M1 and M2 Macs." = "M1およびM2 Mac向けのFP16品質アーティファクト。";
+"FP16 speed artifact for M1 and M2 Macs." = "M1およびM2 Mac向けのFP16速度アーティファクト。";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "M1およびM2 Mac向けのFP16対応35Bバランスアーティファクト。";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "M1およびM2 Mac向けのFP16対応35B速度アーティファクト。";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "M1およびM2 Mac向けのFP16対応9B速度アーティファクト。";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "接続アプリでMTPLXの設定を使う";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "オン：接続アプリはMTPLXの推論とサンプリング設定に従います。オフ：各アプリの設定を使います。通常のAPIリクエストは独自の設定を維持します。";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8ビットの本体とMTPヘッド、BF16の構造テンソル、4ビットのn-gramテーブル。再現性を高めたFlash-Nextビルド。";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "視覚機能とMTPを備えたPrism MLの三値27Bモデル。メモリの少ないMac向けのコンパクトな重み。";

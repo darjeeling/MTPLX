@@ -138,8 +138,8 @@
 "250 GB" = "250 ГБ";
 "2–3× faster" = "В 2–3 раза быстрее";
 "30 competition problems" = "30 олимпиадных задач";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "Динамическое 4-битное квантование. Отличная скорость в коде и хорошее качество. Сборка FP16 для Mac с M1 и M2. Рекомендуется.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "Динамическое 4-битное квантование. Отличная скорость в коде и хорошее качество. Рекомендуется.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "Динамическое 4-битное квантование. Отличная скорость в коде и хорошее качество. Сборка FP16 для Mac с M1 и M2.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "Динамическое 4-битное квантование. Отличная скорость в коде и хорошее качество.";
 "4-bit quantization. Blazingly fast and quite smart." = "4-битное квантование. Очень быстрая и довольно умная.";
 "4-bit quantization. Fastest fit for smaller Macs." = "4-битное квантование. Самый быстрый вариант для Mac с меньшей памятью.";
 "5-min Min/Max" = "Мин/макс за 5 мин";
@@ -496,7 +496,7 @@
 "Drop this session's cached prefix" = "Сбросить кэшированный префикс этой сессии";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Dtype для неквантованных весов. FP16 быстрее обрабатывает промпты на Mac с M1/M2, у которых нет нативного BF16.";
 "DURATION" = "ДЛИТЕЛЬНОСТЬ";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "Динамическое 4-битное квантование с 8-битным вниманием. Выше качество, немного медленнее. Рекомендуется.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "Динамическое 4-битное квантование с 8-битным вниманием. Выше качество, немного медленнее.";
 "Earlier heavy history hidden" = "Ранняя тяжёлая история скрыта";
 "Edit" = "Изменить";
 "effective %@" = "фактически %@";
@@ -592,8 +592,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "Найден %@, но не удалось прочитать его версию. Приложение в любом случае использует собственную среду выполнения.";
 "Found %lld results — %@" = "Найдено результатов: %lld — %@";
 "Found your sweet spot." = "Оптимальная настройка найдена.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "Артефакт FP16 с упором на качество, рекомендуется для Mac с M1 и M2.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "Артефакт FP16 с упором на скорость, рекомендуется для Mac с M1 и M2.";
+"FP16 quality artifact for M1 and M2 Macs." = "Артефакт FP16 с упором на качество для Mac с M1 и M2.";
+"FP16 speed artifact for M1 and M2 Macs." = "Артефакт FP16 с упором на скорость для Mac с M1 и M2.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "Сбалансированный артефакт 35B, дружественный к FP16, для Mac с M1 и M2.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "Скоростной артефакт 35B, дружественный к FP16, для Mac с M1 и M2.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "Скоростной артефакт 9B, дружественный к FP16, для Mac с M1 и M2.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "Использовать настройки MTPLX в подключённых приложениях";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Вкл.: подключённые приложения используют настройки рассуждений и сэмплирования MTPLX. Выкл.: действуют их собственные настройки. Обычные запросы API сохраняют свои настройки.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "Основная модель и голова MTP в 8 бит, структурные тензоры BF16 и 4-битная таблица n-грамм. Версия Flash-Next с более высокой точностью.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Тернарная модель 27B от Prism ML с поддержкой зрения и MTP. Компактные веса для Mac с небольшим объёмом памяти.";

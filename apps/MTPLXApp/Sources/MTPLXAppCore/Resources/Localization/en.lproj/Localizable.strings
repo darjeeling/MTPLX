@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× faster";
 "30 competition problems" = "30 competition problems";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4-bit dynamic quant. Great coding speeds and good quality. Recommended.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4-bit dynamic quant. Great coding speeds and good quality.";
 "4-bit quantization. Blazingly fast and quite smart." = "4-bit quantization. Blazingly fast and quite smart.";
 "4-bit quantization. Fastest fit for smaller Macs." = "4-bit quantization. Fastest fit for smaller Macs.";
 "5-min Min/Max" = "5-min Min/Max";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "Drop this session's cached prefix";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16.";
 "DURATION" = "DURATION";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower.";
 "Earlier heavy history hidden" = "Earlier heavy history hidden";
 "Edit" = "Edit";
 "effective %@" = "effective %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "Found %@ but couldn't read its version. The app uses its own runtime either way.";
 "Found %lld results — %@" = "Found %lld results — %@";
 "Found your sweet spot." = "Found your sweet spot.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "FP16 quality artifact recommended for M1 and M2 Macs.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "FP16 speed artifact recommended for M1 and M2 Macs.";
+"FP16 quality artifact for M1 and M2 Macs." = "FP16 quality artifact for M1 and M2 Macs.";
+"FP16 speed artifact for M1 and M2 Macs." = "FP16 speed artifact for M1 and M2 Macs.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "FP16-friendly 35B balance artifact for M1 and M2 Macs.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "FP16-friendly 35B speed artifact for M1 and M2 Macs.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "FP16-friendly 9B speed artifact for M1 and M2 Macs.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "Use MTPLX settings for connected apps";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.";

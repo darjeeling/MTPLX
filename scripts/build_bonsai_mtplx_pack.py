@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble Bonsai-3.8-27B-MTPLX-Optimized-Speed from Prism ML's pack.
+"""Assemble Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed from Prism ML's pack.
 
 The MTPLX pack is Prism ML's Ternary Bonsai 2 27B (Apache-2.0) plus a
 Qwen3.8-27B MTP draft head:
@@ -41,9 +41,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-PACK_NAME = "Bonsai-3.8-27B-MTPLX-Optimized-Speed"
-PUBLIC_MODEL_ID = "mtplx-bonsai-38-27b-optimized-speed"
-HF_REPO = "Youssofal/Bonsai-3.8-27B-MTPLX-Optimized-Speed"
+PACK_NAME = "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
+PUBLIC_MODEL_ID = "mtplx-bonsai-2-27b-optimized-speed"
+HF_REPO = "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
+MODEL_FAMILY = "qwen3_8"
+MIN_ENGINE_VERSION = "2.11.4"
 SOURCE_REPO = "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit"
 BASE_TRUNK = "Qwen/Qwen3.8-27B"
 MODEL_TYPE = "prism_hadamard_qwen35"
@@ -274,6 +276,8 @@ def build_runtime_contract(
         "base_trunk": BASE_TRUNK,
         "source_repo": SOURCE_REPO,
         "public_model_id": PUBLIC_MODEL_ID,
+        "model_family": MODEL_FAMILY,
+        "min_engine_version": MIN_ENGINE_VERSION,
         "mtplx_version": mtplx_version,
         "precision_variant": "fp16",
         "precision_policy": {
@@ -314,7 +318,10 @@ def build_index(header: dict[str, Any], total_size: int) -> dict[str, Any]:
 
 
 def render_card(*, source_sha: str, head_note: str) -> str:
-    return CARD_TEMPLATE.format(source_sha=source_sha, head_note=head_note)
+    return CARD_TEMPLATE.format(
+        source_sha=source_sha, head_note=head_note, hf_repo=HF_REPO,
+        min_engine_version=MIN_ENGINE_VERSION,
+    )
 
 
 CARD_TEMPLATE = """---
@@ -340,10 +347,9 @@ tags:
 - coding
 ---
 
-# Bonsai 3.8 27B MTPLX Optimized Speed
+# Bonsai 2 27B MTPLX Optimized Speed
 
-A 27B-class vision-language model for Macs with 16 to 24 GB of memory, with a
-draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
+A compact 27B-class vision-language model for Macs, with a draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
 
 **Full credit for the model goes to [Prism ML](https://prismml.com).** The
 language model and the vision tower in this pack are Prism ML's
@@ -357,7 +363,7 @@ for the method, the benchmarks and the limitations of the model itself.
 
 | File | What it is |
 | :--- | :--- |
-| `model.safetensors` | Prism ML's file, unchanged (sha256 `{source_sha}`). It holds the ternary language model (7.67 GB) and the vision tower (0.92 GB, float16). |
+| `model.safetensors` | Prism ML's file, unchanged (sha256 `{source_sha}`). It holds the ternary language model and the float16 vision tower. |
 | `mtp.safetensors` | The multi-token prediction draft head of Qwen3.8-27B, from the MTPLX Qwen 3.8 27B pack. {head_note} |
 | `hadamard.json`, `config.json` | Prism ML's rotation metadata, unchanged, plus the MTPLX head contract in `config.json`. |
 | `mtplx_runtime.json` | Sampler defaults and the MTPLX runtime contract. |
@@ -397,10 +403,10 @@ pip install mtplx
 mtplx start
 ```
 
-Pick Bonsai 3.8 27B in the model list, or pass
-`--model Youssofal/Bonsai-3.8-27B-MTPLX-Optimized-Speed` to `mtplx serve`.
-The macOS app lists it in the model picker. Use the newest MTPLX release:
-older releases do not know this model type and refuse the pack.
+Pick Bonsai 2 27B in the model list, or pass
+`--model {hf_repo}` to `mtplx serve`.
+The macOS app lists it in the model picker. This pack requires MTPLX
+{min_engine_version} or newer.
 
 ## Recommended settings
 
@@ -412,14 +418,15 @@ default.
 | Thinking | 1.0 | 0.95 | 20 | 0.0 |
 | Non-thinking | 0.7 | 0.80 | 20 | 1.5 |
 
-The model thinks at the `xhigh` effort level by default. Use `medium` for
-shorter answers. Prism ML states that `low` is not supported.
+The pack uses the `qwen3_8` behavior family. MTPLX supplies the reasoning
+defaults from that runtime policy; explicit user settings take precedence.
 
 ## Memory
 
-The weights take about 8.8 GB. The context cache comes on top of that and grows
-with the length of the conversation. On a 16 GB Mac keep the context window at
-32K tokens or lower.
+The pack manifest records the actual file sizes. Catalog memory figures are
+provisional until the measured memory table is available. The context cache
+grows with the conversation; MTPLX plans context from the artifact and the
+memory available on your Mac.
 
 ## License and attribution
 
@@ -558,7 +565,11 @@ def build_pack(
             "size": path.stat().st_size,
             "placed_by": actions.get(path.name, "written"),
         }
-    manifest = {"pack": PACK_NAME, "provenance": provenance, "files": manifest_files}
+    manifest = {
+        "pack": PACK_NAME, "public_model_id": PUBLIC_MODEL_ID,
+        "model_family": MODEL_FAMILY, "min_engine_version": MIN_ENGINE_VERSION,
+        "provenance": provenance, "files": manifest_files,
+    }
     (output / "MTPLX_PACK_MANIFEST.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )

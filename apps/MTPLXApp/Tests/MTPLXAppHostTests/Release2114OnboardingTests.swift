@@ -6,7 +6,7 @@ final class Release2114OnboardingTests: XCTestCase {
     func testEveryRecommendationHasAnOnboardingCard() {
         for generation in ["m2", "m5"] {
             for ram in [8, 16, 18, 24, 32, 36, 48, 64, 96, 128, 192, 256, 512] {
-                let hardware = DetectedHardware(chipName: "Apple \(generation)", appleSiliconGeneration: generation, unifiedMemoryBytes: UInt64(ram) * 1_073_741_824)
+                let hardware = DetectedHardware(chipName: "Apple \(generation)", appleSiliconGeneration: generation, unifiedMemoryBytes: Int64(ram) * 1_073_741_824)
                 let ids = MTPLXModelOption.recommendedCatalogIDs(for: hardware)
                 let rows = RecommendedModelRow.rows(for: ids)
                 XCTAssertEqual(rows.count, ids.count, "\(generation) \(ram)")

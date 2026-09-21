@@ -86,6 +86,9 @@ def test_catalog_matches_swift_official_catalog():
             re.findall(r"recommendedFor: \[([^\]]*)\]", catalog_block),
         )
     )
+    swift_details = re.findall(r'localizedDetailKey: "([^"\n]+)"', catalog_block)
+    assert swift_details == [model.detail for model in OFFICIAL_CATALOG]
+    assert all("recommended" not in model.detail.lower() for model in OFFICIAL_CATALOG)
     swift_tier_names = {".modernApple": "modern", ".legacyApple": "legacy"}
     assert len(swift_entries) == len(OFFICIAL_CATALOG)
     for python_model, (swift_id, swift_hf, swift_size, swift_peak, swift_tiers) in zip(
@@ -446,8 +449,7 @@ def test_read_app_settings_degrades_to_none(tmp_path):
 def test_select_default_model_routes_small_macs_to_packs_that_fit(monkeypatch):
     monkeypatch.delenv("MTPLX_DEFAULT_MODEL_VARIANT", raising=False)
 
-    # 24 GiB: the 9B (10 GiB measured peak) is what the picker lists first;
-    # the 27B does not fit.
+    # 24 GiB: Bonsai leads the smaller-Mac tier.
     small_modern = select_default_model(
         hardware={
             "chip": "Apple M4",
@@ -458,11 +460,11 @@ def test_select_default_model_routes_small_macs_to_packs_that_fit(monkeypatch):
     assert small_modern.model == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
     assert small_modern.hf_model == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
     assert small_modern.variant == "speed"
-    assert "9B" in small_modern.reason
-    assert small_modern.display_name == "Qwen3.5 9B Optimized Speed"
+    assert "Bonsai 2 27B" in small_modern.reason
+    assert small_modern.display_name == "Bonsai 2 27B Optimized Speed"
     assert small_modern.memory_gib == 24.0
 
-    # 16 GiB: the picker's 16-31 GiB tier leads with the 9B, so the CLI
+    # 16 GiB: the picker's smaller-Mac tier leads with Bonsai, so the CLI
     # default matches it (the 4B pair leads only below 16 GiB).
     sixteen_modern = select_default_model(
         hardware={
@@ -471,8 +473,8 @@ def test_select_default_model_routes_small_macs_to_packs_that_fit(monkeypatch):
             "memory_gib": 16.0,
         }
     )
-    assert sixteen_modern.model == QWEN35_9B_OPTIMIZED_SPEED_HF_MODEL_ID
-    assert "9B" in sixteen_modern.reason
+    assert sixteen_modern.model == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
+    assert "Bonsai" in sixteen_modern.reason
     assert recommended_models(memory_gib=16.0, chip_tier=MODERN_TIER)[0].hf_model_id == (
         sixteen_modern.model
     )
@@ -557,7 +559,7 @@ def test_select_default_model_without_memory_keeps_generation_policy(monkeypatch
 # ---- README model table stays true to the catalog (issues #238, #408) -----
 
 _README_TABLE_ROW = re.compile(
-    r"^\|\s*`(?P<repo>Qwen[\w.\-]+|Gemma[\w.\-]+)`\s*\|"
+    r"^\|\s*`(?P<repo>Qwen[\w.\-]+|Gemma[\w.\-]+|Ternary-Bonsai[\w.\-]+)`\s*\|"
     r"(?P<fits>[^|]*)\|(?P<purpose>[^|]*)\|(?P<preset>[^|]*)\|\s*$"
 )
 _README_PEAK = re.compile(r"peaks at (?P<peak>[\d.]+) GiB")
@@ -594,7 +596,15 @@ def test_readme_model_table_quotes_the_catalog_peak_memory():
     for row in _readme_model_rows():
         repo = f"Youssofal/{row.group('repo')}"
         stated = _README_PEAK.search(row.group("fits"))
-        assert stated is not None, f"README row for {repo} states no peak memory"
+        if stated is None:
+            # Provisional packs link to the single figures record instead of
+            # duplicating a calculated peak in prose that can go stale.
+            assert repo in {
+                "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+                "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            }
+            assert "[provisional catalog figures](mtplx/model_catalog.py)" in row.group("fits")
+            continue
         assert abs(float(stated.group("peak")) - peaks[repo]) <= 0.05, (
             f"README peak for {repo} drifted from the catalog"
         )

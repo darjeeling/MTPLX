@@ -160,6 +160,9 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         if id.hasPrefix("forged-") {
             return "Forged locally with MTPLX Forge."
         }
+        if id.hasPrefix("local:") {
+            return "Local MTPLX model in a configured library."
+        }
         if id.hasPrefix("local-") {
             return "Local model folder on this Mac."
         }
@@ -562,7 +565,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-speed",
             displayName: "Qwen 3.8 27B Optimized Speed",
             shortName: "Qwen 3.8 27B Optimized Speed",
-            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality. Recommended.",
+            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
@@ -634,7 +637,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-speed-fp16",
             displayName: "Qwen 3.8 27B Optimized Speed FP16",
             shortName: "Qwen 3.8 27B Optimized Speed FP16",
-            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended.",
+            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
@@ -706,7 +709,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "flash-next-optimized-speed",
             displayName: "Qwen 3.8 Flash-Next Optimized Speed",
             shortName: "Flash-Next Optimized Speed",
-            localizedDetailKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended.",
+            localizedDetailKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower.",
             hfModelID: "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
@@ -741,6 +744,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
                 "Flash-Next Optimized Quality",
             ],
+            // Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
             // Calculated download and planner need at 128K; replace together with measured figures.
             sizeBytes: 169_900_000_000, peakMemoryGiB: 166.2,
             recommendedFor: [.modernApple]
@@ -810,7 +814,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-speed-fp16",
             displayName: "Qwen 3.6 27B Optimized Speed FP16",
             shortName: "Qwen 3.6 27B Optimized Speed FP16",
-            localizedDetailKey: "FP16 speed artifact recommended for M1 and M2 Macs.",
+            localizedDetailKey: "FP16 speed artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
@@ -954,7 +958,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-quality-fp16",
             displayName: "Qwen 3.6 27B Optimized Quality FP16",
             shortName: "Qwen 3.6 27B Optimized Quality FP16",
-            localizedDetailKey: "FP16 quality artifact recommended for M1 and M2 Macs.",
+            localizedDetailKey: "FP16 quality artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/hf-staging/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
@@ -1039,7 +1043,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 id: "local:\(local.path)",
                 displayName: local.displayName,
                 shortName: local.displayName,
-                detail: tr("Local MTPLX model in a configured library."),
+                localizedDetailKey: "Local MTPLX model in a configured library.",
                 hfModelID: local.reference,
                 localCandidates: [local.path],
                 aliases: [local.reference, local.path]
@@ -1177,8 +1181,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen38-27b-optimized-quality",
     ]
 
-    /// Qwen 3.8 Flash-Next pair (2026-08-27): Bare Speed first (the fast
-    /// flat-4-bit pick), then Optimized Speed. Modern-tier, big-Mac only.
+    /// Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
     /// Mirrors model_catalog.FLASH_NEXT_IDS.
     private static let flashNextIDs = [
         "flash-next-bare-speed",
@@ -1596,7 +1599,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         return nil
     }
 
-    private static func isBonsaiFamilyHint(_ text: String) -> Bool {
+    static func isBonsaiFamilyHint(_ text: String) -> Bool {
         ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
     }
 

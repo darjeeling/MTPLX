@@ -148,8 +148,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         id="qwen38-27b-optimized-speed",
         display_name="Qwen 3.8 27B Optimized Speed",
         detail=(
-            "4-bit dynamic quant. Great coding speeds and good quality. "
-            "Recommended."
+            "4-bit dynamic quant. Great coding speeds and good quality."
         ),
         hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
         # Exact byte sum of the published HF repo files (2026-08-15 tree API;
@@ -216,7 +215,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.8 27B Optimized Speed FP16",
         detail=(
             "4-bit dynamic quant. Great coding speeds and good quality. "
-            "FP16 build for M1 and M2 Macs. Recommended."
+            "FP16 build for M1 and M2 Macs."
         ),
         hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
         # Exact byte sum of the published HF repo files (2026-08-15 tree API;
@@ -281,7 +280,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.8 Flash-Next Optimized Speed",
         detail=(
             "Dynamic 4-bit quant with 8-bit attention. Higher quality and "
-            "slightly slower. Recommended."
+            "slightly slower."
         ),
         hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
         # Exact byte sum of the published HF repo (2026-08-28 audit); includes
@@ -303,6 +302,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.8 Flash-Next Optimized Quality",
         detail="8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
         hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+        # Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
         # Calculated download and planner need at 128K; replace together with measured figures.
         size_bytes=169_900_000_000, peak_memory_gib=166.2,
         recommended_tiers=frozenset({MODERN_TIER}),
@@ -362,7 +362,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
     CatalogModel(
         id="optimized-speed-fp16",
         display_name="Qwen 3.6 27B Optimized Speed FP16",
-        detail="FP16 speed artifact recommended for M1 and M2 Macs.",
+        detail="FP16 speed artifact for M1 and M2 Macs.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
         # Exact sum of the published HF repo files (2026-07-03 audit); the
         # previous 16-GiB figure was a pre-publish estimate ~0.7 GiB high.
@@ -468,7 +468,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
     CatalogModel(
         id="optimized-quality-fp16",
         display_name="Qwen 3.6 27B Optimized Quality FP16",
-        detail="FP16 quality artifact recommended for M1 and M2 Macs.",
+        detail="FP16 quality artifact for M1 and M2 Macs.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
         # Exact byte sum of the published HF repo files (2026-07-07 upload,
         # verified via the tree API).
@@ -517,8 +517,7 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "bonsai-2-27b-optimized-speed",
 )
 
-# Qwen 3.8 Flash-Next pair (2026-08-27): Bare Speed first (the fast
-# flat-4-bit pick), then Optimized Speed. Modern-tier, big-Mac only.
+# Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
 # Mirrors MTPLXModelOption.flashNextIDs.
 _FLASH_NEXT_IDS = (
     "flash-next-bare-speed",

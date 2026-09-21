@@ -40,8 +40,9 @@ public struct MTPLXRuntimeBootstrapper: Sendable {
 
     private let environment: [String: String]
 
+    /// Status callbacks carry English localization keys, never rendered text.
     public func installOrUpdate(status: (@Sendable (String) -> Void)? = nil) throws -> URL {
-        status?(tr("Checking MTPLX runtime"))
+        status?("Checking MTPLX runtime")
         let minimumVersion = minimumRuntimeVersion()
         let bundledWheel = MTPLXCommandBuilder.bundledRuntimeWheelPath(environment: environment)
         // When this bundle ships a wheel, the engine is always the
@@ -72,7 +73,7 @@ public struct MTPLXRuntimeBootstrapper: Sendable {
                 return existing
             }
             if let wheel = bundledWheel {
-                status?(tr("Repairing MTPLX runtime"))
+                status?("Repairing MTPLX runtime")
                 return try installBundledRuntime(
                     wheel: URL(fileURLWithPath: wheel),
                     rebuildFromScratch: true
@@ -80,14 +81,14 @@ public struct MTPLXRuntimeBootstrapper: Sendable {
             }
         }
         if let wheel = bundledWheel {
-            status?(tr("Installing MTPLX runtime"))
+            status?("Installing MTPLX runtime")
             return try installBundledRuntime(wheel: URL(fileURLWithPath: wheel))
         }
         if let existing = try? MTPLXCommandBuilder.resolveInstalledExecutable(environment: environment),
            minimumVersion == nil {
             return existing
         }
-        status?(tr("Installing MTPLX runtime"))
+        status?("Installing MTPLX runtime")
         return try installHomebrewRuntime()
     }
 

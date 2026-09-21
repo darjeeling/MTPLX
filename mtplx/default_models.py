@@ -81,7 +81,7 @@ _LEGACY_APPLE_FP16_GENERATIONS = frozenset({"m1", "m2"})
 _NEWER_APPLE_SPEED_GENERATIONS = frozenset({"m3", "m4", "m5"})
 # Below this much unified memory the 27B default cannot load safely, so the
 # default routes to the smaller pack the app's picker lists first (the 9B
-# from 16 GiB, the 4B below that; model_catalog.recommended_catalog_ids).
+# and Bonsai from its named tier bound, the 4B below 16 GiB; model_catalog.recommended_catalog_ids).
 SMALL_DEFAULT_MEMORY_FLOOR_GIB = 32.0
 # The smaller speed packs, largest first. Under the 27B floor the default is
 # the first of these the app's tiers offer this machine; with unreadable
@@ -185,6 +185,11 @@ _OPTIMIZED_35B_SPEED_LOCAL_CANDIDATES = (
 )
 _VERIFIED_DEFAULT_LOCAL_NAMES = frozenset(
     {
+        Path(BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID).name,
+        BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID.replace("/", "--"),
+        BONSAI_LEGACY_LOCAL_NAME,
+        Path(FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID).name,
+        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID.replace("/", "--"),
         "Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Qwen3.8-27B-MTPLX-Bare-Speed",
@@ -343,7 +348,7 @@ def _complete_local_model_ref(candidates: tuple[str, ...]) -> str | None:
 
 def catalog_model_ref(pack: CatalogModel) -> str:
     """Prefer a complete copy in configured libraries, including released aliases."""
-    from mtplx.hf_loader import model_library_roots
+    from mtplx.hf_loader import cached_model_is_complete, model_library_roots
 
     basename = Path(pack.hf_model_id).name
     names = (pack.hf_model_id.replace("/", "--"), basename,
@@ -351,7 +356,7 @@ def catalog_model_ref(pack: CatalogModel) -> str:
     for root in model_library_roots():
         for name in names:
             candidate = root / name
-            if _is_complete_local_model(candidate):
+            if cached_model_is_complete(candidate):
                 return str(candidate)
     return pack.hf_model_id
 
@@ -886,10 +891,11 @@ def select_default_model(
     """Select the verified default model for this machine.
 
     Auto policy is intentionally simple and visible: M1/M2 -> FP16, modern
-    Macs with at least 32 GiB -> Qwen 3.8 Optimized Speed (the complete local
+    Macs from 256 GiB -> Flash-Next Optimized Quality; 32-255 GiB ->
+    Qwen 3.8 Optimized Speed (the complete local
     build when installed, otherwise the published Hub repo), under 32 GiB ->
     the smaller pack the app's picker lists first for that much memory (the
-    9B from 16 GiB, the 4B below), and memory that could not be read -> the
+    Bonsai from its named tier bound, the 4B below 16 GiB), and memory that could not be read -> the
     smallest pack. An explicit legacy
     MTPLX_OPTIMIZED_SPEED_MODEL override keeps the 3.6 Optimized Speed V2
     lane it was written for.
@@ -1056,6 +1062,9 @@ def verified_default_refs() -> set[str]:
     local_qwen38_bare = qwen38_bare_speed_model_ref()
     local_speed = optimized_speed_model_ref()
     refs = {
+        BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
+        BONSAI_LEGACY_PUBLIC_MODEL_ID,
+        FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID,
         BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
         FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
         DEFAULT_HF_MODEL_ID,

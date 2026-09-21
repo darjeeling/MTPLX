@@ -185,6 +185,8 @@ FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID = "Youssofal/Qwen3.8-Flash-Next-MTPLX-O
 FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID = "mtplx-flash-next-optimized-quality"
 BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID = "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
 BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID = "mtplx-bonsai-2-27b-optimized-speed"
+# The old served id is an alias of the current repo, not a second pack.
+BONSAI_LEGACY_HF_MODEL_ID = BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID
 BONSAI_LEGACY_PUBLIC_MODEL_ID = "mtplx-bonsai-38-27b-optimized-speed"
 BONSAI_LEGACY_LOCAL_NAME = "Bonsai-3.8-27B-MTPLX-Optimized-Speed"
 # Public default (2026-08-15, founder ruling on the Qwen3.8 release): the

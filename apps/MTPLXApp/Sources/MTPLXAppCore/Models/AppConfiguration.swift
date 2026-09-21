@@ -534,10 +534,16 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     /// Fresh installs must be portable. Installed local copies are discovered
     /// by the model catalog; the default configuration should never point at
     /// a developer machine path.
-    public static func defaultLocalModelPath() -> String {
-        // Qwen 3.8 Optimized Speed is the recommended pick and fresh-install
-        // default (2026-08-15 release); mirrors DEFAULT_HF_MODEL_ID in
-        // mtplx/profiles.py.
+    public static func defaultLocalModelPath(
+        for hardware: DetectedHardware = HardwareInspector.detectLocalHardware()
+    ) -> String {
+        if let model = MTPLXModelOption.hardwareAwareOfficialCatalog(
+            hardware: hardware, includeInstalledOverrides: false
+        ).first {
+            return model.hfModelID
+        }
+        // No fitting model (e.g. Intel or 8 GB legacy): keep the portable
+        // configuration placeholder. Onboarding still gates the actual choice.
         return "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
     }
 

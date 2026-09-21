@@ -1185,11 +1185,13 @@ def _artifact_family_texts(model_ref: str) -> tuple[str, str]:
                 provenance = provenance if isinstance(provenance, dict) else {}
                 inputs = provenance.get("forge_inputs")
                 inputs = inputs if isinstance(inputs, dict) else {}
+                controls = data.get("model_controls")
+                controls = controls if isinstance(controls, dict) else {}
                 parts.extend(
                     str(value or "")
                     for value in (
                         data.get("model_family"),
-                        (data.get("model_controls") or {}).get("model_family"),
+                        controls.get("model_family"),
                         data.get("public_model_id"),
                         data.get("served_model_id"),
                         data.get("model_id"),

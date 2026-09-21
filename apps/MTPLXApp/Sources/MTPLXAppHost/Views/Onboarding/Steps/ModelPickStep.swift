@@ -896,7 +896,7 @@ struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen38-27b-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.8 27B Optimized Speed",
-        detailLocalizationKey: "4-bit dynamic quant. Great coding speeds and good quality. Recommended."
+        detailLocalizationKey: "4-bit dynamic quant. Great coding speeds and good quality."
     )
 
     static let qwen38BareSpeed = RecommendedModelRow(
@@ -928,7 +928,7 @@ struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "flash-next-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.8 Flash-Next Optimized Speed",
-        detailLocalizationKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended."
+        detailLocalizationKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower."
     )
 
     static let qwen27SpeedV2 = RecommendedModelRow(
@@ -972,7 +972,7 @@ struct RecommendedModelRow: Identifiable, Sendable {
     )
 }
 
-private enum ProviderLogoKind: Equatable, Sendable {
+enum ProviderLogoKind: Equatable, Sendable {
     case qwen
     case google
     case huggingFace

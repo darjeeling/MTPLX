@@ -555,7 +555,7 @@ public struct OpenCodeIntegration: Sendable {
             // QWEN4_EXP_REASONING_CODEC: same official effort triple.
             return ["xhigh", "medium", "low"]
         }
-        if lower.contains("qwen38") || lower.contains("qwen3.8") || lower.contains("qwen3-8") {
+        if MTPLXModelOption.modelFamily(for: modelID) == "qwen3_8" {
             // QWEN3_8_REASONING_CODEC: official reasoning_effort levels.
             return ["xhigh", "medium", "low"]
         }
@@ -579,7 +579,7 @@ public struct OpenCodeIntegration: Sendable {
             // before the 3.8 markers, which the pack names also contain.
             return "medium"
         }
-        if lower.contains("qwen38") || lower.contains("qwen3.8") || lower.contains("qwen3-8") {
+        if MTPLXModelOption.modelFamily(for: modelID) == "qwen3_8" {
             // QWEN3_8_REASONING_CODEC default: medium (strict max-fan A/B,
             // 2026-08-14 — same correct uncapped result 51.52s vs 314.91s
             // at xhigh).

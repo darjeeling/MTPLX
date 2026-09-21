@@ -18,10 +18,13 @@ final class Release2114CatalogTests: XCTestCase {
             let hardware = DetectedHardware(
                 chipName: row.tier == "legacy" ? "Apple M2" : "Apple M5",
                 appleSiliconGeneration: row.tier == "legacy" ? "m2" : "m5",
-                unifiedMemoryBytes: UInt64(row.ram_gib) * 1_073_741_824
+                unifiedMemoryBytes: Int64(row.ram_gib) * 1_073_741_824
             )
             XCTAssertEqual(MTPLXModelOption.recommendedCatalogIDs(for: hardware), row.raw, "\(row.tier) \(row.ram_gib)")
             XCTAssertEqual(MTPLXModelOption.hardwareAwareOfficialCatalog(hardware: hardware, includeInstalledOverrides: false).map(\.id), row.visible)
+            if let firstID = row.visible.first {
+                XCTAssertEqual(MTPLXModelOption.option(matching: MTPLXAppConfiguration.defaultLocalModelPath(for: hardware))?.id, firstID)
+            }
         }
         XCTAssertEqual(MTPLXModelOption.officialCatalog.count, 25)
     }
@@ -29,7 +32,7 @@ final class Release2114CatalogTests: XCTestCase {
     func testBonsaiBoundCanMoveWithoutDroppingTheOption() {
         XCTAssertEqual(MTPLXModelOption.bonsaiRecommendationMinGiB, 16)
         for ram in [16, 18, 24] {
-            let hardware = DetectedHardware(chipName: "Apple M5", appleSiliconGeneration: "m5", unifiedMemoryBytes: UInt64(ram) * 1_073_741_824)
+            let hardware = DetectedHardware(chipName: "Apple M5", appleSiliconGeneration: "m5", unifiedMemoryBytes: Int64(ram) * 1_073_741_824)
             let ids = MTPLXModelOption.recommendedCatalogIDs(for: hardware, bonsaiMinimumGiB: 24)
             XCTAssertEqual(ids.first, ram < 24 ? "qwen35-9b-optimized-speed" : "bonsai-2-27b-optimized-speed")
             XCTAssertTrue(ids.contains("bonsai-2-27b-optimized-speed"))
@@ -52,6 +55,15 @@ final class Release2114CatalogTests: XCTestCase {
         }
     }
 
+    func testLegacyMetadataKeepsBonsaiFamilyAfterRename() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("identity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let metadata = ["public_model_id": "mtplx-bonsai-38-27b-optimized-speed", "arch_id": "qwen3-next-mtp"]
+        try JSONSerialization.data(withJSONObject: metadata).write(to: directory.appendingPathComponent("mtplx_runtime.json"))
+        XCTAssertEqual(MTPLXModelOption.modelFamily(for: directory.path), "qwen3_8")
+        XCTAssertEqual(OpenCodeIntegration.reasoningEffortLevels(forModelID: "mtplx-bonsai-2-27b-optimized-speed"), ["xhigh", "medium", "low"])
+    }
+
     func testNewCuratedChoicesResolveAndCanAdvance() throws {
         for (choice, id) in [(ModelPickChoice.curatedQwen35FourBit, "qwen35-4b-optimized-speed"), (.curatedQwen35FourBQuality, "qwen35-4b-optimized-quality"), (.curatedBonsaiOptimizedSpeed, "bonsai-2-27b-optimized-speed"), (.curatedFlashNextOptimizedQuality, "flash-next-optimized-quality")] {
             var state = OnboardingFeatureState()
@@ -62,6 +74,7 @@ final class Release2114CatalogTests: XCTestCase {
             XCTAssertTrue(state.canAdvance)
         }
         XCTAssertEqual(OnboardingFeatureState().pick, .none)
+        XCTAssertEqual(MTPLXAppConfiguration(model: "User/SavedModel").model, "User/SavedModel")
     }
 
     func testNewPackFeasibilityAndUnchangedBadgeBoundaries() throws {

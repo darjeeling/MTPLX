@@ -98,12 +98,13 @@ struct FanControlInstaller: Sendable {
     /// Check for a detected fan tool and install one when missing.
     /// Never throws — callers decide whether a failure blocks (tune)
     /// or degrades to a warning (runtime setup).
+    /// `status` receives localization keys; render only at the consuming view.
     func ensureReady(
         executable: URL,
         subprocess: SubprocessInterruptBox,
         status: (String) -> Void
     ) -> FanControlSetupResult {
-        status(tr("Checking fan control"))
+        status("Checking fan control")
 
         let statusCheck = runCommand(
             executable: executable,
@@ -116,12 +117,12 @@ struct FanControlInstaller: Sendable {
         ) == true
 
         if !hasDetectedTool {
-            status(tr("Installing fan control"))
+            status("Installing fan control")
             let install = install(executable: executable, subprocess: subprocess)
             guard install.ok else { return install }
         }
 
-        status(tr("Fan control ready"))
+        status("Fan control ready")
         return FanControlSetupResult(ok: true, exitCode: 0, message: tr("Fan control ready"))
     }
 

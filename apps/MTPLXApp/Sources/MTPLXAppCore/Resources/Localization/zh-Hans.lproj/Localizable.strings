@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "快 2–3 倍";
 "30 competition problems" = "30 道竞赛题";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4 位动态量化。编程速度极快，质量良好。适用于 M1 和 M2 Mac 的 FP16 版本。推荐。";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4 位动态量化。编程速度极快，质量良好。推荐。";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4 位动态量化。编程速度极快，质量良好。适用于 M1 和 M2 Mac 的 FP16 版本。";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4 位动态量化。编程速度极快，质量良好。";
 "4-bit quantization. Blazingly fast and quite smart." = "4 位量化。速度飞快，相当聪明。";
 "4-bit quantization. Fastest fit for smaller Macs." = "4 位量化。小内存 Mac 上最快的选择。";
 "5-min Min/Max" = "5 分钟最小/最大值";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "舍弃此会话已缓存的前缀";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "非量化权重的 Dtype。FP16 在没有原生 BF16 的 M1/M2 Mac 上提示处理速度更快。";
 "DURATION" = "时长";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "动态 4 位量化配 8 位注意力。质量更高且稍慢。推荐。";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "动态 4 位量化配 8 位注意力。质量更高且稍慢。";
 "Earlier heavy history hidden" = "已隐藏较早的大量历史记录";
 "Edit" = "编辑";
 "effective %@" = "有效 %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "找到了 %@ 但无法读取其版本。应用无论如何都会使用自己的运行时。";
 "Found %lld results — %@" = "找到 %lld 个结果 — %@";
 "Found your sweet spot." = "已找到最适合你的设置。";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "推荐用于 M1 和 M2 Mac 的 FP16 质量产物。";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "推荐用于 M1 和 M2 Mac 的 FP16 速度产物。";
+"FP16 quality artifact for M1 and M2 Macs." = "适用于 M1 和 M2 Mac 的 FP16 质量产物。";
+"FP16 speed artifact for M1 and M2 Macs." = "适用于 M1 和 M2 Mac 的 FP16 速度产物。";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "适用于 M1 和 M2 Mac 的 FP16 友好型 35B 平衡产物。";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "适用于 M1 和 M2 Mac 的 FP16 友好型 35B 速度产物。";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "适用于 M1 和 M2 Mac 的 FP16 友好型 9B 速度产物。";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "连接的应用使用 MTPLX 设置";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "开启：连接的应用遵循 MTPLX 的推理和采样设置。关闭：使用各应用自己的设置。普通 API 请求保留各自的设置。";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8 位主体和 MTP 头、BF16 结构张量及 4 位 n-gram 表。保真度更高的 Flash-Next 版本。";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Prism ML 的三值 27B 模型，支持视觉和 MTP。精简权重适合内存较小的 Mac。";

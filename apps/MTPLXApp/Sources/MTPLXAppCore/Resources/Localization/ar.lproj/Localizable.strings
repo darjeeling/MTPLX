@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "أسرع بـ 2–3×";
 "30 competition problems" = "30 مسألة مسابقة";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "تكميم ديناميكي 4 بت. سرعات برمجية ممتازة وجودة جيدة. بنية FP16 لأجهزة Mac المزودة بـ M1 و M2. موصى به.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "تكميم ديناميكي 4 بت. سرعات برمجية ممتازة وجودة جيدة. موصى به.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "تكميم ديناميكي 4 بت. سرعات برمجية ممتازة وجودة جيدة. بنية FP16 لأجهزة Mac المزودة بـ M1 و M2.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "تكميم ديناميكي 4 بت. سرعات برمجية ممتازة وجودة جيدة.";
 "4-bit quantization. Blazingly fast and quite smart." = "تكميم 4 بت. سريع للغاية وذكي للغاية.";
 "4-bit quantization. Fastest fit for smaller Macs." = "تكميم 4 بت. الأسرع والأكثر ملاءمة لأجهزة Mac الأصغر.";
 "5-min Min/Max" = "الحد الأدنى/الأقصى خلال 5 دقائق";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "إسقاط البادئة المخزنة مؤقتاً لهذه الجلسة";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "نوع البيانات (Dtype) للأوزان غير المكممة. يعالج FP16 المطالبات بشكل أسرع على أجهزة Mac المزودة بـ M1/M2، والتي لا تدعم BF16 أصلياً.";
 "DURATION" = "المدة";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "تكميم ديناميكي 4 بت مع انتباه 8 بت. جودة أعلى وأبطأ قليلاً. موصى به.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "تكميم ديناميكي 4 بت مع انتباه 8 بت. جودة أعلى وأبطأ قليلاً.";
 "Earlier heavy history hidden" = "تم إخفاء السجل الثقيل السابق";
 "Edit" = "تعديل";
 "effective %@" = "فعلي %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "تم العثور على %@ ولكن تعذرت قراءة إصداره. يستخدم التطبيق بيئة التشغيل الخاصة به في كلا الحالتين.";
 "Found %lld results — %@" = "تم العثور على %lld من النتائج — %@";
 "Found your sweet spot." = "تم العثور على الإعداد المثالي لجهازك.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "ملف جودة FP16 موصى به لأجهزة Mac المزودة بـ M1 و M2.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "ملف سرعة FP16 موصى به لأجهزة Mac المزودة بـ M1 و M2.";
+"FP16 quality artifact for M1 and M2 Macs." = "ملف جودة FP16 لأجهزة Mac المزودة بـ M1 و M2.";
+"FP16 speed artifact for M1 and M2 Macs." = "ملف سرعة FP16 لأجهزة Mac المزودة بـ M1 و M2.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "ملف توازن 35B متوافق مع FP16 لأجهزة Mac المزودة بـ M1 و M2.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "ملف سرعة 35B متوافق مع FP16 لأجهزة Mac المزودة بـ M1 و M2.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "ملف سرعة 9B متوافق مع FP16 لأجهزة Mac المزودة بـ M1 و M2.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "استخدام إعدادات MTPLX للتطبيقات المتصلة";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "عند التفعيل: تتبع التطبيقات المتصلة إعدادات التفكير وأخذ العينات في MTPLX. عند الإيقاف: تُطبّق إعداداتها الخاصة. تحتفظ طلبات API العادية بإعداداتها الخاصة.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "نموذج أساسي ورأس MTP بدقة 8 بت، وموترات بنيوية BF16، وجدول n-gram بدقة 4 بت. إصدار Flash-Next بدقة أعلى.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "نموذج Prism ML ثلاثي القيم بحجم 27B مع الرؤية وMTP. أوزان مدمجة لأجهزة Mac ذات الذاكرة الأصغر.";

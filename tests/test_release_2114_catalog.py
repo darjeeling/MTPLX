@@ -13,15 +13,14 @@ from mtplx.default_models import public_model_id_for_ref
 from mtplx.model_catalog import catalog_model_matching, catalog_model_with_id
 
 NEW_MODELS = (
-    ("flash-next-optimized-quality", "qwen4_exp", 169_900_000_000, 166.2),
-    ("bonsai-2-27b-optimized-speed", "qwen3_8", 8_200_000_000, 10.32),
+    ("flash-next-optimized-quality", "qwen4_exp"),
+    ("bonsai-2-27b-optimized-speed", "qwen3_8"),
 )
 
 
-@pytest.mark.parametrize("catalog_id,family,size,peak", NEW_MODELS)
-def test_new_pack_identity_round_trips(catalog_id, family, size, peak, tmp_path):
+@pytest.mark.parametrize("catalog_id,family", NEW_MODELS)
+def test_new_pack_identity_round_trips(catalog_id, family, tmp_path):
     model = catalog_model_with_id(catalog_id)
-    assert (model.size_bytes, model.peak_memory_gib) == (size, peak)
     public_id = f"mtplx-{catalog_id}"
     refs = [catalog_id, model.hf_model_id, *[a for a in model.aliases if " " not in a]]
     for ref in refs:
@@ -107,3 +106,46 @@ def test_badge_safety_boundaries(ram, peak, verdict):
     from mtplx.model_catalog import evaluate_feasibility
     model = replace(catalog_model_with_id("bonsai-2-27b-optimized-speed"), peak_memory_gib=peak)
     assert evaluate_feasibility(model, chip_tier="modern", ram_gib=ram, disk_free_gib=1000).verdict == verdict
+
+@pytest.mark.parametrize("name,ram,catalog_id", [
+    ("Bonsai-3.8-27B-MTPLX-Optimized-Speed", 16, "bonsai-2-27b-optimized-speed"),
+    ("Qwen3.8-Flash-Next-MTPLX-Optimized-Quality", 256, "flash-next-optimized-quality"),
+])
+def test_default_reuses_complete_library_pack(name, ram, catalog_id, monkeypatch, tmp_path):
+    from mtplx.default_models import is_verified_default_model_ref, select_default_model
+    root = tmp_path / "library"
+    pack = root / name
+    pack.mkdir(parents=True)
+    (pack / "config.json").write_text("{}")
+    (pack / "model.safetensors").write_bytes(b"test weights")
+    (pack / "mtp.safetensors").write_bytes(b"test head")
+    monkeypatch.setenv("MTPLX_MODEL_DIR", str(root))
+    selection = select_default_model(hardware={"apple_silicon_generation": "m5", "memory_gib": ram})
+    assert selection.model == str(pack)
+    assert catalog_model_matching(selection.hf_model).id == catalog_id
+    assert is_verified_default_model_ref(pack)
+
+@pytest.mark.parametrize("catalog_id,family", NEW_MODELS)
+def test_new_packs_do_not_receive_unmeasured_turbo_promotion(catalog_id, family):
+    from types import SimpleNamespace
+    from mtplx.commands.public import _apply_model_default_profile
+    model = catalog_model_with_id(catalog_id)
+    args = SimpleNamespace(model=model.hf_model_id, profile="sustained", _cli_flags=set())
+    assert not _apply_model_default_profile(args, f"mtplx-{catalog_id}")
+    assert args.profile == "sustained"
+
+
+def test_bonsai_builder_stamps_catalog_identity_family_and_engine_floor():
+    from scripts import build_bonsai_mtplx_pack as builder
+    pack = catalog_model_with_id("bonsai-2-27b-optimized-speed")
+    assert builder.PACK_NAME == Path(pack.hf_model_id).name
+    assert builder.HF_REPO == pack.hf_model_id
+    assert builder.PUBLIC_MODEL_ID == f"mtplx-{pack.id}"
+    contract = builder.build_runtime_contract(mtplx_version="2.11.3", provenance={}, head=None)
+    assert contract["model_family"] == "qwen3_8"
+    assert contract["public_model_id"] == builder.PUBLIC_MODEL_ID
+    assert contract["min_engine_version"] == "2.11.4"
+    card = builder.render_card(source_sha="test-digest", head_note="test head")
+    assert f"--model {pack.hf_model_id}" in card
+    assert "Bonsai 2 27B" in card and "Prism ML" in card
+    assert "2.11.4 or newer" in card

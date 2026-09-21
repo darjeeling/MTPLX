@@ -33,35 +33,12 @@ from mtplx.default_models import (
     DefaultModelUnavailable,
     OPTIMIZED_QUALITY_DESCRIPTION,
     OPTIMIZED_QUALITY_LABEL,
-    QWEN38_BARE_SPEED_DESCRIPTION,
-    QWEN38_BARE_SPEED_LABEL,
-    QWEN38_OPTIMIZED_QUALITY_DESCRIPTION,
-    QWEN38_OPTIMIZED_QUALITY_LABEL,
-    QWEN38_OPTIMIZED_SPEED_DESCRIPTION,
-    QWEN38_OPTIMIZED_SPEED_LABEL,
-    QWEN38_BARE_SPEED_FP16_LABEL,
-    QWEN38_FP16_SUFFIX,
-    QWEN38_OPTIMIZED_QUALITY_FP16_LABEL,
-    QWEN38_OPTIMIZED_SPEED_FP16_LABEL,
     is_verified_default_model_ref,
     is_optimized_quality_model_ref,
-    optimized_quality_model_ref,
     public_model_id_for_ref,
-    qwen38_bare_speed_fp16_model_ref,
-    qwen38_bare_speed_model_ref,
-    qwen38_optimized_quality_fp16_model_ref,
-    qwen38_optimized_quality_model_ref,
     select_default_model,
 )
-from mtplx.profiles import (
-    DEFAULT_HF_MODEL_ID,
-    QWEN38_BARE_SPEED_FP16_HF_MODEL_ID,
-    QWEN38_BARE_SPEED_HF_MODEL_ID,
-    QWEN38_OPTIMIZED_QUALITY_FP16_HF_MODEL_ID,
-    QWEN38_OPTIMIZED_QUALITY_HF_MODEL_ID,
-    QWEN38_OPTIMIZED_SPEED_FP16_HF_MODEL_ID,
-    QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID,
-)
+from mtplx.profiles import DEFAULT_HF_MODEL_ID
 from mtplx.model_catalog import LEGACY_TIER, chip_tier_for_generation, recommended_models
 from mtplx.server_urls import bind_label, is_wildcard_bind, local_url_for_bind
 

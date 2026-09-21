@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× 더 빠름";
 "30 competition problems" = "30개 대회 문제";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4비트 동적 양자화. 탁월한 코딩 속도와 우수한 품질. M1 및 M2 Mac용 FP16 빌드. 권장됨.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4비트 동적 양자화. 탁월한 코딩 속도와 우수한 품질. 권장됨.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4비트 동적 양자화. 탁월한 코딩 속도와 우수한 품질. M1 및 M2 Mac용 FP16 빌드.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4비트 동적 양자화. 탁월한 코딩 속도와 우수한 품질.";
 "4-bit quantization. Blazingly fast and quite smart." = "4비트 양자화. 매우 빠르고 스마트합니다.";
 "4-bit quantization. Fastest fit for smaller Macs." = "4비트 양자화. 소형 Mac에 가장 빠른 적합도.";
 "5-min Min/Max" = "5분 최소/최대";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "이 세션의 캐시된 접두사 버리기";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "양자화되지 않은 가중치의 데이터 유형(dtype)입니다. 네이티브 BF16을 지원하지 않는 M1/M2 Mac에서는 FP16의 프롬프트 처리 속도가 더 빠릅니다.";
 "DURATION" = "소요 시간";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "8비트 어텐션을 적용한 동적 4비트 양자화. 더 높은 품질과 약간 느린 속도. 권장됨.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "8비트 어텐션을 적용한 동적 4비트 양자화. 더 높은 품질과 약간 느린 속도.";
 "Earlier heavy history hidden" = "이전 대용량 기록 숨김";
 "Edit" = "편집";
 "effective %@" = "유효 %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "%@을(를) 찾았으나 버전을 읽을 수 없습니다. 앱은 어느 경우든 자체 런타임을 사용합니다.";
 "Found %lld results — %@" = "%lld개의 결과 발견 — %@";
 "Found your sweet spot." = "최적의 설정을 찾았습니다.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "M1 및 M2 Mac에 권장되는 FP16 품질 아티팩트입니다.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "M1 및 M2 Mac에 권장되는 FP16 속도 아티팩트입니다.";
+"FP16 quality artifact for M1 and M2 Macs." = "M1 및 M2 Mac용 FP16 품질 아티팩트입니다.";
+"FP16 speed artifact for M1 and M2 Macs." = "M1 및 M2 Mac용 FP16 속도 아티팩트입니다.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "M1 및 M2 Mac에 적합한 FP16 35B 밸런스 아티팩트입니다.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "M1 및 M2 Mac에 적합한 FP16 35B 속도 아티팩트입니다.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "M1 및 M2 Mac에 적합한 FP16 9B 속도 아티팩트입니다.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "연결된 앱에 MTPLX 설정 사용";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "켜짐: 연결된 앱이 MTPLX의 추론 및 샘플링 설정을 따릅니다. 꺼짐: 각 앱의 설정을 사용합니다. 일반 API 요청은 자체 설정을 유지합니다.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8비트 본체와 MTP 헤드, BF16 구조 텐서, 4비트 n-gram 테이블. 정확도를 높인 Flash-Next 빌드.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "비전과 MTP를 지원하는 Prism ML의 삼진 27B 모델. 메모리가 적은 Mac을 위한 작은 가중치.";

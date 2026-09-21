@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× lebih cepat";
 "30 competition problems" = "30 soal kompetisi";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "Kuantisasi dinamis 4-bit. Kecepatan coding tinggi dan kualitas baik. Build FP16 untuk Mac M1 dan M2. Direkomendasikan.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "Kuantisasi dinamis 4-bit. Kecepatan coding tinggi dan kualitas baik. Direkomendasikan.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "Kuantisasi dinamis 4-bit. Kecepatan coding tinggi dan kualitas baik. Build FP16 untuk Mac M1 dan M2.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "Kuantisasi dinamis 4-bit. Kecepatan coding tinggi dan kualitas baik.";
 "4-bit quantization. Blazingly fast and quite smart." = "Kuantisasi 4-bit. Sangat cepat dan cukup cerdas.";
 "4-bit quantization. Fastest fit for smaller Macs." = "Kuantisasi 4-bit. Pilihan tercepat untuk Mac yang lebih kecil.";
 "5-min Min/Max" = "Min/Maks 5 mnt";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "Buang prefiks yang di-cache sesi ini";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Dtype untuk bobot yang tidak dikuantisasi. FP16 memproses prompt lebih cepat di Mac M1/M2, yang tidak memiliki BF16 native.";
 "DURATION" = "DURASI";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "Kuantisasi dinamis 4-bit dengan atensi 8-bit. Kualitas lebih tinggi dan sedikit lebih lambat. Direkomendasikan.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "Kuantisasi dinamis 4-bit dengan atensi 8-bit. Kualitas lebih tinggi dan sedikit lebih lambat.";
 "Earlier heavy history hidden" = "Riwayat berat sebelumnya disembunyikan";
 "Edit" = "Edit";
 "effective %@" = "efektif %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "Menemukan %@ tetapi tidak dapat membaca versinya. Bagaimanapun juga aplikasi menggunakan runtime-nya sendiri.";
 "Found %lld results — %@" = "Ditemukan %lld hasil — %@";
 "Found your sweet spot." = "Menemukan setelan paling optimal untuk Anda.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "Artefak kualitas FP16 direkomendasikan untuk Mac M1 dan M2.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "Artefak kecepatan FP16 direkomendasikan untuk Mac M1 dan M2.";
+"FP16 quality artifact for M1 and M2 Macs." = "Artefak kualitas FP16 untuk Mac M1 dan M2.";
+"FP16 speed artifact for M1 and M2 Macs." = "Artefak kecepatan FP16 untuk Mac M1 dan M2.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "Artefak keseimbangan 35B ramah FP16 untuk Mac M1 dan M2.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "Artefak kecepatan 35B ramah FP16 untuk Mac M1 dan M2.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "Artefak kecepatan 9B ramah FP16 untuk Mac M1 dan M2.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "Gunakan pengaturan MTPLX untuk aplikasi terhubung";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Aktif: aplikasi terhubung mengikuti pengaturan penalaran dan sampling MTPLX. Nonaktif: pengaturan masing-masing berlaku. Permintaan API biasa tetap menggunakan pengaturannya sendiri.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "Model utama dan head MTP 8-bit, tensor struktural BF16, serta tabel n-gram 4-bit. Build Flash-Next dengan fidelitas lebih tinggi.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Model ternary 27B dari Prism ML dengan visi dan MTP. Bobot ringkas untuk Mac dengan memori lebih kecil.";

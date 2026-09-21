@@ -254,8 +254,8 @@ public struct AutoTuner: Sendable {
                 }
 
                 let fanControl = FanControlInstaller(processEnvironment: self.processEnvironment)
-                    .ensureReady(executable: executable, subprocess: subprocess) { message in
-                        continuation.yield(.installingFanControl(message))
+                    .ensureReady(executable: executable, subprocess: subprocess) { key in
+                        continuation.yield(.installingFanControl(tr(key)))
                     }
                 if Task.isCancelled {
                     continuation.yield(.cancelled)
@@ -643,7 +643,7 @@ public struct AutoTuner: Sendable {
                 preferDevelopmentWrapper: preferDevelopmentWrapper
             )
         }
-        return try MTPLXRuntimeBootstrapper(environment: processEnvironment).installOrUpdate(status: status)
+        return try MTPLXRuntimeBootstrapper(environment: processEnvironment).installOrUpdate { key in status(tr(key)) }
     }
 }
 
