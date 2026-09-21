@@ -141,19 +141,33 @@ def test_attention_delta_branch_shifts_positions():
     attn = _tiny_attention()
     x = mx.random.normal((1, 4, 128)).astype(mx.bfloat16)
     # Past the table (None table, delta d) the rope positions are
-    # sequence_index + d: prove by comparing against a cache pre-advanced by
-    # d with the plain path (same absolute positions, same fresh KV).
+    # sequence_index + d. The rotated keys a forward stores are the witness:
+    # rows written at index 0..3 under delta d must be, bit for bit, the rows
+    # the plain path writes at index d..d+3 (same projections of the same
+    # rows, rotated at the same absolute positions).
     delta = 5
+    shifted_cache = QSACache(4)
     with vision_rope(None, delta):
-        shifted = attn(x, QSACache(4))
+        attn(x, shifted_cache)
     plain_cache = QSACache(4)
-    plain_cache.kv.offset = delta  # positions start at delta on plain path
-    plain = attn(x, plain_cache)
-    # Same rope positions; the plain run has an offset cache with no stored
-    # keys, so compare only the rope tables via a probe: outputs must match
-    # because S==T for the vision run while the plain run attends the same
-    # (empty-history) window despite the offset.
-    assert shifted.shape == plain.shape
+    attn(mx.random.normal((1, delta, 128)).astype(mx.bfloat16), plain_cache)
+    attn(x, plain_cache)
+    shifted_keys = shifted_cache.kv.keys[:, :, :4]
+    assert mx.array_equal(
+        shifted_keys, plain_cache.kv.keys[:, :, delta : delta + 4]
+    ).item()
+    # And the delta is really applied: without it the same rows rotate at
+    # 0..3 and come out different.
+    unshifted_cache = QSACache(4)
+    attn(x, unshifted_cache)
+    assert not mx.array_equal(shifted_keys, unshifted_cache.kv.keys[:, :, :4]).item()
+    # Values carry no position, so they are the same rows in all three runs.
+    assert mx.array_equal(
+        shifted_cache.kv.values[:, :, :4], unshifted_cache.kv.values[:, :, :4]
+    ).item()
+    assert mx.array_equal(
+        shifted_cache.kv.values[:, :, :4], plain_cache.kv.values[:, :, delta : delta + 4]
+    ).item()
 
 
 def test_attention_vision_scope_preserves_sparse_selection():
