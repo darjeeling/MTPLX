@@ -581,6 +581,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
         // retry path below.
         await beforePostRunLivenessCheck()
         guard next.isRunning else {
+            try checkLaunchCancellation(generation: launchGeneration, lifecycleEpoch: launchLifecycleEpoch)
             let exitStatus = next.terminationStatus
             lock.withLock {
                 guard process === next, lifecycleEpoch == launchLifecycleEpoch else { return }
@@ -612,9 +613,11 @@ public final class DaemonSupervisor: @unchecked Sendable {
             }
             notifyStatusObserver()
             if let startFailureReportURL, exitStatus != 0 {
+                let entries = await logStore.snapshot()
+                try checkLaunchCancellation(generation: launchGeneration, lifecycleEpoch: launchLifecycleEpoch)
                 StartFailureReport.write(
                     detail: "daemon exited during launch with status \(exitStatus)",
-                    entries: await logStore.snapshot(),
+                    entries: entries,
                     to: startFailureReportURL
                 )
             }
@@ -632,6 +635,8 @@ public final class DaemonSupervisor: @unchecked Sendable {
                     timeoutSeconds: timeoutSeconds,
                     expectedLaunchID: expectedLaunchID,
                     requireActualFanRamp: requireActualFanRamp,
+                    generation: launchGeneration,
+                    lifecycleEpoch: launchLifecycleEpoch,
                     onPhase: onPhase
                 )
             } catch {
@@ -1259,12 +1264,15 @@ public final class DaemonSupervisor: @unchecked Sendable {
         requireActualFanRamp: Bool = false,
         onPhase: (@Sendable (DaemonStartupPhase) -> Void)? = nil
     ) async throws -> HealthPayload {
+        let launchContext = lock.withLock { (generation: restartGeneration, lifecycleEpoch: lifecycleEpoch) }
         let health = try await waitForHealth(
             baseURL: healthBaseURL,
             apiKey: apiKey,
             timeoutSeconds: timeoutSeconds,
             expectedLaunchID: expectedLaunchID,
             requireActualFanRamp: requireActualFanRamp,
+            generation: launchContext.generation,
+            lifecycleEpoch: launchContext.lifecycleEpoch,
             onPhase: onPhase
         )
         lock.withLock { state = .running }
@@ -1503,12 +1511,27 @@ public final class DaemonSupervisor: @unchecked Sendable {
         }
     }
 
+    /// Stop invalidates the launch generation without cancelling a manual
+    /// start's Task. Check both before classifying an exit and after awaiting
+    /// log snapshots so a cancelled or superseded launch cannot write a report.
+    private func checkLaunchCancellation(generation: Int, lifecycleEpoch: Int) throws {
+        try Task.checkCancellation()
+        let cancelled = lock.withLock {
+            restartGeneration != generation || self.lifecycleEpoch != lifecycleEpoch || state == .stopping
+        }
+        if cancelled {
+            throw DaemonSupervisorError.launchFailed("daemon launch was cancelled")
+        }
+    }
+
     private func waitForHealth(
         baseURL: URL,
         apiKey: String?,
         timeoutSeconds: TimeInterval,
         expectedLaunchID: String?,
         requireActualFanRamp: Bool,
+        generation: Int,
+        lifecycleEpoch: Int,
         onPhase: (@Sendable (DaemonStartupPhase) -> Void)?
     ) async throws -> HealthPayload {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -1520,9 +1543,10 @@ public final class DaemonSupervisor: @unchecked Sendable {
             // through startOwned's catch/stopInternal path. Swallowing the
             // cancelled sleep below used to leave it hot-looping health probes
             // for the entire startup timeout.
-            try Task.checkCancellation()
+            try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
             if !isRunning() {
                 let entries = await logStore.snapshot()
+                try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
                 let tail = entries.suffix(8).map(\.message).joined(separator: " | ")
                 let detail = tail.isEmpty
                     ? "daemon exited before /health became ready"
@@ -1539,7 +1563,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
                 throw DaemonSupervisorError.launchFailed(detail)
             }
             if let health = await healthWaitProbe(baseURL, apiKey), health.ok {
-                try Task.checkCancellation()
+                try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
                 if let expectedLaunchID {
                     guard health.startup?.launchId == expectedLaunchID else {
                         throw DaemonSupervisorError.launchIdentityMismatch(
