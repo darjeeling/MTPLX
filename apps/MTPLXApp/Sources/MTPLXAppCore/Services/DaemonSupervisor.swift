@@ -191,16 +191,9 @@ public final class DaemonSupervisor: @unchecked Sendable {
         logStore: BoundedLogStore = BoundedLogStore(),
         restartPolicy: DaemonRestartPolicy = .default,
         startFailureReportURL: URL? = nil,
-        restartSleeper: @escaping @Sendable (TimeInterval) async -> Void = { delay in
-            guard delay > 0 else { return }
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        },
-        initialHealthProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = { baseURL, apiKey in
-            try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
-        },
-        healthWaitProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = { baseURL, apiKey in
-            try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
-        },
+        restartSleeper: @escaping @Sendable (TimeInterval) async -> Void = DaemonSupervisor.defaultRestartSleeper,
+        initialHealthProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = DaemonSupervisor.defaultHealthProbe,
+        healthWaitProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = DaemonSupervisor.defaultHealthProbe,
         // Test seam immediately before the atomic lifecycle reservation.
         beforeProcessReservation: @escaping @Sendable () async -> Void = {},
         // Test seam for the narrow period after ownership is published but
@@ -234,6 +227,33 @@ public final class DaemonSupervisor: @unchecked Sendable {
         self.beforeStopProcessFamilyResolution = beforeStopProcessFamilyResolution
         self.beforeStopProcessFamilySignal = beforeStopProcessFamilySignal
         self.beforeTerminationHandling = beforeTerminationHandling
+    }
+
+    // The production defaults of `init` are named functions on purpose.
+    //
+    // A default argument of a public function is compiled into every module
+    // that calls it. When the default was an `async` closure literal, each
+    // client (the app host, and every test file that builds a supervisor)
+    // carried its own copy of the closure under one shared symbol name, and
+    // the copies did not agree on the size of the closure's async frame: the
+    // core module calls `MTPLXAPIClient.health()` directly, a client goes
+    // through its function pointer. The linker keeps one copy of the code and
+    // one copy of the size record, not necessarily from the same module. With
+    // a mismatched pair the closure wrote 8 bytes past its 9,376-byte frame
+    // into the next task allocation's header, and the Swift concurrency
+    // runtime aborted in `swift_task_dealloc` ("freed pointer was not the last
+    // allocation"), found by a watchpoint on that header. Which pair the
+    // linker kept changed when 666f16e7 added a parameter ahead of these and
+    // renumbered the default arguments, which is why a cancelled start began
+    // to abort the debug test run there. One definition in this module cannot
+    // be mismatched.
+    public static func defaultHealthProbe(_ baseURL: URL, _ apiKey: String?) async -> HealthPayload? {
+        try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
+    }
+
+    public static func defaultRestartSleeper(_ delay: TimeInterval) async {
+        guard delay > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
     public var logs: BoundedLogStore {
@@ -581,6 +601,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
         // retry path below.
         await beforePostRunLivenessCheck()
         guard next.isRunning else {
+            try checkLaunchCancellation(generation: launchGeneration, lifecycleEpoch: launchLifecycleEpoch)
             let exitStatus = next.terminationStatus
             lock.withLock {
                 guard process === next, lifecycleEpoch == launchLifecycleEpoch else { return }
@@ -612,9 +633,11 @@ public final class DaemonSupervisor: @unchecked Sendable {
             }
             notifyStatusObserver()
             if let startFailureReportURL, exitStatus != 0 {
+                let entries = await logStore.snapshot()
+                try checkLaunchCancellation(generation: launchGeneration, lifecycleEpoch: launchLifecycleEpoch)
                 StartFailureReport.write(
                     detail: "daemon exited during launch with status \(exitStatus)",
-                    entries: await logStore.snapshot(),
+                    entries: entries,
                     to: startFailureReportURL
                 )
             }
@@ -632,6 +655,8 @@ public final class DaemonSupervisor: @unchecked Sendable {
                     timeoutSeconds: timeoutSeconds,
                     expectedLaunchID: expectedLaunchID,
                     requireActualFanRamp: requireActualFanRamp,
+                    generation: launchGeneration,
+                    lifecycleEpoch: launchLifecycleEpoch,
                     onPhase: onPhase
                 )
             } catch {
@@ -1259,12 +1284,15 @@ public final class DaemonSupervisor: @unchecked Sendable {
         requireActualFanRamp: Bool = false,
         onPhase: (@Sendable (DaemonStartupPhase) -> Void)? = nil
     ) async throws -> HealthPayload {
+        let launchContext = lock.withLock { (generation: restartGeneration, lifecycleEpoch: lifecycleEpoch) }
         let health = try await waitForHealth(
             baseURL: healthBaseURL,
             apiKey: apiKey,
             timeoutSeconds: timeoutSeconds,
             expectedLaunchID: expectedLaunchID,
             requireActualFanRamp: requireActualFanRamp,
+            generation: launchContext.generation,
+            lifecycleEpoch: launchContext.lifecycleEpoch,
             onPhase: onPhase
         )
         lock.withLock { state = .running }
@@ -1503,12 +1531,27 @@ public final class DaemonSupervisor: @unchecked Sendable {
         }
     }
 
+    /// Stop invalidates the launch generation without cancelling a manual
+    /// start's Task. Check both before classifying an exit and after awaiting
+    /// log snapshots so a cancelled or superseded launch cannot write a report.
+    private func checkLaunchCancellation(generation: Int, lifecycleEpoch: Int) throws {
+        try Task.checkCancellation()
+        let cancelled = lock.withLock {
+            restartGeneration != generation || self.lifecycleEpoch != lifecycleEpoch || state == .stopping
+        }
+        if cancelled {
+            throw DaemonSupervisorError.launchFailed("daemon launch was cancelled")
+        }
+    }
+
     private func waitForHealth(
         baseURL: URL,
         apiKey: String?,
         timeoutSeconds: TimeInterval,
         expectedLaunchID: String?,
         requireActualFanRamp: Bool,
+        generation: Int,
+        lifecycleEpoch: Int,
         onPhase: (@Sendable (DaemonStartupPhase) -> Void)?
     ) async throws -> HealthPayload {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -1520,9 +1563,10 @@ public final class DaemonSupervisor: @unchecked Sendable {
             // through startOwned's catch/stopInternal path. Swallowing the
             // cancelled sleep below used to leave it hot-looping health probes
             // for the entire startup timeout.
-            try Task.checkCancellation()
+            try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
             if !isRunning() {
                 let entries = await logStore.snapshot()
+                try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
                 let tail = entries.suffix(8).map(\.message).joined(separator: " | ")
                 let detail = tail.isEmpty
                     ? "daemon exited before /health became ready"
@@ -1539,7 +1583,7 @@ public final class DaemonSupervisor: @unchecked Sendable {
                 throw DaemonSupervisorError.launchFailed(detail)
             }
             if let health = await healthWaitProbe(baseURL, apiKey), health.ok {
-                try Task.checkCancellation()
+                try checkLaunchCancellation(generation: generation, lifecycleEpoch: lifecycleEpoch)
                 if let expectedLaunchID {
                     guard health.startup?.launchId == expectedLaunchID else {
                         throw DaemonSupervisorError.launchIdentityMismatch(
