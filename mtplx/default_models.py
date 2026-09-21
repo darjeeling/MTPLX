@@ -25,6 +25,12 @@ from mtplx.profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_PUBLIC_MODEL_ID,
+    FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
+    FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID,
+    BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+    BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
+    BONSAI_LEGACY_PUBLIC_MODEL_ID,
+    BONSAI_LEGACY_LOCAL_NAME,
     FLASH_NEXT_BARE_SPEED_HF_MODEL_ID,
     FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID,
     FLASH_NEXT_OPTIMIZED_SPEED_HF_MODEL_ID,
@@ -522,6 +528,9 @@ def _public_model_id_from_metadata(path: Path) -> str | None:
     for key in ("public_model_id", "served_model_id", "model_id"):
         value = runtime.get(key)
         if isinstance(value, str) and value.strip():
+            # Existing Bonsai packs keep working while advertising the current id.
+            if value.strip().lower() == BONSAI_LEGACY_PUBLIC_MODEL_ID:
+                return BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID
             return _sanitize_public_model_id(value)
     inferred = _public_model_id_from_name(str(path))
     if inferred:
@@ -602,6 +611,15 @@ def _public_model_id_from_name(value: str) -> str | None:
         return None
     lowered = text.replace("\\", "/").lower()
     components = _ref_name_components(text)
+    for public_id, repo_id, aliases in (
+        (FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID, FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
+         ("flash-next-optimized-quality",)),
+        (BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID, BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+         ("bonsai-2-27b-optimized-speed", BONSAI_LEGACY_PUBLIC_MODEL_ID, BONSAI_LEGACY_LOCAL_NAME)),
+    ):
+        names = {public_id, repo_id.lower(), Path(repo_id).name.lower(), *(a.lower() for a in aliases)}
+        if components & names:
+            return public_id
     if FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID in components:
         return FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID
     if FLASH_NEXT_OPTIMIZED_SPEED_PUBLIC_MODEL_ID in components:

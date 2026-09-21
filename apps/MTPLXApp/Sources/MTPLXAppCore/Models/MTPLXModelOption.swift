@@ -727,6 +727,46 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
+            id: "flash-next-optimized-quality",
+            displayName: "Qwen 3.8 Flash-Next Optimized Quality",
+            shortName: "Flash-Next Optimized Quality",
+            localizedDetailKey: "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
+            hfModelID: "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+                "~/.mtplx/models/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            ],
+            aliases: [
+                "mtplx-flash-next-optimized-quality",
+                "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+                "Flash-Next Optimized Quality",
+            ],
+            // Calculated download and planner need at 128K; replace together with measured figures.
+            sizeBytes: 169_900_000_000, peakMemoryGiB: 166.2,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
+            id: "bonsai-2-27b-optimized-speed",
+            displayName: "Bonsai 2 27B Optimized Speed",
+            shortName: "Bonsai 2 27B Optimized Speed",
+            localizedDetailKey: "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
+            hfModelID: "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "~/.mtplx/models/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "~/.mtplx/models/Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+            ],
+            aliases: [
+                "mtplx-bonsai-2-27b-optimized-speed",
+                "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+                "mtplx-bonsai-38-27b-optimized-speed",
+            ],
+            // Conservative GiB reading of an unverified measurement unit; a measured memory table will replace it.
+            sizeBytes: 8_200_000_000, peakMemoryGiB: 10.32,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
             id: "optimized-speed-v2",
             displayName: "Qwen 3.6 27B Optimized Speed V2",
             shortName: "Qwen 3.6 27B Optimized Speed V2",
@@ -1398,7 +1438,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         if normalized.contains("flash-next") || normalized.contains("flashnext") {
             return "qwen4_exp"
         }
-        if matchesQwen38VersionToken(normalized) {
+        if isBonsaiFamilyHint(normalized) || matchesQwen38VersionToken(normalized) {
             return "qwen3_8"
         }
         if normalized.contains("qwen3.6") || normalized.contains("qwen36") || normalized.contains("qwen3-6") {
@@ -1487,6 +1527,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                     stringValue(runtime.rawJSON["served_model_id"]),
                     stringValue(runtime.rawJSON["model_id"]),
                     runtime.forgeProvenance?.sourceRepo,
+                    stringValue(runtime.rawJSON["base_trunk"]),
                 ].compactMap({ $0 }) {
                     let family = modelFamilyFromHint(hint)
                     if family != "unknown" { return family }
@@ -1537,6 +1578,10 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         return nil
     }
 
+    private static func isBonsaiFamilyHint(_ text: String) -> Bool {
+        ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
+    }
+
     private static func modelFamilyFromHint(_ raw: String) -> String {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("gemma") { return "gemma4" }
@@ -1548,6 +1593,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         {
             return "qwen4_exp"
         }
+        if isBonsaiFamilyHint(normalized) { return "qwen3_8" }
         if normalized.range(
             of: "qwen3[._-]?8(?![0-9]*b)",
             options: .regularExpression

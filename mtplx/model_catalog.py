@@ -297,6 +297,35 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         ),
     ),
     CatalogModel(
+        id="flash-next-optimized-quality",
+        display_name="Qwen 3.8 Flash-Next Optimized Quality",
+        detail="8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
+        hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+        # Calculated download and planner need at 128K; replace together with measured figures.
+        size_bytes=169_900_000_000, peak_memory_gib=166.2,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-flash-next-optimized-quality",
+            "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            "Flash-Next Optimized Quality",
+        ),
+    ),
+    CatalogModel(
+        id="bonsai-2-27b-optimized-speed",
+        display_name="Bonsai 2 27B Optimized Speed",
+        detail="Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
+        hf_model_id="Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+        # Conservative GiB reading of an unverified measurement unit; a measured memory table will replace it.
+        size_bytes=8_200_000_000, peak_memory_gib=10.32,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-bonsai-2-27b-optimized-speed",
+            "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+            "mtplx-bonsai-38-27b-optimized-speed",
+        ),
+    ),
+    CatalogModel(
         id="optimized-speed-v2",
         display_name="Qwen 3.6 27B Optimized Speed V2",
         detail=(

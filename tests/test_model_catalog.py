@@ -45,16 +45,10 @@ def _no_installed_qwen38(monkeypatch):
     monkeypatch.setattr(default_models_module, "_QWEN38_OPTIMIZED_SPEED_FP16_LOCAL_CANDIDATES", ())
 
 
-def test_catalog_has_twenty_three_unique_entries():
-    # 23 = the 16-entry 2026-08-14 scaffold + the Qwen3.8 Optimized
-    # Speed/Quality pair forged on drop day + the three Qwen3.8 FP16
-    # precision siblings for M1/M2 Macs (2026-08-15) + the Qwen3.8
-    # Flash-Next Bare/Optimized Speed pair (2026-08-27, big-Mac native).
+def test_catalog_has_twenty_five_unique_entries():
     ids = [model.id for model in OFFICIAL_CATALOG]
-    assert len(ids) == 23
-    assert len(set(ids)) == 23
-    hf_ids = [model.hf_model_id for model in OFFICIAL_CATALOG]
-    assert len(set(hf_ids)) == 23
+    assert len(ids) == len(set(ids)) == 25
+    assert len({model.hf_model_id for model in OFFICIAL_CATALOG}) == 25
 
 
 def test_qwen38_fp16_siblings_mirror_their_parents():
