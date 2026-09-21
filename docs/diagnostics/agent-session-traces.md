@@ -54,6 +54,8 @@ The recorder only reads the daemon. It does not generate, change fan settings, c
 
 The inspector lists the five slowest windows of at least five seconds, along with verification cost and available memory observations. Counters are asynchronously published, so these are correlations, not a causal experiment. Missing route telemetry is labelled unknown, never interpreted as zero verification. Text-only, fixed-depth, short-output benchmarks must not be presented as expected throughput for image-bearing, adaptive, long-reasoning sessions.
 
+The inspector also shows exact compiled-bank dispatch counts, verifier time per call, delivered tokens per proposal cycle and full cycle wall time. Bank dispatches exclude independent context-copy verifies: do not divide compiled calls by all verifier calls, or interpret a sampled route label as the fraction of work compiled. High compiled coverage can coexist with low acceptance or expensive rounds. Graph traces and capacity growths are shown separately so an initial compilation pause is not mistaken for sustained decode cost.
+
 Identity matters. Flight events join to receipts by exact server request ID. Updated Pi integration supplies the preceding transcript entry ID; a unique matching receipt links directly to its response. OpenCode supplies the user-turn ID, which can contain several engine/tool steps. Older transcripts and ambiguous retries still require time/token matching, and are labelled accordingly. Unmatched receipts are retained in the evidence export. Pi readers follow the active branch rather than counting abandoned history as completed work.
 
 ## Decide whether MTP pays

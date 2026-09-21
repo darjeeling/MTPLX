@@ -12,7 +12,7 @@ from .trace_metrics import mtp_economics, sample_intervals
 def scope_since(joined: dict, value: str | None) -> dict:
     if not value:
         return joined
-    stamp = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    stamp = datetime.datetime.fromisoformat(value)
     if stamp.tzinfo is None:
         raise ValueError("--since needs a timezone, for example 2026-09-20T23:19:00Z")
     since = stamp.timestamp()
@@ -63,6 +63,17 @@ def request_diagnostics(receipt: dict, flight: list[dict], system: list[dict] = 
     costs = {name: 1000 * receipt[key] / tokens if tokens and receipt.get(key) is not None else None
              for name, key in (("verify", "verify_time_s"), ("draft", "draft_time_s"),
                                ("accept", "accept_time_s"))}
+    bank = receipt.get("compiled_verify") or {}
+    bank_calls, compiled_calls = bank.get("calls"), bank.get("compiled_calls")
+    compiled_share = (compiled_calls / bank_calls
+                      if isinstance(bank_calls, (int, float)) and bank_calls > 0
+                      and isinstance(compiled_calls, (int, float))
+                      and 0 <= compiled_calls <= bank_calls else None)
+    verifier = {"bank_calls": bank_calls, "compiled_calls": compiled_calls,
+                "compiled_share": compiled_share,
+                "admission": receipt.get("fixed_m4_admission"),
+                "capacity_transitions": bank.get("fixed_m4_capacity_transitions"),
+                "traces": bank.get("traces")}
     images = receipt.get("request_vision_images")
     warnings = []
     if images and not routes:
@@ -99,7 +110,7 @@ def request_diagnostics(receipt: dict, flight: list[dict], system: list[dict] = 
             "images": images, "image_rows": receipt.get("request_vision_rows"),
             "depth_cycle_shares": depth_mix, "recorded_verify_routes": routes,
             "route_sample_coverage": sum(bool(s.get("route")) for s in samples) / len(samples) if samples else None,
-            "cost_ms_per_token": costs, "economics": economics,
+            "cost_ms_per_token": costs, "economics": economics, "verifier": verifier,
             "compared_workload": {k: receipt.get(k) for k in (
                 "served_model_id", "resolved_reasoning_effort", "chat_template_profile",
                 "effective_temperature", "effective_top_p", "effective_top_k", "request_tool_count")},

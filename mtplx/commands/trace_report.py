@@ -28,6 +28,7 @@ import json
 import math
 import subprocess
 import sys
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +44,8 @@ from .trace import (
     _source_port,
     _turn_row,
 )
-from .trace_metrics import mtp_economics
 from .trace_analysis import load_system_log, request_diagnostics
+from .trace_metrics import mtp_economics
 
 # dataviz reference palette, light mode (validated with validate_palette.js)
 _MUT, _AXIS, _SURF = "#898781", "#c3c2b7", "#fcfcfb"
@@ -257,7 +258,7 @@ def _accept_overlay(samples: list[dict]) -> tuple[list[tuple[float, float]], flo
             except (TypeError, ValueError):
                 continue
     pts: list[tuple[float, float]] = []
-    for (_t0, a0, d0), (t1, a1, d1) in zip(seq, seq[1:]):
+    for (_t0, a0, d0), (t1, a1, d1) in pairwise(seq):
         dd = d1 - d0
         if dd > 0:  # zero drafted this second -> no rate point, never a fabricated one
             pts.append((t1, max(0.0, min((a1 - a0) / dd, 1.0))))
@@ -657,7 +658,12 @@ def _sec_inspector(joined: dict, conn: Any, ar_tok_s: float | None, system: list
         'facts("inspect-facts",[["Request",r.kind],["Input / ending context",fmt(d.prompt_tokens,0)+" / "+fmt(d.end_context_tokens,0)],'
         '["Images / image rows",fmt(d.images,0)+" / "+fmt(d.image_rows,0)],'
         '["Recorded verifier route",d.recorded_verify_routes.join(", ")||"Not recorded"],'
+        '["Compiled bank dispatches",fmt(d.verifier.compiled_calls,0)+" / "+fmt(d.verifier.bank_calls,0)+" ("+fmt(d.verifier.compiled_share==null?null:100*d.verifier.compiled_share)+"%)"],'
+        '["Verify time per call",fmt(r.economics.verify_ms_per_round,2)+" ms"],'
+        '["Delivered tokens / full round time",fmt(r.economics.tokens_per_cycle,2)+" tokens / "+fmt(r.economics.cycle_ms,2)+" ms"],'
         '["Verify / draft cost",fmt(d.cost_ms_per_token.verify,2)+" / "+fmt(d.cost_ms_per_token.draft,2)+" ms per token"],'
+        '["Cache reused / newly processed",fmt(r.receipt.cached_tokens,0)+" / "+fmt(r.receipt.new_prefill_tokens,0)+" tokens"],'
+        '["Graph traces / capacity growths",fmt(d.verifier.traces,0)+" / "+fmt(d.verifier.capacity_transitions,0)],'
         '["Cycles reaching D3",d.depth_cycle_shares.length>2?fmt(100*d.depth_cycle_shares.slice(2).reduce((a,b)=>a+b,0))+"%":"—"],'
         '["Reasoning / template",(d.compared_workload.resolved_reasoning_effort||"—")+" / "+(d.compared_workload.chat_template_profile||"—")]]);'
         'document.getElementById("inspect-warnings").textContent=d.warnings.join(" ");'

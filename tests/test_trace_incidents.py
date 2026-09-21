@@ -95,3 +95,19 @@ def test_request_inspector_omits_image_payloads_in_tool_results():
     assert "SECRET_IMAGE_BYTES" not in html
     assert "screenshot.png" in html
     assert "inspect-diagnosis" in html
+
+
+def test_compiled_share_uses_bank_dispatches_not_copy_verifies_or_route_samples():
+    receipt = {"completion_tokens": 120, "decode_elapsed_s": 3,
+               "drafted_by_depth": [40, 40, 35], "accepted_by_depth": [30, 25, 20],
+               "verify_calls": 48, "verify_time_s": 2.4,
+               "compiled_verify": {"calls": 40, "compiled_calls": 35,
+                                   "traces": 2, "fixed_m4_capacity_transitions": 1}}
+    result = request_diagnostics(receipt, [{"ev": "s", "ts": 1, "route": "compiled_bank"}])
+    assert result["verifier"]["compiled_share"] == 35 / 40
+    assert result["economics"]["verify_ms_per_round"] == pytest.approx(50)
+    assert result["economics"]["cycle_ms"] == pytest.approx(75)
+    assert result["economics"]["tokens_per_cycle"] == 3
+    assert request_diagnostics({}, [])["verifier"]["compiled_share"] is None
+    receipt["compiled_verify"].pop("compiled_calls")
+    assert request_diagnostics(receipt, [])["verifier"]["compiled_share"] is None
