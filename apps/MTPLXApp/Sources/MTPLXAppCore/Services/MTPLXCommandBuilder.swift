@@ -1291,6 +1291,12 @@ private enum ModelLaunchFamily {
         {
             return .flashNext
         }
+        // Bonsai shares qwen3_8 behavior, but its ternary pack has not earned
+        // the dense affine pack's hardcoded Turbo promotion. Like the CLI,
+        // leave profile and sampler selection to the artifact/engine.
+        if MTPLXModelOption.isBonsaiFamilyHint(normalized) {
+            return .qwenDefault
+        }
         // Qwen3.8 27B MTPLX family (Bare Speed / Optimized Speed /
         // Optimized Quality). Trunk geometry is identical to the Qwen3.6
         // 27B flagships, so the verify kernels and their quant-bits gates

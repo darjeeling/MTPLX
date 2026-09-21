@@ -257,6 +257,7 @@ def test_screen_dashboard_companion_uses_requested_port(monkeypatch):
 
 
 def test_run_onboarding_screens_uses_fp16_default_when_policy_selects_it(monkeypatch):
+    _pin_modern_64gib(monkeypatch)
     monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
     # 4 answers: model + mode + interface (openwebui) + dashboard companion.
     answers = iter(["1", "1", "1", "2"])
@@ -573,6 +574,7 @@ def test_run_quickstart_flow_returning_user_reuses_migrated_legacy_sustained(
 
 
 def test_run_quickstart_flow_refreshes_saved_verified_default(tmp_path, monkeypatch):
+    _pin_modern_64gib(monkeypatch)
     monkeypatch.setenv("MTPLX_QUICKSTART_STATE", str(tmp_path / "refresh-default.json"))
     monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
     onboarding.save_state(
@@ -690,6 +692,7 @@ def test_screen_model_picks_verified_default_when_configured_offered(monkeypatch
 
 
 def test_screen_model_picks_hardware_default_when_configured_offered(monkeypatch):
+    _pin_modern_64gib(monkeypatch)
     monkeypatch.setenv("MTPLX_DEFAULT_MODEL_VARIANT", "fp16")
     configured = "/Users/test/Documents/MTPLX/models/Qwen3.6-27B-MTPLX"
     _select_rows(monkeypatch, "verified default")  # explicit, not the configured row
@@ -709,32 +712,19 @@ def test_screen_model_no_configured_uses_default_first(monkeypatch):
     assert chosen == expected_model
 
 
-def test_screen_model_optimized_quality_prefers_local_model(tmp_path, monkeypatch, capsys):
-    from mtplx import default_models
-
-    local_quality = tmp_path / "Qwen3.6-27B-MTPLX-Optimized-Quality"
-    local_quality.mkdir()
-    (local_quality / "config.json").write_text("{}", encoding="utf-8")
-    (local_quality / "mtp.safetensors").write_bytes(b"mtp")
-    (local_quality / "model-00001-of-00001.safetensors").write_bytes(b"model")
-    monkeypatch.setenv(default_models.QUALITY_MODEL_ENV, str(local_quality))
-    # The 3.6 "Optimized Quality" row is offered on tiers that do not get the
-    # Qwen 3.8 line-up (here: a 24 GiB modern Mac routed to the 9B default).
+def test_screen_model_does_not_offer_oversized_36_quality(tmp_path, monkeypatch, capsys):
+    _pin_modern_64gib(monkeypatch)
     monkeypatch.setattr(
-        onboarding,
-        "_verified_default_selection",
-        lambda: default_models.select_default_model(
-            hardware={"chip": "Apple M4", "apple_silicon_generation": "m4", "memory_gib": 24.0}
-        ),
+        onboarding, "_verified_default_selection",
+        lambda: default_models_module.select_default_model(hardware={
+            "chip": "Apple M4", "apple_silicon_generation": "m4", "memory_gib": 24.0,
+        }),
     )
-    _select_rows(monkeypatch, "Optimized Quality")
-
-    chosen = onboarding.screen_model(configured=None)
-
-    captured = capsys.readouterr().out
-    assert chosen == str(local_quality)
-    assert "Optimized Quality" in captured
-    assert str(local_quality) not in captured
+    _select_rows(monkeypatch, "Bonsai 2 27B Optimized Speed")
+    assert onboarding.screen_model(installed=[]) == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
+    output = capsys.readouterr().out
+    assert "Qwen 3.6 27B Optimized Quality" not in output
+    assert "Qwen 3.5 4B Optimized Quality" in output
 
 
 def test_custom_hf_repo_rejects_pasted_terminal_output(monkeypatch, capsys):
@@ -1384,7 +1374,7 @@ def test_screen_model_offers_qwen38_line_up_without_installed(monkeypatch):
 
     chosen = onboarding.screen_model(configured=None, installed=[])
 
-    assert chosen == onboarding.qwen38_bare_speed_model_ref()
+    assert chosen == "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed"
 
 
 def test_screen_model_offers_fp16_line_up_on_legacy_silicon(monkeypatch, capsys):
@@ -1403,7 +1393,7 @@ def test_screen_model_offers_fp16_line_up_on_legacy_silicon(monkeypatch, capsys)
     chosen = onboarding.screen_model(configured=None, installed=[])
 
     captured = capsys.readouterr().out
-    assert chosen == onboarding.qwen38_optimized_quality_fp16_model_ref()
+    assert chosen == "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16"
     assert "Qwen 3.8 27B Optimized Speed FP16  ·  verified default" in captured
     assert "Qwen 3.8 27B Bare Speed FP16" in captured
     assert QWEN38_FP16_SUFFIX in captured

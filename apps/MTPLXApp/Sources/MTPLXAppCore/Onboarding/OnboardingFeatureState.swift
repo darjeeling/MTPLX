@@ -42,6 +42,9 @@ public enum OnboardingStep: String, CaseIterable, Equatable, Sendable {
 public enum ModelPickChoice: Equatable, Sendable, Hashable {
     case none
     case curatedQwen35FourBit
+    case curatedQwen35FourBQuality
+    case curatedBonsaiOptimizedSpeed
+    case curatedFlashNextOptimizedQuality
     case curatedQwen35NineBSpeed
     case curatedQwen38OptimizedSpeed
     case curatedQwen38BareSpeed
@@ -181,6 +184,12 @@ public struct OnboardingFeatureState: Equatable, Sendable {
             return nil
         case .curatedQwen35FourBit:
             return catalog.first { $0.id == "qwen35-4b-optimized-speed" }
+        case .curatedQwen35FourBQuality:
+            return catalog.first { $0.id == "qwen35-4b-optimized-quality" }
+        case .curatedBonsaiOptimizedSpeed:
+            return catalog.first { $0.id == "bonsai-2-27b-optimized-speed" }
+        case .curatedFlashNextOptimizedQuality:
+            return catalog.first { $0.id == "flash-next-optimized-quality" }
         case .curatedQwen35NineBSpeed:
             let useFP16 = hardware?.tier == .legacyApple
             let id = useFP16 ? "qwen35-9b-optimized-speed-fp16" : "qwen35-9b-optimized-speed"
@@ -242,6 +251,9 @@ public struct OnboardingFeatureState: Equatable, Sendable {
         case .none:
             return nil
         case .curatedQwen35FourBit,
+                 .curatedQwen35FourBQuality,
+                 .curatedBonsaiOptimizedSpeed,
+                 .curatedFlashNextOptimizedQuality,
              .curatedQwen35NineBSpeed,
              .curatedQwen38OptimizedSpeed,
              .curatedQwen38BareSpeed,
@@ -325,6 +337,9 @@ public struct OnboardingFeatureState: Equatable, Sendable {
             case .none:
                 return false
             case .curatedQwen35FourBit,
+                 .curatedQwen35FourBQuality,
+                 .curatedBonsaiOptimizedSpeed,
+                 .curatedFlashNextOptimizedQuality,
                  .curatedQwen35NineBSpeed,
                  .curatedQwen38OptimizedSpeed,
                  .curatedQwen38BareSpeed,

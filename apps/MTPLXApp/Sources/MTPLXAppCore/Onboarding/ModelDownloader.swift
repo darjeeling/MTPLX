@@ -723,7 +723,7 @@ public struct ModelDownloader: Sendable {
         {
             return executableOverride
         }
-        return try MTPLXRuntimeBootstrapper(environment: processEnvironment).installOrUpdate(status: status)
+        return try MTPLXRuntimeBootstrapper(environment: processEnvironment).installOrUpdate { key in status(tr(key)) }
     }
 }
 

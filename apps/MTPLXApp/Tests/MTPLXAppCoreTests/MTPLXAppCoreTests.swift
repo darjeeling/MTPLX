@@ -1334,11 +1334,28 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertTrue(command.arguments.containsInOrder(["--reasoning-effort", "xhigh"]))
     }
 
+    func testBonsaiLaunchLeavesProfileAndSamplerToTheEngine() throws {
+        let fake = try makeExecutable(named: "mtplx")
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        for model in [
+            "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            "/Users/example/.mtplx/models/Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+            "mtplx-bonsai-2-27b-optimized-speed",
+        ] {
+            let command = try builder.buildServeCommand(configuration: MTPLXAppConfiguration(
+                executablePath: fake.path, model: model, profile: "auto"
+            ))
+            XCTAssertFalse(command.arguments.contains("--profile"), model)
+            XCTAssertFalse(command.arguments.contains("--temperature"), model)
+        }
+    }
+
     func testCommandBuilderFlashNextPinsQwen3ParserAndXHighEffort() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
         for model in [
             "Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed",
+            "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
             "/Users/example/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
         ] {
             let command = try builder.buildServeCommand(
@@ -3759,7 +3776,8 @@ final class MTPLXAppCoreTests: XCTestCase {
     }
 
     func testDefaultAppModelIsPortableHuggingFaceReference() throws {
-        let model = MTPLXAppConfiguration.defaultLocalModelPath()
+        let hardware = DetectedHardware(chipName: "Apple M5", appleSiliconGeneration: "m5", unifiedMemoryBytes: 128 * 1_073_741_824)
+        let model = MTPLXAppConfiguration.defaultLocalModelPath(for: hardware)
 
         // Qwen 3.8 Optimized Speed is the recommended pick and fresh-install
         // default (2026-08-15 release); mirrors DEFAULT_HF_MODEL_ID.
@@ -4053,9 +4071,9 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertEqual(MTPLXModelOption.modelFamily(for: bare.hfModelID), "qwen3_8")
     }
 
-    func testFreshModernSmallMemoryCatalogLeadsWith9BAndOffersFourBPair() throws {
+    func testFreshModernSmallMemoryCatalogLeadsWithBonsaiAndOffersFourBPair() throws {
         // The rebuilt 4B pair (2026-07-19) is recommendable again: the 16 GB
-        // tier leads with the 9B and offers both 4B lanes behind it.
+        // tier leads with Bonsai, with 9B and both 4B lanes behind it.
         let m5 = DetectedHardware(
             chipName: "Apple M5",
             appleSiliconGeneration: "m5",
@@ -4068,6 +4086,7 @@ final class MTPLXAppCoreTests: XCTestCase {
         ).map(\.id)
 
         XCTAssertEqual(ids, [
+            "bonsai-2-27b-optimized-speed",
             "qwen35-9b-optimized-speed",
             "qwen35-4b-optimized-speed",
             "qwen35-4b-optimized-quality",
@@ -4099,6 +4118,7 @@ final class MTPLXAppCoreTests: XCTestCase {
             "gemma4-optimized-speed",
             "qwen36-35b-a3b-optimized-speed",
             "optimized-quality",
+            "bonsai-2-27b-optimized-speed",
             "qwen35-4b-optimized-speed",
             "qwen35-4b-optimized-quality",
         ])
@@ -4156,6 +4176,7 @@ final class MTPLXAppCoreTests: XCTestCase {
             "qwen36-35b-a3b-optimized-balance",
             "gemma4-optimized-speed",
             "qwen35-9b-optimized-speed",
+            "bonsai-2-27b-optimized-speed",
             "qwen35-4b-optimized-speed",
             "qwen35-4b-optimized-quality",
         ])

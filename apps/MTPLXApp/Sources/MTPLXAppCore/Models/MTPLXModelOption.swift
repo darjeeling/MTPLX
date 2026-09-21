@@ -22,7 +22,11 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var displayName: String
     public var shortName: String
+    /// Literal fallback text. Catalog and app-created rows also retain the
+    /// English localization key separately so descriptions can resolve in
+    /// whatever language is active when a picker renders.
     public var detail: String
+    private var detailLocalizationKey: String?
     public var hfModelID: String
     public var localCandidates: [String]
     public var aliases: [String]
@@ -68,6 +72,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         self.displayName = displayName
         self.shortName = shortName
         self.detail = detail
+        self.detailLocalizationKey = nil
         self.hfModelID = hfModelID
         self.localCandidates = localCandidates
         self.aliases = aliases
@@ -77,11 +82,48 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         self.arOnly = arOnly
     }
 
+    public init(
+        id: String,
+        displayName: String,
+        shortName: String,
+        localizedDetailKey: String,
+        hfModelID: String,
+        localCandidates: [String],
+        aliases: [String] = [],
+        sizeBytes: Int64 = 0,
+        peakMemoryGiB: Double = 0,
+        recommendedFor: [ChipTier] = [],
+        arOnly: Bool = false
+    ) {
+        self.init(
+            id: id,
+            displayName: displayName,
+            shortName: shortName,
+            detail: localizedDetailKey,
+            hfModelID: hfModelID,
+            localCandidates: localCandidates,
+            aliases: aliases,
+            sizeBytes: sizeBytes,
+            peakMemoryGiB: peakMemoryGiB,
+            recommendedFor: recommendedFor,
+            arOnly: arOnly
+        )
+        detailLocalizationKey = localizedDetailKey
+    }
+
+    /// Resolves only app-authored catalog text. Arbitrary details supplied by
+    /// clients remain literal instead of accidentally becoming table keys.
+    public var localizedDetail: String {
+        guard let detailLocalizationKey else { return detail }
+        return tr(detailLocalizationKey)
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case displayName
         case shortName
         case detail
+        case detailLocalizationKey
         case hfModelID
         case localCandidates
         case aliases
@@ -97,6 +139,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         displayName = try container.decode(String.self, forKey: .displayName)
         shortName = try container.decode(String.self, forKey: .shortName)
         detail = try container.decode(String.self, forKey: .detail)
+        detailLocalizationKey = try container.decodeIfPresent(String.self, forKey: .detailLocalizationKey)
+            ?? Self.legacyDetailLocalizationKey(for: id)
         hfModelID = try container.decode(String.self, forKey: .hfModelID)
         localCandidates = try container.decode([String].self, forKey: .localCandidates)
         aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
@@ -104,6 +148,25 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         peakMemoryGiB = try container.decodeIfPresent(Double.self, forKey: .peakMemoryGiB) ?? 0
         recommendedFor = try container.decodeIfPresent([ChipTier].self, forKey: .recommendedFor) ?? []
         arOnly = try container.decodeIfPresent(Bool.self, forKey: .arOnly) ?? false
+    }
+
+    /// Custom rows created before `detailLocalizationKey` shipped persisted
+    /// the already-rendered text. Their stable id prefix identifies the
+    /// semantic description without guessing from that old language.
+    private static func legacyDetailLocalizationKey(for id: String) -> String? {
+        if id.hasPrefix("custom-") {
+            return "Custom Hugging Face model. MTPLX will use MTP when the repo includes a sidecar."
+        }
+        if id.hasPrefix("forged-") {
+            return "Forged locally with MTPLX Forge."
+        }
+        if id.hasPrefix("local:") {
+            return "Local MTPLX model in a configured library."
+        }
+        if id.hasPrefix("local-") {
+            return "Local model folder on this Mac."
+        }
+        return nil
     }
 
     /// True when `reference` (a model string from configuration: catalog id,
@@ -395,7 +458,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen35-4b-optimized-speed",
             displayName: "Qwen 3.5 4B Optimized Speed",
             shortName: "Qwen 3.5 4B Optimized Speed",
-            detail: tr("4-bit quantization. Fastest fit for smaller Macs."),
+            localizedDetailKey: "4-bit quantization. Fastest fit for smaller Macs.",
             hfModelID: "Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.5-4B-MTPLX-Optimized-Speed",
@@ -416,7 +479,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen35-4b-optimized-quality",
             displayName: "Qwen 3.5 4B Optimized Quality",
             shortName: "Qwen 3.5 4B Optimized Quality",
-            detail: tr("8-bit quantization. Highest-fidelity 4B; 2x MTP multiplier."),
+            localizedDetailKey: "8-bit quantization. Highest-fidelity 4B; 2x MTP multiplier.",
             hfModelID: "Youssofal/Qwen3.5-4B-MTPLX-Optimized-Quality",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.5-4B-MTPLX-Optimized-Quality",
@@ -436,7 +499,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen35-9b-optimized-speed",
             displayName: "Qwen 3.5 9B Optimized Speed",
             shortName: "Qwen 3.5 9B Optimized Speed",
-            detail: tr("6-bit quantization. Strong small-Mac speed pick."),
+            localizedDetailKey: "6-bit quantization. Strong small-Mac speed pick.",
             hfModelID: "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen-Qwen3.5-9B-MTPLX-Speed-6bit-OfficialCLI",
@@ -460,7 +523,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen35-9b-optimized-speed-fp16",
             displayName: "Qwen 3.5 9B Optimized Speed FP16",
             shortName: "Qwen 3.5 9B Optimized Speed FP16",
-            detail: tr("FP16-friendly 9B speed artifact for M1 and M2 Macs."),
+            localizedDetailKey: "FP16-friendly 9B speed artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.5-9B-MTPLX-Optimized-Speed-FP16",
@@ -479,7 +542,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-bare-speed",
             displayName: "Qwen 3.8 27B Bare Speed",
             shortName: "Qwen 3.8 27B Bare Speed",
-            detail: tr("Quickest burst chat speeds. Lower quality and slower on long coding tasks."),
+            localizedDetailKey: "Quickest burst chat speeds. Lower quality and slower on long coding tasks.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed",
@@ -502,7 +565,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-speed",
             displayName: "Qwen 3.8 27B Optimized Speed",
             shortName: "Qwen 3.8 27B Optimized Speed",
-            detail: tr("4-bit dynamic quant. Great coding speeds and good quality. Recommended."),
+            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
@@ -524,7 +587,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-quality",
             displayName: "Qwen 3.8 27B Optimized Quality",
             shortName: "Qwen 3.8 27B Optimized Quality",
-            detail: tr("8-bit dynamic quant. Good coding speeds and perfect quality."),
+            localizedDetailKey: "8-bit dynamic quant. Good coding speeds and perfect quality.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Quality",
@@ -552,7 +615,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-bare-speed-fp16",
             displayName: "Qwen 3.8 27B Bare Speed FP16",
             shortName: "Qwen 3.8 27B Bare Speed FP16",
-            detail: tr("Quickest burst chat speeds. Lower quality and slower on long coding tasks. FP16 build for M1 and M2 Macs."),
+            localizedDetailKey: "Quickest burst chat speeds. Lower quality and slower on long coding tasks. FP16 build for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Bare-Speed-FP16",
@@ -574,7 +637,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-speed-fp16",
             displayName: "Qwen 3.8 27B Optimized Speed FP16",
             shortName: "Qwen 3.8 27B Optimized Speed FP16",
-            detail: tr("4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended."),
+            localizedDetailKey: "4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
@@ -595,7 +658,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen38-27b-optimized-quality-fp16",
             displayName: "Qwen 3.8 27B Optimized Quality FP16",
             shortName: "Qwen 3.8 27B Optimized Quality FP16",
-            detail: tr("8-bit dynamic quant. Good coding speeds and perfect quality. FP16 build for M1 and M2 Macs."),
+            localizedDetailKey: "8-bit dynamic quant. Good coding speeds and perfect quality. FP16 build for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-27B-MTPLX-Optimized-Quality-FP16",
@@ -622,7 +685,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "flash-next-bare-speed",
             displayName: "Qwen 3.8 Flash-Next Bare Speed",
             shortName: "Flash-Next Bare Speed",
-            detail: tr("Flat 4-bit quantization. Quickest Flash-Next speeds for chat and coding."),
+            localizedDetailKey: "Flat 4-bit quantization. Quickest Flash-Next speeds for chat and coding.",
             hfModelID: "Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Bare-Speed",
@@ -646,7 +709,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "flash-next-optimized-speed",
             displayName: "Qwen 3.8 Flash-Next Optimized Speed",
             shortName: "Flash-Next Optimized Speed",
-            detail: tr("Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended."),
+            localizedDetailKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower.",
             hfModelID: "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
@@ -667,10 +730,51 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
+            id: "flash-next-optimized-quality",
+            displayName: "Qwen 3.8 Flash-Next Optimized Quality",
+            shortName: "Flash-Next Optimized Quality",
+            localizedDetailKey: "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
+            hfModelID: "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+                "~/.mtplx/models/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            ],
+            aliases: [
+                "mtplx-flash-next-optimized-quality",
+                "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+                "Flash-Next Optimized Quality",
+            ],
+            // Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
+            // Calculated download and planner need at 128K; replace together with measured figures.
+            sizeBytes: 169_900_000_000, peakMemoryGiB: 166.2,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
+            id: "bonsai-2-27b-optimized-speed",
+            displayName: "Bonsai 2 27B Optimized Speed",
+            shortName: "Bonsai 2 27B Optimized Speed",
+            localizedDetailKey: "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
+            hfModelID: "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "~/.mtplx/models/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "~/.mtplx/models/Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+            ],
+            aliases: [
+                "mtplx-bonsai-2-27b-optimized-speed",
+                "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+                "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+                "mtplx-bonsai-38-27b-optimized-speed",
+            ],
+            // Conservative GiB reading of an unverified measurement unit; a measured memory table will replace it.
+            sizeBytes: 8_847_819_423, peakMemoryGiB: 10.32,
+            recommendedFor: [.modernApple]
+        ),
+        MTPLXModelOption(
             id: "optimized-speed-v2",
             displayName: "Qwen 3.6 27B Optimized Speed V2",
             shortName: "Qwen 3.6 27B Optimized Speed V2",
-            detail: tr("Much higher quality for coding. Dynamic 4-bit hybrid quantization keeps hand-tuned sensitive parts at up to 16-bit. Faster on long agent tasks, slightly larger, and a little slower for short chats."),
+            localizedDetailKey: "Much higher quality for coding. Dynamic 4-bit hybrid quantization keeps hand-tuned sensitive parts at up to 16-bit. Faster on long agent tasks, slightly larger, and a little slower for short chats.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-V2",
             localCandidates: [
                 "~/.mtplx/models/Youssofal--Qwen3.6-27B-MTPLX-Optimized-Speed-V2",
@@ -690,7 +794,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-speed",
             displayName: "Qwen 3.6 27B Optimized Speed",
             shortName: "Qwen 3.6 27B Optimized Speed",
-            detail: tr("Smaller 4-bit model. A little faster for short chats."),
+            localizedDetailKey: "Smaller 4-bit model. A little faster for short chats.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed",
@@ -710,7 +814,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-speed-fp16",
             displayName: "Qwen 3.6 27B Optimized Speed FP16",
             shortName: "Qwen 3.6 27B Optimized Speed FP16",
-            detail: tr("FP16 speed artifact recommended for M1 and M2 Macs."),
+            localizedDetailKey: "FP16 speed artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
@@ -730,7 +834,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen36-35b-a3b-optimized-speed",
             displayName: "Qwen 3.6 35B-A3B Optimized Speed",
             shortName: "Qwen 3.6 35B-A3B Optimized Speed",
-            detail: tr("4-bit quantization. Blazingly fast and quite smart."),
+            localizedDetailKey: "4-bit quantization. Blazingly fast and quite smart.",
             hfModelID: "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed",
@@ -754,7 +858,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen36-35b-a3b-optimized-speed-fp16",
             displayName: "Qwen 3.6 35B-A3B Optimized Speed FP16",
             shortName: "Qwen 3.6 35B-A3B Optimized Speed FP16",
-            detail: tr("FP16-friendly 35B speed artifact for M1 and M2 Macs."),
+            localizedDetailKey: "FP16-friendly 35B speed artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed-FP16",
@@ -773,7 +877,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen36-35b-a3b-optimized-balance",
             displayName: "Qwen 3.6 35B-A3B Optimized Balance",
             shortName: "Qwen 3.6 35B-A3B Optimized Balance",
-            detail: tr("6-bit quantization. Stronger balance of speed and quality."),
+            localizedDetailKey: "6-bit quantization. Stronger balance of speed and quality.",
             hfModelID: "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Balance",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-35B-A3B-MTPLX-Optimized-Balance",
@@ -792,7 +896,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "qwen36-35b-a3b-optimized-balance-fp16",
             displayName: "Qwen 3.6 35B-A3B Optimized Balance FP16",
             shortName: "Qwen 3.6 35B-A3B Optimized Balance FP16",
-            detail: tr("FP16-friendly 35B balance artifact for M1 and M2 Macs."),
+            localizedDetailKey: "FP16-friendly 35B balance artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Balance-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-35B-A3B-MTPLX-Optimized-Balance-FP16",
@@ -811,7 +915,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "gemma4-optimized-speed",
             displayName: "Gemma 4 31B Optimized Speed",
             shortName: "Gemma 4 31B Optimized Speed",
-            detail: tr("High quality. Moderate speeds."),
+            localizedDetailKey: "High quality. Moderate speeds.",
             hfModelID: "Youssofal/Gemma4-MTPLX-Optimized-Speed",
             localCandidates: [
                 "~/Documents/MTPLX/models/hf-release/Gemma4-MTPLX-Optimized-Speed",
@@ -834,7 +938,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-quality",
             displayName: "Qwen 3.6 27B Optimized Quality",
             shortName: "Qwen 3.6 27B Optimized Quality",
-            detail: tr("Maximum quality. Moderate speeds."),
+            localizedDetailKey: "Maximum quality. Moderate speeds.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality",
             localCandidates: [
                 "~/Documents/MTPLX/models/Qwen3.6-27B-MTPLX-Optimized-Quality",
@@ -854,7 +958,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "optimized-quality-fp16",
             displayName: "Qwen 3.6 27B Optimized Quality FP16",
             shortName: "Qwen 3.6 27B Optimized Quality FP16",
-            detail: tr("FP16 quality artifact recommended for M1 and M2 Macs."),
+            localizedDetailKey: "FP16 quality artifact for M1 and M2 Macs.",
             hfModelID: "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
             localCandidates: [
                 "~/Documents/MTPLX/hf-staging/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
@@ -873,7 +977,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "laguna-s21-oq4e",
             displayName: "Laguna S-2.1 (community oQ4e)",
             shortName: "Laguna S-2.1",
-            detail: tr("Poolside coding model, mixed-precision 4-bit. AR-only (no MTP head yet)."),
+            localizedDetailKey: "Poolside coding model, mixed-precision 4-bit. AR-only (no MTP head yet).",
             hfModelID: "mlx-community/Laguna-S-2.1-oQ4e",
             localCandidates: [
                 "~/.mtplx/models/mlx-community--Laguna-S-2.1-oQ4e",
@@ -939,7 +1043,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 id: "local:\(local.path)",
                 displayName: local.displayName,
                 shortName: local.displayName,
-                detail: tr("Local MTPLX model in a configured library."),
+                localizedDetailKey: "Local MTPLX model in a configured library.",
                 hfModelID: local.reference,
                 localCandidates: [local.path],
                 aliases: [local.reference, local.path]
@@ -983,7 +1087,12 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     /// pair stays discoverable as the fast-small pick everywhere. No
     /// fp16 4B siblings exist yet, so the legacy (M1/M2) matrix keeps
     /// its fp16-only entries.
-    public static func recommendedCatalogIDs(for hardware: DetectedHardware?) -> [String] {
+    public static let bonsaiRecommendationMinGiB: Double = 16.0
+
+    public static func recommendedCatalogIDs(
+        for hardware: DetectedHardware?,
+        bonsaiMinimumGiB: Double = bonsaiRecommendationMinGiB
+    ) -> [String] {
         guard let hardware else { return modernTopRecommendationIDs }
         switch hardware.tier {
         case .intel:
@@ -1014,11 +1123,21 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 quality27: "optimized-quality",
                 trio38: qwen38TrioIDs
             )
-            // Flash-Next rides right behind the 3.8 trio on big modern
-            // Macs. Modern tier only (bf16 packs, no fp16 sibling); the
-            // peak-memory filter hides both entries below ~96 GB unified.
-            if let trioEnd = ids.lastIndex(where: { qwen38TrioIDs.contains($0) }) {
+            let bonsai = "bonsai-2-27b-optimized-speed"
+            if hardware.unifiedMemoryGiB < 32 {
+                let position = hardware.unifiedMemoryGiB >= bonsaiMinimumGiB ? 0 : 1
+                ids.insert(bonsai, at: position)
+            } else {
+                ids.append(bonsai)
+            }
+            // The raw list and the peak-filtered list both mirror Python.
+            if hardware.unifiedMemoryGiB >= 96,
+               let trioEnd = ids.lastIndex(where: { qwen38TrioIDs.contains($0) }) {
                 ids.insert(contentsOf: flashNextIDs, at: ids.index(after: trioEnd))
+            }
+            if hardware.unifiedMemoryGiB >= 256 {
+                ids.removeAll { $0 == "flash-next-optimized-quality" }
+                ids.insert("flash-next-optimized-quality", at: 0)
             }
             ids.append(contentsOf: tinyIDs)
             return ids
@@ -1039,6 +1158,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen38-27b-optimized-quality",
         "flash-next-bare-speed",
         "flash-next-optimized-speed",
+        "flash-next-optimized-quality",
         "optimized-speed-v2",
         "optimized-speed",
         "optimized-quality",
@@ -1046,6 +1166,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
         "qwen35-9b-optimized-speed",
+        "bonsai-2-27b-optimized-speed",
     ]
 
     /// Qwen 3.8 trio (2026-08-15 release): Optimized Speed is the
@@ -1060,12 +1181,12 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen38-27b-optimized-quality",
     ]
 
-    /// Qwen 3.8 Flash-Next pair (2026-08-27): Bare Speed first (the fast
-    /// flat-4-bit pick), then Optimized Speed. Modern-tier, big-Mac only.
+    /// Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
     /// Mirrors model_catalog.FLASH_NEXT_IDS.
     private static let flashNextIDs = [
         "flash-next-bare-speed",
         "flash-next-optimized-speed",
+        "flash-next-optimized-quality",
     ]
 
     private static func recommendationIDs(
@@ -1133,7 +1254,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "custom-\(safeID)",
             displayName: repoName,
             shortName: repoName,
-            detail: tr("Custom Hugging Face model. MTPLX will use MTP when the repo includes a sidecar."),
+            localizedDetailKey: "Custom Hugging Face model. MTPLX will use MTP when the repo includes a sidecar.",
             hfModelID: repoID,
             localCandidates: [
                 "~/.mtplx/models/\(repoID.replacingOccurrences(of: "/", with: "--"))",
@@ -1170,7 +1291,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "forged-\(safeID)",
             displayName: trimmedName,
             shortName: trimmedName,
-            detail: tr("Forged locally with MTPLX Forge."),
+            localizedDetailKey: "Forged locally with MTPLX Forge.",
             hfModelID: trimmedName,
             localCandidates: [localPath],
             aliases: [trimmedName, localPath],
@@ -1206,7 +1327,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             id: "local-\(safeID)",
             displayName: name,
             shortName: name,
-            detail: tr("Local model folder on this Mac."),
+            localizedDetailKey: "Local model folder on this Mac.",
             hfModelID: folder,
             localCandidates: [folder],
             aliases: aliases
@@ -1338,7 +1459,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         if normalized.contains("flash-next") || normalized.contains("flashnext") {
             return "qwen4_exp"
         }
-        if matchesQwen38VersionToken(normalized) {
+        if isBonsaiFamilyHint(normalized) || matchesQwen38VersionToken(normalized) {
             return "qwen3_8"
         }
         if normalized.contains("qwen3.6") || normalized.contains("qwen36") || normalized.contains("qwen3-6") {
@@ -1427,6 +1548,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                     stringValue(runtime.rawJSON["served_model_id"]),
                     stringValue(runtime.rawJSON["model_id"]),
                     runtime.forgeProvenance?.sourceRepo,
+                    stringValue(runtime.rawJSON["base_trunk"]),
                 ].compactMap({ $0 }) {
                     let family = modelFamilyFromHint(hint)
                     if family != "unknown" { return family }
@@ -1477,6 +1599,10 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         return nil
     }
 
+    static func isBonsaiFamilyHint(_ text: String) -> Bool {
+        ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
+    }
+
     private static func modelFamilyFromHint(_ raw: String) -> String {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("gemma") { return "gemma4" }
@@ -1488,6 +1614,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         {
             return "qwen4_exp"
         }
+        if isBonsaiFamilyHint(normalized) { return "qwen3_8" }
         if normalized.range(
             of: "qwen3[._-]?8(?![0-9]*b)",
             options: .regularExpression

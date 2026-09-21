@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2-3× daha hızlı";
 "30 competition problems" = "30 yarışma problemi";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4 bit dinamik niceleme. Kodlamada üstün hız ve iyi kalite. M1 ve M2 Mac'ler için FP16 yapısı. Önerilir.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4 bit dinamik niceleme. Kodlamada üstün hız ve iyi kalite. Önerilir.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4 bit dinamik niceleme. Kodlamada üstün hız ve iyi kalite. M1 ve M2 Mac'ler için FP16 yapısı.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4 bit dinamik niceleme. Kodlamada üstün hız ve iyi kalite.";
 "4-bit quantization. Blazingly fast and quite smart." = "4 bit niceleme. Son derece hızlı ve oldukça akıllı.";
 "4-bit quantization. Fastest fit for smaller Macs." = "4 bit niceleme. Küçük Mac'lere sığan en hızlı seçenek.";
 "5-min Min/Max" = "5 dakikalık min/maks";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "Bu oturumun önbellekteki önekini at";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Nicelenmemiş ağırlıklar için veri tipi. Yerel BF16 desteği olmayan M1/M2 Mac'lerde FP16, istemleri daha hızlı işler.";
 "DURATION" = "SÜRE";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "8 bit dikkat katmanlı dinamik 4 bit niceleme. Daha yüksek kalite, biraz daha yavaş. Önerilir.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "8 bit dikkat katmanlı dinamik 4 bit niceleme. Daha yüksek kalite, biraz daha yavaş.";
 "Earlier heavy history hidden" = "Önceki ağır geçmiş gizlendi";
 "Edit" = "Düzenle";
 "effective %@" = "geçerli %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "%@ bulundu ama sürümü okunamadı. Uygulama her durumda kendi çalışma ortamını kullanır.";
 "Found %lld results — %@" = "%lld sonuç bulundu: %@";
 "Found your sweet spot." = "En verimli noktanız bulundu.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "M1 ve M2 Mac'ler için önerilen FP16 kalite yapısı.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "M1 ve M2 Mac'ler için önerilen FP16 hız yapısı.";
+"FP16 quality artifact for M1 and M2 Macs." = "M1 ve M2 Mac'ler için FP16 kalite yapısı.";
+"FP16 speed artifact for M1 and M2 Macs." = "M1 ve M2 Mac'ler için FP16 hız yapısı.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "M1 ve M2 Mac'ler için FP16 uyumlu 35B denge yapısı.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "M1 ve M2 Mac'ler için FP16 uyumlu 35B hız yapısı.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "M1 ve M2 Mac'ler için FP16 uyumlu 9B hız yapısı.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "Bağlı uygulamalarda MTPLX ayarlarını kullan";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Açık: bağlı uygulamalar MTPLX akıl yürütme ve örnekleme ayarlarını izler. Kapalı: kendi ayarları geçerlidir. Normal API istekleri kendi ayarlarını korur.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8 bit ana model ve MTP başlığı, BF16 yapısal tensörler ve 4 bit n-gram tablosu. Daha yüksek doğruluk sunan Flash-Next sürümü.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Görüntü işleme ve MTP destekli Prism ML üçlü 27B modeli. Daha az belleğe sahip Mac’ler için küçük ağırlıklar.";

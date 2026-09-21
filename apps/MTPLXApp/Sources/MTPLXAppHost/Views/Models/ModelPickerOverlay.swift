@@ -340,7 +340,7 @@ struct ModelPickerOverlay: View, Equatable {
         }
         ModelRowView(
             displayName: row.displayName,
-            detail: row.detail,
+            detail: row.option.localizedDetail,
             isInstalled: row.isInstalled,
             selected: row.selected,
             applying: applyingModelID == row.id,
@@ -966,7 +966,6 @@ struct ModelPickerPreparedOption: Equatable, Identifiable, Sendable {
     let option: MTPLXModelOption
     let id: String
     let displayName: String
-    let detail: String
     let isInstalled: Bool
     let selected: Bool
     let resolvedReference: String
@@ -986,7 +985,6 @@ struct ModelPickerPreparedOption: Equatable, Identifiable, Sendable {
         self.option = option
         self.id = option.id
         self.displayName = option.displayName
-        self.detail = option.detail
         self.isInstalled = installedLocalPath != nil
         self.installedPath = installedLocalPath
         self.resolvedReference = installedLocalPath ?? option.hfModelID

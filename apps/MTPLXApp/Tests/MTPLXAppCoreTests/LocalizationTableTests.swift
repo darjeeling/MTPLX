@@ -166,7 +166,9 @@ final class LocalizationTableTests: XCTestCase {
         let english = try Self.table(.english)
         let sources = Self.packageRoot.appendingPathComponent("Sources")
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
-        let call = try NSRegularExpression(pattern: #"\b(?:tr|L10n\.string)\(\s*"((?:[^"\\]|\\.)*)""#)
+        let call = try NSRegularExpression(
+            pattern: #"(?:\b(?:tr|L10n\.string|status\??)\(\s*|\bupdateLocalized\([^,]+,[^,]+,\s*|\b(?:localizedDetailKey|detailLocalizationKey):\s*)"((?:[^"\\]|\\.)*)""#
+        )
         var scanned = 0
         var unknown: [String] = []
         for case let url as URL in enumerator where url.pathExtension == "swift" {
@@ -289,6 +291,75 @@ final class LocalizationTableTests: XCTestCase {
         XCTAssertEqual(tr("Cancel"), "Annuler", "tr answers in the new language before any view re-renders")
         store.language = .english
         XCTAssertEqual(tr("Cancel"), "Cancel")
+    }
+
+    func testModelDetailsResolveWhenLanguageChangesAfterCatalogInitialization() throws {
+        let key = "4-bit dynamic quant. Great coding speeds and good quality."
+        let model = try XCTUnwrap(
+            MTPLXModelOption.officialCatalog.first { $0.id == "qwen38-27b-optimized-speed" }
+        )
+        XCTAssertEqual(model.detail, key)
+        XCTAssertEqual(model.localizedDetail, key)
+
+        L10n.activate(.simplifiedChinese)
+        XCTAssertEqual(model.localizedDetail, "4 位动态量化。编程速度极快，质量良好。")
+
+        let legacy = MTPLXModelOption(
+            id: "custom-example--model",
+            displayName: "Model",
+            shortName: "Model",
+            detail: "旧语言中已缓存的说明",
+            hfModelID: "Example/Model",
+            localCandidates: []
+        )
+        let decoded = try JSONDecoder().decode(
+            MTPLXModelOption.self,
+            from: JSONEncoder().encode(legacy)
+        )
+        XCTAssertEqual(
+            decoded.localizedDetail,
+            "自定义 Hugging Face 模型。当模型仓库包含边车文件时，MTPLX 将使用 MTP。"
+        )
+
+        let literal = MTPLXModelOption(
+            id: "third-party",
+            displayName: "Third Party",
+            shortName: "Third Party",
+            detail: "Publisher-authored detail",
+            hfModelID: "Example/ThirdParty",
+            localCandidates: []
+        )
+        XCTAssertEqual(literal.localizedDetail, "Publisher-authored detail")
+    }
+
+    func testDiscoveredLibraryDescriptionSurvivesLanguageSwitchAndLegacyDecode() throws {
+        let row = MTPLXModelOption(
+            id: "local:/library/example",
+            displayName: "Example", shortName: "Example", detail: "Previously translated text",
+            hfModelID: "Example/Model", localCandidates: []
+        )
+        let decoded = try JSONDecoder().decode(MTPLXModelOption.self, from: JSONEncoder().encode(row))
+        let key = "Local MTPLX model in a configured library."
+        XCTAssertEqual(decoded.localizedDetail, key)
+        L10n.activate(.simplifiedChinese)
+        XCTAssertEqual(decoded.localizedDetail, L10n.string(key, language: .simplifiedChinese))
+        L10n.activate(.english)
+        XCTAssertEqual(decoded.localizedDetail, key)
+    }
+
+    func testNewDescriptionsExistInEveryLanguageAndResolveLive() throws {
+        for id in ["flash-next-optimized-quality", "bonsai-2-27b-optimized-speed"] {
+            let model = try XCTUnwrap(MTPLXModelOption.officialCatalog.first { $0.id == id })
+            let key = model.detail
+            for language in Self.languages {
+                let value = try XCTUnwrap(Self.table(language)[key])
+                if language != .english { XCTAssertNotEqual(value, key) }
+                L10n.activate(language)
+                XCTAssertEqual(model.localizedDetail, value)
+                if id.hasPrefix("bonsai") { XCTAssertTrue(value.contains("Prism ML")) }
+            }
+        }
+        L10n.activate(.english)
     }
 
     func testFormatArgumentsFlowThroughTranslatedTemplates() throws {

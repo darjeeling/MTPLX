@@ -214,6 +214,7 @@ def _app_picker_first_small_pack(memory_gib: float, chip_tier: str) -> str:
     from mtplx.model_catalog import recommended_models
 
     small = {
+        "bonsai-2-27b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-9b-optimized-speed-fp16",
@@ -229,9 +230,9 @@ def _app_picker_first_small_pack(memory_gib: float, chip_tier: str) -> str:
     [
         (8.0, "Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed"),
         (12.0, "Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed"),
-        (16.0, "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed"),
-        (18.0, "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed"),
-        (24.0, "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed"),
+        (16.0, "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"),
+        (18.0, "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"),
+        (24.0, "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"),
         (32.0, QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID),
         (36.0, QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID),
         (48.0, QWEN38_OPTIMIZED_SPEED_HF_MODEL_ID),

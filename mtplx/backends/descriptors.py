@@ -1142,6 +1142,10 @@ _QWEN4_PREVIEW_MARKER = re.compile(r"flash[._-]?next|qwen[._-]?4")
 def _explicit_qwen_family_marker(text: str) -> str | None:
     if _QWEN4_PREVIEW_MARKER.search(text):
         return None
+    if any(marker in text for marker in (
+        "bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b",
+    )):
+        return "qwen3_8"
     if _QWEN3_8_MARKER.search(text):
         return "qwen3_8"
     if "qwen3.6" in text or "qwen3_6" in text or "qwen36" in text or "qwen3-6" in text:
@@ -1181,9 +1185,13 @@ def _artifact_family_texts(model_ref: str) -> tuple[str, str]:
                 provenance = provenance if isinstance(provenance, dict) else {}
                 inputs = provenance.get("forge_inputs")
                 inputs = inputs if isinstance(inputs, dict) else {}
+                controls = data.get("model_controls")
+                controls = controls if isinstance(controls, dict) else {}
                 parts.extend(
                     str(value or "")
                     for value in (
+                        data.get("model_family"),
+                        controls.get("model_family"),
                         data.get("public_model_id"),
                         data.get("served_model_id"),
                         data.get("model_id"),

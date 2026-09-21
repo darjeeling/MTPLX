@@ -5,9 +5,20 @@ brew install youssofal/mtplx/mtplx
 
 mtplx help
 mtplx doctor --summary
-mtplx pull Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed
-mtplx inspect Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed --json
+mtplx start
 ```
+
+On modern chips, the app and CLI offer 4B Speed below 16 GB, Bonsai 2 from
+16 to under 32 GB, Qwen 3.8 27B Optimized Speed from 32 to under 256 GB, and
+Flash-Next Optimized Quality from 256 GB. Flash-Next options are listed from
+96 GB and filtered by their catalog peak. M1/M2 keep the FP16 policy: 9B
+below 32 GB when it fits, then the 27B trio. An 8 GB M1/M2 Mac has no fitting
+curated FP16 model. Explicit model selections take precedence.
+
+The two new packs need engine 2.11.4. Their final uploads and memory
+qualification are separate release gates. Catalog feasibility uses peak ×
+1.5 for the Recommended badge and the unchanged disk-space rule; it does not
+change engine memory limits, context windows, or runtime admission checks.
 
 Homebrew is the recommended macOS path. Python-only installs can use PyPI:
 

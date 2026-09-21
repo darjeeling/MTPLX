@@ -10,6 +10,23 @@ mtplx serve --host 127.0.0.1 --port 8000 --no-stats-footer
 See [Concurrency modes](concurrency.md) for scheduler selection, ownership
 rules, and model/backend-specific implementations.
 
+On modern chips, the app and CLI offer 4B Speed below 16 GB, Bonsai 2 from
+16 to under 32 GB, Qwen 3.8 27B Optimized Speed from 32 to under 256 GB, and
+Flash-Next Optimized Quality from 256 GB. Flash-Next options are listed from
+96 GB and filtered by their catalog peak. M1/M2 keep the FP16 policy: 9B
+below 32 GB when it fits, then the 27B trio. An 8 GB M1/M2 Mac has no fitting
+curated FP16 model. Explicit model selections take precedence.
+
+The two new packs need engine 2.11.4. Their final uploads and memory
+qualification are separate release gates. Catalog feasibility uses peak ×
+1.5 for the Recommended badge and the unchanged disk-space rule; it does not
+change engine memory limits, context windows, or runtime admission checks.
+
+The Flash-Next Quality catalog figure describes a calculated 128K planner
+need. Serving still derives memory use from the actual weights, context and
+n-gram residency. The catalog does not impose a context cap or override the
+planner to make either new pack fit.
+
 Endpoints:
 
 - `GET /health`

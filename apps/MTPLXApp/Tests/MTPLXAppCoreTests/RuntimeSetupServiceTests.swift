@@ -300,11 +300,11 @@ final class RuntimeSetupServiceTests: XCTestCase {
             processEnvironment: environment,
             appVersion: "1.0.0",
             engineInstaller: { status in
-                status(tr("Installing MTPLX runtime"))
+                status("Installing MTPLX runtime")
                 return engine
             },
             fanControlEnsurer: { _, status in
-                status(tr("Checking fan control"))
+                status("Checking fan control")
                 return FanControlSetupResult(
                     ok: true,
                     exitCode: 0,
@@ -328,6 +328,13 @@ final class RuntimeSetupServiceTests: XCTestCase {
         XCTAssertEqual(result.row(.engine)?.detail, "MTPLX 1.0.0 就绪")
         XCTAssertEqual(result.row(.fanControl)?.detail, "风扇控制就绪")
         XCTAssertEqual(result.row(.globalCLI)?.detail, "Homebrew CLI 已更新至 1.0.0")
+        // These are the same captured rows, resolved after switching languages.
+        L10n.activate(.english)
+        let englishDetails = result.snapshots.flatMap { $0.map(\.detail) }
+        XCTAssertTrue(englishDetails.contains("Installing MTPLX runtime"))
+        XCTAssertTrue(englishDetails.contains("Checking fan control"))
+        XCTAssertEqual(result.row(.engine)?.detail, "MTPLX 1.0.0 ready")
+        XCTAssertEqual(result.row(.fanControl)?.detail, "Fan control ready")
     }
 
     func testHomebrewUpgradeFailureFallsBackToShim() async throws {

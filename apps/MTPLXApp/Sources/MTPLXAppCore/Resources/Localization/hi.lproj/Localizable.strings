@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× तेज़";
 "30 competition problems" = "30 प्रतियोगिता के प्रश्न";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "4-बिट डायनेमिक क्वांट। बेहतरीन कोडिंग गति और अच्छी गुणवत्ता। M1 और M2 Mac के लिए FP16 बिल्ड। अनुशंसित।";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "4-बिट डायनेमिक क्वांट। बेहतरीन कोडिंग गति और अच्छी गुणवत्ता। अनुशंसित।";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "4-बिट डायनेमिक क्वांट। बेहतरीन कोडिंग गति और अच्छी गुणवत्ता। M1 और M2 Mac के लिए FP16 बिल्ड।";
+"4-bit dynamic quant. Great coding speeds and good quality." = "4-बिट डायनेमिक क्वांट। बेहतरीन कोडिंग गति और अच्छी गुणवत्ता।";
 "4-bit quantization. Blazingly fast and quite smart." = "4-बिट क्वांटाइज़ेशन। बेहद तेज़ और काफी स्मार्ट।";
 "4-bit quantization. Fastest fit for smaller Macs." = "4-बिट क्वांटाइज़ेशन। छोटे Mac के लिए सबसे तेज़ फ़िट।";
 "5-min Min/Max" = "5-मिनट न्यूनतम/अधिकतम";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "इस सत्र के कैश किए गए प्रीफ़िक्स को हटाएं";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "गैर-क्वांटाइज़्ड वज़न के लिए Dtype। FP16 M1/M2 Mac पर प्रॉम्प्ट-प्रोसेस तेज़ी से करता है, जिनमें कोई नेटिव BF16 नहीं है।";
 "DURATION" = "अवधि";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "8-बिट अटेंशन के साथ डायनेमिक 4-बिट क्वांट। उच्च गुणवत्ता और थोड़ा धीमा। अनुशंसित।";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "8-बिट अटेंशन के साथ डायनेमिक 4-बिट क्वांट। उच्च गुणवत्ता और थोड़ा धीमा।";
 "Earlier heavy history hidden" = "पहला भारी इतिहास छिपा हुआ है";
 "Edit" = "संपादित करें";
 "effective %@" = "प्रभावी %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "%@ मिला लेकिन इसका संस्करण नहीं पढ़ा जा सका। ऐप किसी भी स्थिति में अपने रनटाइम का उपयोग करता है।";
 "Found %lld results — %@" = "%lld परिणाम मिले — %@";
 "Found your sweet spot." = "आपकी इष्टतम सेटिंग मिल गई।";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "M1 और M2 Mac के लिए अनुशंसित FP16 गुणवत्ता आर्टिफ़ैक्ट।";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "M1 और M2 Mac के लिए अनुशंसित FP16 गति आर्टिफ़ैक्ट।";
+"FP16 quality artifact for M1 and M2 Macs." = "M1 और M2 Mac के लिए FP16 गुणवत्ता आर्टिफ़ैक्ट।";
+"FP16 speed artifact for M1 and M2 Macs." = "M1 और M2 Mac के लिए FP16 गति आर्टिफ़ैक्ट।";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "M1 और M2 Mac के लिए FP16-अनुकूल 35B संतुलन आर्टिफ़ैक्ट।";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "M1 और M2 Mac के लिए FP16-अनुकूल 35B गति आर्टिफ़ैक्ट।";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "M1 और M2 Mac के लिए FP16-अनुकूल 9B गति आर्टिफ़ैक्ट।";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "जुड़े ऐप्स के लिए MTPLX सेटिंग्स इस्तेमाल करें";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "चालू: जुड़े ऐप्स MTPLX की तर्क और सैंपलिंग सेटिंग्स अपनाते हैं। बंद: उनकी अपनी सेटिंग्स लागू होती हैं। सामान्य API अनुरोध अपनी सेटिंग्स बनाए रखते हैं।";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8-बिट मुख्य मॉडल और MTP हेड, BF16 संरचनात्मक टेंसर और 4-बिट n-gram तालिका। अधिक सटीकता वाला Flash-Next बिल्ड।";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Prism ML का टर्नरी 27B मॉडल, विज़न और MTP के साथ। कम मेमोरी वाले Mac के लिए छोटे वेट्स।";

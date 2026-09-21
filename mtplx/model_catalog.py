@@ -26,6 +26,8 @@ from mtplx.hf_loader import cached_model_is_complete, model_library_roots
 
 MEMORY_SAFETY_FACTOR = 1.5
 DISK_MULTIPLIER = 2.5
+# Change this single bound when the measured memory table is available.
+BONSAI_RECOMMENDATION_MIN_GIB = 16.0
 
 MODERN_TIER = "modern"
 LEGACY_TIER = "legacy"
@@ -146,8 +148,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         id="qwen38-27b-optimized-speed",
         display_name="Qwen 3.8 27B Optimized Speed",
         detail=(
-            "4-bit dynamic quant. Great coding speeds and good quality. "
-            "Recommended."
+            "4-bit dynamic quant. Great coding speeds and good quality."
         ),
         hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed",
         # Exact byte sum of the published HF repo files (2026-08-15 tree API;
@@ -214,7 +215,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.8 27B Optimized Speed FP16",
         detail=(
             "4-bit dynamic quant. Great coding speeds and good quality. "
-            "FP16 build for M1 and M2 Macs. Recommended."
+            "FP16 build for M1 and M2 Macs."
         ),
         hf_model_id="Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed-FP16",
         # Exact byte sum of the published HF repo files (2026-08-15 tree API;
@@ -279,7 +280,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         display_name="Qwen 3.8 Flash-Next Optimized Speed",
         detail=(
             "Dynamic 4-bit quant with 8-bit attention. Higher quality and "
-            "slightly slower. Recommended."
+            "slightly slower."
         ),
         hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
         # Exact byte sum of the published HF repo (2026-08-28 audit); includes
@@ -294,6 +295,39 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
             "Qwen3.8 Flash-Next Optimized Speed",
             "Flash-Next Optimized Speed",
             "Qwen3.8-Flash-Next-MTPLX-Optimized-Speed",
+        ),
+    ),
+    CatalogModel(
+        id="flash-next-optimized-quality",
+        display_name="Qwen 3.8 Flash-Next Optimized Quality",
+        detail="8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
+        hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+        # Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
+        # Calculated download and planner need at 128K; replace together with measured figures.
+        size_bytes=169_900_000_000, peak_memory_gib=166.2,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-flash-next-optimized-quality",
+            "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
+            "Flash-Next Optimized Quality",
+        ),
+    ),
+    CatalogModel(
+        id="bonsai-2-27b-optimized-speed",
+        display_name="Bonsai 2 27B Optimized Speed",
+        detail="Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
+        hf_model_id="Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+        # size_bytes: exact byte sum of the pack built on 2026-09-18 (8.24 GiB); the
+        # published repo's sum replaces it after the upload. peak_memory_gib: the
+        # conservative reading of an earlier measurement; the measured memory table
+        # (scripts/bonsai_memory_table.py) replaces it.
+        size_bytes=8_847_819_423, peak_memory_gib=10.32,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-bonsai-2-27b-optimized-speed",
+            "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+            "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+            "mtplx-bonsai-38-27b-optimized-speed",
         ),
     ),
     CatalogModel(
@@ -331,7 +365,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
     CatalogModel(
         id="optimized-speed-fp16",
         display_name="Qwen 3.6 27B Optimized Speed FP16",
-        detail="FP16 speed artifact recommended for M1 and M2 Macs.",
+        detail="FP16 speed artifact for M1 and M2 Macs.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed-FP16",
         # Exact sum of the published HF repo files (2026-07-03 audit); the
         # previous 16-GiB figure was a pre-publish estimate ~0.7 GiB high.
@@ -437,7 +471,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
     CatalogModel(
         id="optimized-quality-fp16",
         display_name="Qwen 3.6 27B Optimized Quality FP16",
-        detail="FP16 quality artifact recommended for M1 and M2 Macs.",
+        detail="FP16 quality artifact for M1 and M2 Macs.",
         hf_model_id="Youssofal/Qwen3.6-27B-MTPLX-Optimized-Quality-FP16",
         # Exact byte sum of the published HF repo files (2026-07-07 upload,
         # verified via the tree API).
@@ -475,6 +509,7 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "qwen38-27b-optimized-quality",
     "flash-next-bare-speed",
     "flash-next-optimized-speed",
+    "flash-next-optimized-quality",
     "optimized-speed-v2",
     "optimized-speed",
     "optimized-quality",
@@ -482,14 +517,15 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "qwen36-35b-a3b-optimized-balance",
     "gemma4-optimized-speed",
     "qwen35-9b-optimized-speed",
+    "bonsai-2-27b-optimized-speed",
 )
 
-# Qwen 3.8 Flash-Next pair (2026-08-27): Bare Speed first (the fast
-# flat-4-bit pick), then Optimized Speed. Modern-tier, big-Mac only.
+# Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
 # Mirrors MTPLXModelOption.flashNextIDs.
 _FLASH_NEXT_IDS = (
     "flash-next-bare-speed",
     "flash-next-optimized-speed",
+    "flash-next-optimized-quality",
 )
 
 
@@ -589,7 +625,11 @@ def recommended_catalog_ids(
     if memory_gib < 16:
         return tiny_ids or [small]
     if memory_gib < 32:
-        return [small, *tiny_ids]
+        if chip_tier == LEGACY_TIER:
+            return [small]
+        bonsai = "bonsai-2-27b-optimized-speed"
+        leading = [bonsai, small] if memory_gib >= BONSAI_RECOMMENDATION_MIN_GIB else [small, bonsai]
+        return [*leading, *tiny_ids]
     if memory_gib < 48:
         if speed27_v2 is None:
             return [*trio38, small, speed27, "gemma4-optimized-speed", speed35, quality27]
@@ -601,13 +641,18 @@ def recommended_catalog_ids(
             "gemma4-optimized-speed",
             speed35,
             quality27,
+            "bonsai-2-27b-optimized-speed",
             *tiny_ids,
         ]
-    # Flash-Next rides right behind the 3.8 trio on big modern Macs.
-    # Modern tier only (bf16 packs, no fp16 sibling); the peak-memory
-    # filter in recommended_models hides both entries below ~96 GB.
-    flash_next = list(_FLASH_NEXT_IDS) if chip_tier != LEGACY_TIER else []
+    # Offer Flash-Next from 96 GiB; Quality leads from 256 GiB.
+    # The normal peak-memory filter still applies to every pack.
+    flash_next = list(_FLASH_NEXT_IDS) if chip_tier != LEGACY_TIER and memory_gib >= 96 else []
+    leading = []
+    if chip_tier != LEGACY_TIER and memory_gib >= 256:
+        leading = ["flash-next-optimized-quality"]
+        flash_next.remove(leading[0])
     return [
+        *leading,
         *trio38,
         *flash_next,
         *([speed27_v2] if speed27_v2 else []),
@@ -617,6 +662,7 @@ def recommended_catalog_ids(
         balance35,
         "gemma4-optimized-speed",
         small,
+        *(["bonsai-2-27b-optimized-speed"] if chip_tier != LEGACY_TIER else []),
         *tiny_ids,
     ]
 

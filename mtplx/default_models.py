@@ -25,6 +25,12 @@ from mtplx.profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
     DEFAULT_PUBLIC_MODEL_ID,
+    FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
+    FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID,
+    BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+    BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
+    BONSAI_LEGACY_PUBLIC_MODEL_ID,
+    BONSAI_LEGACY_LOCAL_NAME,
     FLASH_NEXT_BARE_SPEED_HF_MODEL_ID,
     FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID,
     FLASH_NEXT_OPTIMIZED_SPEED_HF_MODEL_ID,
@@ -75,13 +81,13 @@ _LEGACY_APPLE_FP16_GENERATIONS = frozenset({"m1", "m2"})
 _NEWER_APPLE_SPEED_GENERATIONS = frozenset({"m3", "m4", "m5"})
 # Below this much unified memory the 27B default cannot load safely, so the
 # default routes to the smaller pack the app's picker lists first (the 9B
-# from 16 GiB, the 4B below that; model_catalog.recommended_catalog_ids).
+# and Bonsai from its named tier bound, the 4B below 16 GiB; model_catalog.recommended_catalog_ids).
 SMALL_DEFAULT_MEMORY_FLOOR_GIB = 32.0
 # The smaller speed packs, largest first. Under the 27B floor the default is
 # the first of these the app's tiers offer this machine; with unreadable
 # memory it is the last one. There is no FP16 4B build, so M1/M2 Macs stop
 # at the 9B.
-_SMALL_SPEED_CATALOG_IDS = ("qwen35-9b-optimized-speed", "qwen35-4b-optimized-speed")
+_SMALL_SPEED_CATALOG_IDS = ("bonsai-2-27b-optimized-speed", "qwen35-9b-optimized-speed", "qwen35-4b-optimized-speed")
 _SMALL_FP16_CATALOG_IDS = ("qwen35-9b-optimized-speed-fp16",)
 INTEL_REFUSAL_MESSAGE = (
     "MTPLX runs on Apple Silicon Macs (M1 and later); this Mac has an Intel "
@@ -179,6 +185,11 @@ _OPTIMIZED_35B_SPEED_LOCAL_CANDIDATES = (
 )
 _VERIFIED_DEFAULT_LOCAL_NAMES = frozenset(
     {
+        Path(BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID).name,
+        BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID.replace("/", "--"),
+        BONSAI_LEGACY_LOCAL_NAME,
+        Path(FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID).name,
+        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID.replace("/", "--"),
         "Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Qwen3.8-27B-MTPLX-Bare-Speed",
@@ -232,6 +243,10 @@ class DefaultModelSelection:
 
     @property
     def display_name(self) -> str:
+        for model_id in ("bonsai-2-27b-optimized-speed", "flash-next-optimized-quality"):
+            pack = catalog_model_with_id(model_id)
+            if pack and self.hf_model == pack.hf_model_id:
+                return pack.display_name
         if "4B" in self.hf_model:
             return "Qwen3.5 4B Optimized Speed"
         if "9B" in self.hf_model:
@@ -329,6 +344,21 @@ def _complete_local_model_ref(candidates: tuple[str, ...]) -> str | None:
         if _is_complete_local_model(path):
             return str(path)
     return None
+
+
+def catalog_model_ref(pack: CatalogModel) -> str:
+    """Prefer a complete copy in configured libraries, including released aliases."""
+    from mtplx.hf_loader import cached_model_is_complete, model_library_roots
+
+    basename = Path(pack.hf_model_id).name
+    names = (pack.hf_model_id.replace("/", "--"), basename,
+             *(alias for alias in pack.aliases if "MTPLX" in alias and " " not in alias))
+    for root in model_library_roots():
+        for name in names:
+            candidate = root / name
+            if cached_model_is_complete(candidate):
+                return str(candidate)
+    return pack.hf_model_id
 
 
 def _optimized_speed_model_ref(
@@ -522,6 +552,9 @@ def _public_model_id_from_metadata(path: Path) -> str | None:
     for key in ("public_model_id", "served_model_id", "model_id"):
         value = runtime.get(key)
         if isinstance(value, str) and value.strip():
+            # Existing Bonsai packs keep working while advertising the current id.
+            if value.strip().lower() == BONSAI_LEGACY_PUBLIC_MODEL_ID:
+                return BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID
             return _sanitize_public_model_id(value)
     inferred = _public_model_id_from_name(str(path))
     if inferred:
@@ -602,6 +635,15 @@ def _public_model_id_from_name(value: str) -> str | None:
         return None
     lowered = text.replace("\\", "/").lower()
     components = _ref_name_components(text)
+    for public_id, repo_id, aliases in (
+        (FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID, FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
+         ("flash-next-optimized-quality",)),
+        (BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID, BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+         ("bonsai-2-27b-optimized-speed", BONSAI_LEGACY_PUBLIC_MODEL_ID, BONSAI_LEGACY_LOCAL_NAME)),
+    ):
+        names = {public_id, repo_id.lower(), Path(repo_id).name.lower(), *(a.lower() for a in aliases)}
+        if components & names:
+            return public_id
     if FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID in components:
         return FLASH_NEXT_BARE_SPEED_PUBLIC_MODEL_ID
     if FLASH_NEXT_OPTIMIZED_SPEED_PUBLIC_MODEL_ID in components:
@@ -836,6 +878,8 @@ def _small_pack_offered_first(variant: str, memory_gib: float) -> CatalogModel |
 def _small_pack_precision(pack: CatalogModel, variant: str) -> str:
     if variant == "fp16":
         return "FP16"
+    if pack.id == "bonsai-2-27b-optimized-speed":
+        return pack.detail
     return QWEN35_4B_SPEED_DESCRIPTION if "4B" in pack.hf_model_id else QWEN35_9B_SPEED_DESCRIPTION
 
 
@@ -847,10 +891,11 @@ def select_default_model(
     """Select the verified default model for this machine.
 
     Auto policy is intentionally simple and visible: M1/M2 -> FP16, modern
-    Macs with at least 32 GiB -> Qwen 3.8 Optimized Speed (the complete local
+    Macs from 256 GiB -> Flash-Next Optimized Quality; 32-255 GiB ->
+    Qwen 3.8 Optimized Speed (the complete local
     build when installed, otherwise the published Hub repo), under 32 GiB ->
     the smaller pack the app's picker lists first for that much memory (the
-    9B from 16 GiB, the 4B below), and memory that could not be read -> the
+    Bonsai from its named tier bound, the 4B below 16 GiB), and memory that could not be read -> the
     smallest pack. An explicit legacy
     MTPLX_OPTIMIZED_SPEED_MODEL override keeps the 3.6 Optimized Speed V2
     lane it was written for.
@@ -926,7 +971,7 @@ def select_default_model(
                 chip=chip,
                 memory_gib=memory_gib,
             )
-        size_label = "4B" if "4B" in small_pack.hf_model_id else "9B"
+        size_label = small_pack.display_name
         reason = f"{reason}; routed to {size_label} for {memory_gib:.0f} GiB unified memory"
 
     qwen38_model = qwen38_optimized_speed_model_ref()
@@ -948,8 +993,18 @@ def select_default_model(
             or memory_gib >= OPTIMIZED_SPEED_V2_MEMORY_FLOOR_GIB
         )
     )
-    if small_pack is not None:
-        model = small_pack.hf_model_id
+    large_pack = None
+    if variant == "speed" and not legacy_speed_override and memory_gib is not None:
+        candidate = recommended_models(memory_gib=memory_gib, chip_tier=MODERN_TIER)[0]
+        explicit_speed = str(os.environ.get(QWEN38_OPTIMIZED_SPEED_MODEL_ENV) or "").strip()
+        if candidate.id == "flash-next-optimized-quality" and (not explicit_speed or _env_ref_disabled(explicit_speed)):
+            large_pack = candidate
+    if large_pack is not None:
+        model = catalog_model_ref(large_pack)
+        hf_model = large_pack.hf_model_id
+        precision = large_pack.detail
+    elif small_pack is not None:
+        model = catalog_model_ref(small_pack)
         hf_model = small_pack.hf_model_id
         precision = _small_pack_precision(small_pack, variant)
     elif variant == "fp16":
@@ -1007,6 +1062,11 @@ def verified_default_refs() -> set[str]:
     local_qwen38_bare = qwen38_bare_speed_model_ref()
     local_speed = optimized_speed_model_ref()
     refs = {
+        BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
+        BONSAI_LEGACY_PUBLIC_MODEL_ID,
+        FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID,
+        BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
         DEFAULT_HF_MODEL_ID,
         DEFAULT_FP16_HF_MODEL_ID,
         DEFAULT_MODEL_ID,

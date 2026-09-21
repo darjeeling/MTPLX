@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× plus rapide";
 "30 competition problems" = "30 problèmes de concours";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "Quantification dynamique 4-bit. Excellente vitesse de code et bonne qualité. Build FP16 pour Mac M1 et M2. Recommandé.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "Quantification dynamique 4-bit. Excellente vitesse de code et bonne qualité. Recommandé.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "Quantification dynamique 4-bit. Excellente vitesse de code et bonne qualité. Build FP16 pour Mac M1 et M2.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "Quantification dynamique 4-bit. Excellente vitesse de code et bonne qualité.";
 "4-bit quantization. Blazingly fast and quite smart." = "Quantification 4-bit. Extrêmement rapide et très performant.";
 "4-bit quantization. Fastest fit for smaller Macs." = "Quantification 4-bit. L'option la plus rapide pour les configurations modestes.";
 "5-min Min/Max" = "Min/Max sur 5 min";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "Abandonner le préfixe en cache de cette session";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Dtype pour les poids non quantifiés. FP16 traite les invites plus rapidement sur les Mac M1/M2, qui n'ont pas de BF16 natif.";
 "DURATION" = "DURÉE";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "Quantification 4-bit dynamique avec attention 8-bit. Meilleure qualité et légèrement plus lent. Recommandé.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "Quantification 4-bit dynamique avec attention 8-bit. Meilleure qualité et légèrement plus lent.";
 "Earlier heavy history hidden" = "Historique volumineux antérieur masqué";
 "Edit" = "Modifier";
 "effective %@" = "effectif %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "Trouvé %@ mais impossible de lire sa version. L'application utilise son propre runtime de toute façon.";
 "Found %lld results — %@" = "%lld résultats trouvés — %@";
 "Found your sweet spot." = "Configuration optimale trouvée.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "Artefact de qualité FP16 recommandé pour les Mac M1 et M2.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "Artefact de vitesse FP16 recommandé pour les Mac M1 et M2.";
+"FP16 quality artifact for M1 and M2 Macs." = "Artefact de qualité FP16 pour les Mac M1 et M2.";
+"FP16 speed artifact for M1 and M2 Macs." = "Artefact de vitesse FP16 pour les Mac M1 et M2.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "Artefact 35B équilibré adapté FP16 pour les Mac M1 et M2.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "Artefact de vitesse 35B adapté FP16 pour les Mac M1 et M2.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "Artefact de vitesse 9B adapté FP16 pour les Mac M1 et M2.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "Utiliser les réglages MTPLX pour les apps connectées";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Activé : les apps connectées suivent le raisonnement et l’échantillonnage de MTPLX. Désactivé : leurs propres réglages s’appliquent. Les requêtes API ordinaires conservent leurs réglages.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "Modèle principal et tête MTP en 8 bits, tenseurs structurels BF16 et table de n-grammes en 4 bits. Version Flash-Next de plus haute fidélité.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Modèle ternaire 27B de Prism ML avec vision et MTP. Poids compacts pour les Mac disposant de moins de mémoire.";

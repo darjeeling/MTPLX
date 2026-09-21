@@ -399,6 +399,11 @@ public struct OpenCodeIntegration: Sendable {
     }
 
     public static func modelID(for model: String) -> String {
+        // Exact released identities, including legacy Bonsai folder/served aliases.
+        if let option = MTPLXModelOption.option(matching: model),
+           ["flash-next-optimized-quality", "bonsai-2-27b-optimized-speed"].contains(option.id) {
+            return "mtplx-\(option.id)"
+        }
         let lower = model.lowercased()
         if lower.contains("gemma4") || lower.contains("gemma-4") {
             return "gemma4-mtplx-optimized-speed"
@@ -435,6 +440,10 @@ public struct OpenCodeIntegration: Sendable {
             if lower.contains("optimized-speed") {
                 return "mtplx-flash-next-optimized-speed"
             }
+        }
+        if (lower.contains("flash-next") || lower.contains("flash_next"))
+            && lower.contains("optimized-quality") {
+            return sanitizedModelID(from: model)
         }
         // Qwen 3.8 family before the generic qwen branches: a 3.8 name
         // also contains "qwen"+"optimized-speed"/"optimized-quality" and
@@ -473,6 +482,10 @@ public struct OpenCodeIntegration: Sendable {
             return "mtplx-qwen36-27b-gdn8-speed4"
         }
 
+        return sanitizedModelID(from: model)
+    }
+
+    private static func sanitizedModelID(from model: String) -> String {
         let lastComponent = URL(fileURLWithPath: model).lastPathComponent
         let seed = lastComponent.isEmpty ? model : lastComponent
         let sanitized = seed
@@ -542,7 +555,7 @@ public struct OpenCodeIntegration: Sendable {
             // QWEN4_EXP_REASONING_CODEC: same official effort triple.
             return ["xhigh", "medium", "low"]
         }
-        if lower.contains("qwen38") || lower.contains("qwen3.8") || lower.contains("qwen3-8") {
+        if MTPLXModelOption.modelFamily(for: modelID) == "qwen3_8" {
             // QWEN3_8_REASONING_CODEC: official reasoning_effort levels.
             return ["xhigh", "medium", "low"]
         }
@@ -566,7 +579,7 @@ public struct OpenCodeIntegration: Sendable {
             // before the 3.8 markers, which the pack names also contain.
             return "medium"
         }
-        if lower.contains("qwen38") || lower.contains("qwen3.8") || lower.contains("qwen3-8") {
+        if MTPLXModelOption.modelFamily(for: modelID) == "qwen3_8" {
             // QWEN3_8_REASONING_CODEC default: medium (strict max-fan A/B,
             // 2026-08-14 — same correct uncapped result 51.52s vs 314.91s
             // at xhigh).

@@ -138,8 +138,8 @@
 "250 GB" = "250 GB";
 "2–3× faster" = "2–3× schneller";
 "30 competition problems" = "30 Wettbewerbsaufgaben";
-"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs. Recommended." = "Dynamische 4-Bit-Quantisierung. Sehr schnell beim Coden, gute Qualität. FP16-Build für M1- und M2-Macs. Empfohlen.";
-"4-bit dynamic quant. Great coding speeds and good quality. Recommended." = "Dynamische 4-Bit-Quantisierung. Sehr schnell beim Coden, gute Qualität. Empfohlen.";
+"4-bit dynamic quant. Great coding speeds and good quality. FP16 build for M1 and M2 Macs." = "Dynamische 4-Bit-Quantisierung. Sehr schnell beim Coden, gute Qualität. FP16-Build für M1- und M2-Macs.";
+"4-bit dynamic quant. Great coding speeds and good quality." = "Dynamische 4-Bit-Quantisierung. Sehr schnell beim Coden, gute Qualität.";
 "4-bit quantization. Blazingly fast and quite smart." = "4-Bit-Quantisierung. Rasend schnell und ziemlich klug.";
 "4-bit quantization. Fastest fit for smaller Macs." = "4-Bit-Quantisierung. Schnellste Wahl für kleinere Macs.";
 "5-min Min/Max" = "Min/Max über 5 Min";
@@ -498,7 +498,7 @@
 "Drop this session's cached prefix" = "Präfix dieser Sitzung aus dem Cache verwerfen";
 "Dtype for the non-quantized weights. FP16 prompt-processes faster on M1/M2 Macs, which have no native BF16." = "Datentyp für die nicht quantisierten Gewichte. FP16 verarbeitet Prompts auf M1/M2-Macs schneller, da diese kein natives BF16 haben.";
 "DURATION" = "DAUER";
-"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended." = "Dynamische 4-Bit-Quantisierung mit 8-Bit-Attention. Höhere Qualität und etwas langsamer. Empfohlen.";
+"Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower." = "Dynamische 4-Bit-Quantisierung mit 8-Bit-Attention. Höhere Qualität und etwas langsamer.";
 "Earlier heavy history hidden" = "Älterer umfangreicher Verlauf ausgeblendet";
 "Edit" = "Bearbeiten";
 "effective %@" = "effektiv %@";
@@ -594,8 +594,8 @@
 "Found %@ but couldn't read its version. The app uses its own runtime either way." = "%@ gefunden, aber die Version konnte nicht gelesen werden. Die App verwendet ohnehin ihre eigene Runtime.";
 "Found %lld results — %@" = "%lld Ergebnisse gefunden — %@";
 "Found your sweet spot." = "Deine optimale Einstellung wurde gefunden.";
-"FP16 quality artifact recommended for M1 and M2 Macs." = "FP16-Qualitätsartefakt, empfohlen für M1- und M2-Macs.";
-"FP16 speed artifact recommended for M1 and M2 Macs." = "FP16-Geschwindigkeitsartefakt, empfohlen für M1- und M2-Macs.";
+"FP16 quality artifact for M1 and M2 Macs." = "FP16-Qualitätsartefakt für M1- und M2-Macs.";
+"FP16 speed artifact for M1 and M2 Macs." = "FP16-Geschwindigkeitsartefakt für M1- und M2-Macs.";
 "FP16-friendly 35B balance artifact for M1 and M2 Macs." = "FP16-freundliches, ausgewogenes 35B-Artefakt für M1- und M2-Macs.";
 "FP16-friendly 35B speed artifact for M1 and M2 Macs." = "FP16-freundliches 35B-Geschwindigkeitsartefakt für M1- und M2-Macs.";
 "FP16-friendly 9B speed artifact for M1 and M2 Macs." = "FP16-freundliches 9B-Geschwindigkeitsartefakt für M1- und M2-Macs.";
@@ -1604,3 +1604,7 @@
 /* Connected app control ownership */
 "Use MTPLX settings for connected apps" = "MTPLX-Einstellungen für verbundene Apps verwenden";
 "On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings." = "Ein: Verbundene Apps übernehmen Denk- und Sampling-Einstellungen von MTPLX. Aus: Es gelten ihre eigenen Einstellungen. Normale API-Anfragen behalten ihre eigenen Einstellungen.";
+
+"8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8-Bit-Hauptmodell und MTP-Kopf, BF16-Strukturtensoren und eine 4-Bit-N-Gramm-Tabelle. Flash-Next-Version mit höherer Genauigkeit.";
+
+"Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Ternäres 27B-Modell von Prism ML mit Bildverarbeitung und MTP. Kompakte Gewichte für Macs mit weniger Speicher.";
