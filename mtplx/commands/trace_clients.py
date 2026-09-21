@@ -98,9 +98,12 @@ def load_pi_session(path: Path) -> tuple[dict, list[dict]]:
                     if r.get("message", {}).get("role") == "toolResult"}
     messages = []
     for record in reversed(lineage):
-        if record.get("type") != "message":
+        compaction = record.get("type") == "compaction"
+        if record.get("type") not in {"message", "compaction"}:
             continue
-        message = dict(record.get("message") or {})
+        message = ({"role": "assistant", "content": record.get("summary", ""),
+                    "usage": record.get("usage") or {}, "stopReason": "stop"}
+                   if compaction else dict(record.get("message") or {}))
         if message.get("role") not in {"user", "assistant"}:
             continue
         stamp = message.get("timestamp")
@@ -133,6 +136,11 @@ def load_pi_session(path: Path) -> tuple[dict, list[dict]]:
                 parts.append(part)
         messages.append({
             **message, "_id": record["id"], "_parts": parts, "_client": "pi",
+            "_request_kind": "compaction" if compaction else "assistant",
+            "_compaction": ({"tokens_before": record.get("tokensBefore"),
+                             "first_kept_entry_id": record.get("firstKeptEntryId"),
+                             "summary_chars": len(record.get("summary", ""))}
+                            if compaction else None),
             "_parent_entry_id": record.get("parentId"),
             "_time_created_s": float(stamp) / 1000,
             "time": {"created": stamp, "completed": completed},

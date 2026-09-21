@@ -32,6 +32,28 @@ mtplx trace report --pi-session /path/to/pi-session.jsonl \
 
 The report includes cache reuse, TTFT, decode curves, draft-position acceptance, tools, a request selector, an interval scrubber, and exportable evidence JSON. `mtplx trace request REQUEST_ID --json` exposes the same counters for scripts; use the same explicit log paths. Rotation files are read oldest first.
 
+## Investigate a slowdown after compaction
+
+Pi compaction is a separate model request. The report includes it when its input/output usage and completion clock uniquely match an engine receipt. It also shows retained image counts, the actual input length, proposal-depth mix, recorded verifier routes and verification cost per delivered token. Image tool results are not embedded in the report; their original payloads remain in the client transcript.
+
+Use `--since` with an explicit timezone to isolate an incident in a session that spans several days. Requests completing across that boundary remain included. Compaction summaries and retained messages are different inputs: a summary does not imply that images in retained tool results disappeared.
+
+Record system evidence while the real client works:
+
+```sh
+mtplx trace record --port 8000 --duration 1800 --interval 2 \
+  --out /path/to/new-run/system.jsonl
+
+mtplx trace report --port 8000 --pi-session /path/to/pi-session.jsonl \
+  --since 2026-09-20T16:19:00-07:00 \
+  --system-log /path/to/new-run/system.jsonl \
+  --out /path/to/new-run/report.html
+```
+
+The recorder only reads the daemon. It does not generate, change fan settings, clear caches or restart anything. It saves launch health, allocator and physical footprint, the pressure source, guard events, bank/SSD counters, actual thermal/fan readings and macOS swap readings when available. Existing evidence files cannot be overwritten. The report attaches only samples inside the request's time range, within five seconds of the inspected interval. A snapshot taken after a run cannot establish thermal throttling or swap during that run.
+
+The inspector lists the five slowest windows of at least five seconds, along with verification cost and available memory observations. Counters are asynchronously published, so these are correlations, not a causal experiment. Missing route telemetry is labelled unknown, never interpreted as zero verification. Text-only, fixed-depth, short-output benchmarks must not be presented as expected throughput for image-bearing, adaptive, long-reasoning sessions.
+
 Identity matters. Flight events join to receipts by exact server request ID. Updated Pi integration supplies the preceding transcript entry ID; a unique matching receipt links directly to its response. OpenCode supplies the user-turn ID, which can contain several engine/tool steps. Older transcripts and ambiguous retries still require time/token matching, and are labelled accordingly. Unmatched receipts are retained in the evidence export. Pi readers follow the active branch rather than counting abandoned history as completed work.
 
 ## Decide whether MTP pays

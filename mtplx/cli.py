@@ -3181,6 +3181,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-turn timeline for one session (cache, TPS, postcommit, canon, pathology flags)",
     )
     _trace_common(trace_session_p)
+    trace_session_p.add_argument("--since", help="include requests completed since an ISO timestamp with timezone")
     trace_session_p.add_argument(
         "session", nargs="?", default="latest", help="ses_... id, substring, or 'latest'"
     )
@@ -3225,11 +3226,20 @@ def build_parser() -> argparse.ArgumentParser:
     trace_live_p.add_argument("--interval", type=float, default=2.0)
     trace_live_p.set_defaults(func=cmd_trace_public)
 
+    trace_record_p = trace_sub.add_parser("record", help="Record memory, pressure, cache and actual fan/thermal evidence; no generation")
+    trace_record_p.add_argument("--port", type=int, default=8000)
+    trace_record_p.add_argument("--out", required=True, help="new output JSONL path; existing evidence is never overwritten")
+    trace_record_p.add_argument("--duration", type=float, default=300.0, help="recording duration in seconds")
+    trace_record_p.add_argument("--interval", type=float, default=2.0, help="sample interval in seconds (minimum 0.5)")
+    trace_record_p.set_defaults(func=cmd_trace_public)
+
     trace_report_p = trace_sub.add_parser(
         "report",
         help="Self-contained HTML report with historical graphs for a session",
     )
     _trace_common(trace_report_p)
+    trace_report_p.add_argument("--since", help="include requests completed since an ISO timestamp with timezone")
+    trace_report_p.add_argument("--system-log", help="JSONL from trace record; only contemporaneous samples are correlated")
     trace_report_p.add_argument("session", nargs="?", default="latest")
     trace_report_p.add_argument(
         "--out",

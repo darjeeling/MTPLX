@@ -248,6 +248,20 @@ def _match_receipt(message: dict, receipts: list[dict], used: set[int]) -> dict 
     """Best receipt for an assistant message: exact session ids narrow the pool,
     then nearest logged_at_s to the message completion, with a token cross-foot
     tiebreak (completion_tokens ~ output+reasoning) for historical fuzzy joins."""
+    if message.get("_request_kind") == "compaction":
+        usage = message.get("usage") or {}
+        completed = (message.get("time", {}).get("completed") or 0) / 1000
+        if not completed or usage.get("input") is None or usage.get("output") is None:
+            return None
+        prompt = usage["input"] + (usage.get("cacheRead") or 0)
+        matches = [(i, r) for i, r in enumerate(receipts) if i not in used
+                   and r.get("prompt_tokens") == prompt
+                   and r.get("completion_tokens") == usage["output"]
+                   and abs(float(r.get("logged_at_s") or 0) - completed) <= 3]
+        if len(matches) != 1:
+            return None
+        used.add(matches[0][0])
+        return matches[0][1]
     if message.get("_client") == "hermes":
         counts = message.get("_hermes_api_counts")
         if not counts:
@@ -328,13 +342,23 @@ def _join_session(
         turn_no += 1
         receipt = _match_receipt(message, pool, used)
         rid = (receipt or {}).get("request_id")
+        if message.get("_request_kind") == "compaction":
+            begins = [e["ts"] for e in flight_rids.get(rid, []) if e.get("ev") == "begin" and e.get("ts")]
+            elapsed = (receipt or {}).get("request_elapsed_s")
+            started = (min(begins) if begins else
+                       receipt["logged_at_s"] - elapsed if elapsed is not None else None)
+            # Pi persists compaction only when it completes. Its entry clock
+            # is not the request start; use engine evidence or leave it unknown.
+            message = {**message, "_time_created_s": started,
+                       "time": {**message["time"], "created": started * 1000 if started is not None else None}}
         turns.append(
             {
                 "kind": "assistant",
                 "turn": turn_no,
                 "message": message,
                 "receipt": receipt,
-                "join": ("Hermes input/output tokens and completion clock" if receipt and message.get("_client") == "hermes"
+                "join": ("Pi compaction input/output tokens and completion clock" if receipt and message.get("_request_kind") == "compaction"
+                         else "Hermes input/output tokens and completion clock" if receipt and message.get("_client") == "hermes"
                          else "exact Pi parent entry" if receipt and message.get("_parent_entry_id")
                          and receipt.get("request_client_entry_id") == message["_parent_entry_id"]
                          and sum(r.get("request_client_entry_id") == message["_parent_entry_id"] for r in pool) == 1
@@ -350,6 +374,13 @@ def _join_session(
 
 
 def _load_joined(args: argparse.Namespace, receipts: list[dict], flight: list[dict]):
+    from .trace_analysis import scope_since
+
+    conn, joined = _load_joined_unscoped(args, receipts, flight)
+    return conn, scope_since(joined, getattr(args, "since", None))
+
+
+def _load_joined_unscoped(args: argparse.Namespace, receipts: list[dict], flight: list[dict]):
     hermes_db = getattr(args, "hermes_db", None)
     if hermes_db:
         from .trace_clients import load_hermes_session
@@ -579,7 +610,9 @@ def _turn_row(turn: dict) -> dict:
         "client_cache_read": tokens["cache_read"],
         "decode_tok_s": receipt.get("decode_tok_s"),
         "ttft_s": receipt.get("ttft_s"),
-        "effort": receipt.get("reasoning_effort") or receipt.get("effective_reasoning_effort"),
+        "effort": receipt.get("resolved_reasoning_effort") or receipt.get("reasoning_effort") or receipt.get("effective_reasoning_effort"),
+        "request_kind": message.get("_request_kind", "assistant"),
+        "vision_images": receipt.get("request_vision_images"),
         "postcommit_wait": {k: pcw.get(k) for k in ("outcome", "elapsed_s", "job_stored", "job_mode", "job_reason") if k in pcw} or None,
         "canon": {k: canon.get(k) for k in ("applied", "cp_raw", "cp_canon", "committed_len", "turns_substituted") if k in canon} or None,
         "request_id": receipt.get("request_id"),
@@ -938,6 +971,14 @@ def cmd_trace(args: argparse.Namespace) -> int:
         from .trace_report import cmd_trace_report
 
         return cmd_trace_report(args)
+    if action == "record":
+        from .trace_record import cmd_trace_record
+
+        try:
+            return cmd_trace_record(args)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     handler = handlers.get(action)
     if handler is None:
         print(f"unknown trace action: {action}", file=sys.stderr)

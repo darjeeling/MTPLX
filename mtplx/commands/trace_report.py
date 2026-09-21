@@ -43,7 +43,8 @@ from .trace import (
     _source_port,
     _turn_row,
 )
-from .trace_metrics import mtp_economics, sample_intervals
+from .trace_metrics import mtp_economics
+from .trace_analysis import load_system_log, request_diagnostics
 
 # dataviz reference palette, light mode (validated with validate_palette.js)
 _MUT, _AXIS, _SURF = "#898781", "#c3c2b7", "#fcfcfb"
@@ -567,7 +568,38 @@ def _part_chars(conn: Any, message: dict) -> tuple[int | None, int | None]:
         return None, None
 
 
-def _sec_inspector(joined: dict, conn: Any, ar_tok_s: float | None) -> str:
+def _sec_attribution(joined: dict, system: list[dict]) -> str:
+    rows = []
+    for turn in joined["turns"]:
+        if turn["kind"] != "assistant":
+            continue
+        receipt = turn.get("receipt") or {}
+        d = request_diagnostics(receipt, turn.get("flight", []), system)
+        kind = turn["message"].get("_request_kind", "assistant")
+        route = ", ".join(d["recorded_verify_routes"]) or "not recorded"
+        depth = d["depth_cycle_shares"]
+        third = f"{sum(depth[2:]) * 100:.1f}%" if len(depth) > 2 else "—"
+        cost = d["cost_ms_per_token"]["verify"]
+        cost_text = f"{cost:.2f}" if cost is not None else "—"
+        speed = receipt.get("decode_tok_s")
+        speed_text = f"{speed:.1f}" if speed is not None else "—"
+        images = d["images"] if d["images"] is not None else "—"
+        rows.append(f'<tr><td>{turn["turn"]}</td><td>{_esc(kind)}</td>'
+                    f'<td class="n">{_fmt_tok(d["prompt_tokens"])}</td><td class="n">{_esc(images)}</td>'
+                    f'<td class="n">{speed_text}</td><td class="n">{cost_text}</td>'
+                    f'<td class="n">{third}</td><td>{_esc(route)}</td></tr>')
+    return _card("Request conditions and decode cost", (
+        '<p class="quiet">Compare the same model, build, modality, reasoning and depth policy. '
+        'Images retained in history still make later turns image requests. '
+        'D3 is the share of proposal cycles that reached the third draft. '
+        'Missing route counters are unknown, not zero.</p>'
+        '<details open><summary>Per-request evidence, including compaction</summary><div class="scroll"><table class="dg">'
+        '<thead><tr><th>Step</th><th>Kind</th><th>Input tokens</th><th>Images</th><th>Decode tok/s</th>'
+        '<th>Verify ms/token</th><th>D3 cycles</th><th>Recorded route</th></tr></thead><tbody>'
+        + ''.join(rows) + '</tbody></table></div></details>'))
+
+
+def _sec_inspector(joined: dict, conn: Any, ar_tok_s: float | None, system: list[dict] = ()) -> str:
     """One request selector and time scrubber over the original evidence."""
     requests = []
     for turn in joined["turns"]:
@@ -577,16 +609,22 @@ def _sec_inspector(joined: dict, conn: Any, ar_tok_s: float | None) -> str:
         message = turn["message"]
         parts = (message["_parts"] if "_parts" in message
                  else _opencode_parts(conn, message.get("_id") or ""))
+        diagnosis = request_diagnostics(receipt, turn.get("flight", []), system)
         requests.append({"turn": turn["turn"], "request_id": receipt.get("request_id"),
+                         "kind": message.get("_request_kind", "assistant"),
+                         "compaction": message.get("_compaction"),
                          "join": turn.get("join"), "receipt": receipt,
+                         "diagnosis": {k: v for k, v in diagnosis.items() if k != "intervals"},
                          "economics": mtp_economics(receipt, ar_tok_s),
-                         "intervals": sample_intervals(turn.get("flight", [])),
+                         "intervals": diagnosis["intervals"],
                          "flight": turn.get("flight", []),
-                         "tools": [p for p in parts if p.get("type") == "tool"]})
+                         "tools": [{**p, "state": {k: v for k, v in (p.get("state") or {}).items()
+                                                    if k != "output"}}
+                                   for p in parts if p.get("type") == "tool"]})
     evidence = {"session": joined["session"], "requests": requests,
                 "unmatched_receipts": joined.get("unmatched_receipts", [])}
     payload = json.dumps(evidence, ensure_ascii=False).replace("<", "\\u003c")
-    options = ''.join(f'<option value="{i}">Step {r["turn"]} · {_esc(r["request_id"] or "unmatched")}</option>'
+    options = ''.join(f'<option value="{i}">Step {r["turn"]} · {_esc(r["kind"])} · {_esc(r["request_id"] or "unmatched")}</option>'
                       for i, r in enumerate(requests))
     return _card("Request inspector", (
         '<p class="quiet">Choose an engine step, then scrub its recorded intervals. '
@@ -596,17 +634,39 @@ def _sec_inspector(joined: dict, conn: Any, ar_tok_s: float | None) -> str:
         '<label>Engine step <select id="inspect-request">'+options+'</select></label> '
         '<button id="inspect-export" type="button">Export evidence JSON</button>'
         '<p id="inspect-summary"></p>'
+        '<table class="dg"><tbody id="inspect-facts"></tbody></table>'
+        '<p id="inspect-warnings" class="quiet"></p>'
+        '<details><summary>Five slowest windows and full attribution</summary><pre id="inspect-diagnosis" style="white-space:pre-wrap"></pre></details>'
         '<label>Recorded interval <input id="inspect-time" type="range" min="0" value="0" step="1"></label>'
-        '<pre id="inspect-sample" style="white-space:pre-wrap"></pre>'
+        '<table class="dg"><tbody id="inspect-interval-facts"></tbody></table>'
+        '<details><summary>Raw interval counters</summary><pre id="inspect-sample" style="white-space:pre-wrap"></pre></details>'
         '<details><summary>Tool calls and their timing</summary><pre id="inspect-tools" style="white-space:pre-wrap"></pre></details>'
         '<details><summary>Full engine receipt and MTP economics</summary><pre id="inspect-receipt" style="white-space:pre-wrap"></pre></details>'
         f'<script type="application/json" id="inspect-data">{payload}</script>'
         '<script>(()=>{const data=JSON.parse(document.getElementById("inspect-data").textContent);'
         'const select=document.getElementById("inspect-request"),slider=document.getElementById("inspect-time");'
         'const put=(id,v)=>document.getElementById(id).textContent=JSON.stringify(v,null,2);'
+        'const fmt=(v,n=1)=>v==null?"—":Number(v).toLocaleString(undefined,{maximumFractionDigits:n});'
+        'function facts(id,rows){const el=document.getElementById(id);el.replaceChildren();rows.forEach(([k,v])=>{'
+        'const tr=document.createElement("tr"),th=document.createElement("th"),td=document.createElement("td");'
+        'th.textContent=k;th.scope="row";td.textContent=v;tr.append(th,td);el.append(tr);});}'
         'function render(reset){const r=data.requests[Number(select.value)];if(!r)return;'
         'slider.max=Math.max(0,r.intervals.length-1);slider.disabled=!r.intervals.length;if(reset)slider.value=0;'
         'document.getElementById("inspect-summary").textContent="Join: "+r.join+" · "+r.intervals.length+" recorded intervals";'
+        'const d=r.diagnosis,i=r.intervals[Number(slider.value)]||{};'
+        'facts("inspect-facts",[["Request",r.kind],["Input / ending context",fmt(d.prompt_tokens,0)+" / "+fmt(d.end_context_tokens,0)],'
+        '["Images / image rows",fmt(d.images,0)+" / "+fmt(d.image_rows,0)],'
+        '["Recorded verifier route",d.recorded_verify_routes.join(", ")||"Not recorded"],'
+        '["Verify / draft cost",fmt(d.cost_ms_per_token.verify,2)+" / "+fmt(d.cost_ms_per_token.draft,2)+" ms per token"],'
+        '["Cycles reaching D3",d.depth_cycle_shares.length>2?fmt(100*d.depth_cycle_shares.slice(2).reduce((a,b)=>a+b,0))+"%":"—"],'
+        '["Reasoning / template",(d.compared_workload.resolved_reasoning_effort||"—")+" / "+(d.compared_workload.chat_template_profile||"—")]]);'
+        'document.getElementById("inspect-warnings").textContent=d.warnings.join(" ");'
+        'facts("inspect-interval-facts",[["Observed decode",fmt(i.tok_s)+" tok/s"],'
+        '["Draft acceptance",i.acceptance==null?"—":fmt(i.acceptance*100)+"%"],'
+        '["Verify work / calls",fmt(i.vt==null?null:i.vt*1000)+" ms / "+fmt(i.vc,0)],'
+        '["Allocator active",fmt(i.active_memory_bytes==null?null:i.active_memory_bytes/1073741824,2)+" GiB"],'
+        '["Pressure sample",i.system?String(i.system.memory_pressure_level)+" ("+(i.system.memory_pressure_source||"unknown source")+")":"Not recorded at this time"]]);'
+        'put("inspect-diagnosis",{kind:r.kind,compaction:r.compaction,...r.diagnosis});'
         'put("inspect-sample",r.intervals[Number(slider.value)]||{status:"No interval samples"});'
         'put("inspect-tools",r.tools);put("inspect-receipt",{economics:r.economics,receipt:r.receipt});}'
         'select.addEventListener("change",()=>render(true));slider.addEventListener("input",()=>render(false));'
@@ -635,6 +695,7 @@ _CSS = (
     ".flags{list-style:none;margin:0;padding:0}.bang{color:#d03b3b;font-weight:700;margin-right:6px}"
     ".flags li{border-left:3px solid #ec835a;background:rgba(236,131,90,.07);padding:7px 10px;margin:6px 0;border-radius:0 7px 7px 0;font-size:13px}"
     ".quiet{color:#898781;font-size:12.5px;margin:0 0 10px}.crit{color:#d03b3b;font-weight:600}"
+    "select{max-width:100%}pre{overflow-wrap:anywhere}"
     ".badge{font-size:10px;color:#898781;border:1px solid #e1e0d9;border-radius:4px;padding:1px 5px;height:fit-content}"
     ".cells{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:12px}"
     ".cell{border:1px solid #efeee9;border-radius:8px;padding:8px 8px 4px}.scroll{overflow-x:auto}"
@@ -686,7 +747,8 @@ def cmd_trace_report(args: argparse.Namespace) -> int:
     flight = _load_flight(port, path=getattr(args, "flight_log", None))
     try:
         conn, joined = _load_joined(args, receipts, flight)
-    except ValueError as exc:
+        system = load_system_log(getattr(args, "system_log", None))
+    except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     session_id = joined["session"]["id"]
@@ -742,8 +804,9 @@ def cmd_trace_report(args: argparse.Namespace) -> int:
     page = ('<!doctype html><html><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>mtplx trace — {_esc(session_id)}</title><style>" + _CSS + "</style></head><body><main>"
-            + header + pathology + _sec_timeline(rows) + _sec_cache(rows) + _sec_tps(rows)
-            + _sec_mtp(rows) + _sec_inspector(joined, conn, getattr(args, "ar_tok_s", None))
+            + header + pathology + _sec_attribution(joined, system)
+            + _sec_timeline(rows) + _sec_cache(rows) + _sec_tps(rows)
+            + _sec_mtp(rows) + _sec_inspector(joined, conn, getattr(args, "ar_tok_s", None), system)
             + _sec_scatter(receipts, session_ids, port) + _sec_digest(digest)
             + '</main><div id="tip"></div><script>' + _JS + "</script></body></html>")
 
