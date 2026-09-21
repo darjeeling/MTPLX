@@ -224,9 +224,15 @@ def test_vision_rope_scope_helper_and_wiring():
     # Prompt-state builder is wrapped (covers request, warm-restore and
     # postcommit prefill forwards)...
     assert hasattr(generation.restore_or_prefill_prompt_state, "__wrapped__")
-    # ...and the decode verify block arms the scope.
+    # ...and EVERY trunk forward of the decode loop arms the scope through one
+    # helper, never by hand at a single site: through 2.11.3 only the main
+    # verify did, and copy rounds, repairs and the final commit roped at the
+    # raw index (tests/test_vision_trunk_forward_positions.py holds the
+    # call-site proof and the bit-for-bit rows).
     src = inspect.getsource(generation.generate_mtpk)
-    assert "_vision_rope_scope_for(vision_splice)" in src
+    assert src.count("_decode_trunk_scope(vision_splice)") >= 8
+    assert "_vision_rope_scope_for(vision_splice)" not in src
+    assert 'attention_phase("decode_verify")' not in src
     # Helper: nullcontext for text, armed scope for a vision splice.
     import contextlib
 
