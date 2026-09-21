@@ -5308,6 +5308,39 @@ def _vision_rope_scope_for(vision_splice: Any | None):
     return vision_rope(table, delta)
 
 
+def _decode_trunk_scope(vision_splice: Any | None):
+    """The scope of ONE trunk (target model) forward inside the decode loop.
+
+    Every trunk forward of the loop writes K rows and pooled indexer keys into
+    the live cache, and the session bank stores that cache: the main verify, a
+    copy round and its single-row repair, the repair forward, the lazy bonus
+    commit and the final pending commit. For an image request all of them must
+    rope at sequence index + M-RoPE delta, so the position scope travels with
+    the verify attention phase instead of being opened by hand at one site.
+    Builds 2.10.1 to 2.11.3 opened it around the main verify only; the other
+    forwards roped at the raw cache index, |delta| positions away from every
+    other row of the conversation (about 990 with one 1,024-token image).
+
+    Draft-head forwards and history appends never enter this scope: they run
+    through rt.draft_mtp and _append_mtp_history, outside the verify phase,
+    and keep the rope they had. They cannot break exactness (the verify
+    decides every token); their positions are a separate, measured change.
+
+    A text request gets the very context manager this loop entered before,
+    the verify phase, so nothing about its forwards changes.
+    """
+
+    if vision_splice is None:
+        return attention_phase("decode_verify")
+    return _decode_trunk_scope_with_positions(vision_splice)
+
+
+@contextmanager
+def _decode_trunk_scope_with_positions(vision_splice: Any):
+    with attention_phase("decode_verify"), _vision_rope_scope_for(vision_splice):
+        yield
+
+
 def _with_vision_rope(fn):
     """Open the M-RoPE scope around a prompt-state builder.
 
@@ -11448,7 +11481,7 @@ def generate_mtpk(
                         int(compiled_verify_bank.stats["fallback_calls"]),
                     )
                 started_forward = time.perf_counter()
-                with attention_phase("decode_verify"):
+                with _decode_trunk_scope(vision_splice):
                     event["verify_width"] = 1 + len(_cc_block)
                     if _cc_bank_route:
                         # Native-length dispatch; the bank's extended window
@@ -11616,7 +11649,7 @@ def generate_mtpk(
                     rollback_after_verify(cache, _cc_before, verified_tokens=_cc_T)
                     rollback_time += time.perf_counter() - started_rollback
                     started = time.perf_counter()
-                    with attention_phase("decode_verify"):
+                    with _decode_trunk_scope(vision_splice):
                         _cc_l2, _cc_h2 = rt.forward_ar(
                             mx.array([[primary]]),
                             cache=cache,
@@ -11794,7 +11827,7 @@ def generate_mtpk(
                     event["ccopy_capacity_growth"] = int(_cb_grown)
                 started_forward = time.perf_counter()
                 with (
-                    attention_phase("decode_verify"),
+                    _decode_trunk_scope(vision_splice),
                     model_forward_kind("target_verify"),
                     _cb_scope,
                 ):
@@ -11891,7 +11924,7 @@ def generate_mtpk(
                     rollback_after_verify(cache, _cb_before, verified_tokens=_cb_T)
                     rollback_time += time.perf_counter() - started_rollback
                     started = time.perf_counter()
-                    with attention_phase("decode_verify"):
+                    with _decode_trunk_scope(vision_splice):
                         _cb_l2, _cb_h2 = rt.forward_ar(
                             mx.array([[primary]]),
                             cache=cache,
@@ -13080,17 +13113,17 @@ def generate_mtpk(
             else contextlib.nullcontext()
         )
         with (
-            attention_phase("decode_verify"),
+            # The verify phase and, for an image request, its positions:
+            # decode-time trunk forwards rope at sequence_index + mrope delta
+            # (equal axes past the prompt table). Every other trunk forward
+            # of this loop enters the same scope.
+            _decode_trunk_scope(vision_splice),
             model_forward_kind("target_verify"),
             # Greedy exactness contract: at t<=0 the verify forward must use
             # stock matmuls so MTP argmax matches AR argmax at near-ties (the
             # vk/nax lanes are ~6e-3 off stock, flip band ~1.6e-2 measured
             # 2026-08-29). Sampled requests keep the fast kernels.
             exact_verify(sampler.temperature <= 0),
-            # Vision requests: decode-time trunk forwards rope at
-            # sequence_index + mrope delta (equal axes past the prompt
-            # table). Nullcontext for text requests.
-            _vision_rope_scope_for(vision_splice),
             family_capture_scope,
         ):
             if verify_strategy in {"capture_commit", "graphbank_capture_commit"}:
@@ -13966,7 +13999,7 @@ def generate_mtpk(
                     )
             if lazy_bonus_verify:
                 started_bonus_commit_forward = time.perf_counter()
-                with attention_phase("decode_verify"):
+                with _decode_trunk_scope(vision_splice):
                     bonus_commit_logits, bonus_commit_hidden = rt.forward_ar(
                         mx.array([[int(draft_tokens[-1])]]),
                         cache=cache,
@@ -14385,7 +14418,7 @@ def generate_mtpk(
             _add_timing(event, "rollback", elapsed_rollback)
             started = time.perf_counter()
             with (
-                attention_phase("decode_verify"),
+                _decode_trunk_scope(vision_splice),
                 model_forward_kind("repair"),
             ):
                 if generic_compiled_target_prefix and compiled_verify_bank is not None:
@@ -14561,7 +14594,7 @@ def generate_mtpk(
                 )
                 commit_time += time.perf_counter() - commit_started
             commit_started = time.perf_counter()
-            with attention_phase("decode_verify"):
+            with _decode_trunk_scope(vision_splice):
                 commit_logits, commit_hidden = rt.forward_ar(
                     mx.array([[pending_token]]),
                     cache=cache,
