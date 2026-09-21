@@ -191,16 +191,9 @@ public final class DaemonSupervisor: @unchecked Sendable {
         logStore: BoundedLogStore = BoundedLogStore(),
         restartPolicy: DaemonRestartPolicy = .default,
         startFailureReportURL: URL? = nil,
-        restartSleeper: @escaping @Sendable (TimeInterval) async -> Void = { delay in
-            guard delay > 0 else { return }
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        },
-        initialHealthProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = { baseURL, apiKey in
-            try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
-        },
-        healthWaitProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = { baseURL, apiKey in
-            try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
-        },
+        restartSleeper: @escaping @Sendable (TimeInterval) async -> Void = DaemonSupervisor.defaultRestartSleeper,
+        initialHealthProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = DaemonSupervisor.defaultHealthProbe,
+        healthWaitProbe: @escaping @Sendable (URL, String?) async -> HealthPayload? = DaemonSupervisor.defaultHealthProbe,
         // Test seam immediately before the atomic lifecycle reservation.
         beforeProcessReservation: @escaping @Sendable () async -> Void = {},
         // Test seam for the narrow period after ownership is published but
@@ -234,6 +227,33 @@ public final class DaemonSupervisor: @unchecked Sendable {
         self.beforeStopProcessFamilyResolution = beforeStopProcessFamilyResolution
         self.beforeStopProcessFamilySignal = beforeStopProcessFamilySignal
         self.beforeTerminationHandling = beforeTerminationHandling
+    }
+
+    // The production defaults of `init` are named functions on purpose.
+    //
+    // A default argument of a public function is compiled into every module
+    // that calls it. When the default was an `async` closure literal, each
+    // client (the app host, and every test file that builds a supervisor)
+    // carried its own copy of the closure under one shared symbol name, and
+    // the copies did not agree on the size of the closure's async frame: the
+    // core module calls `MTPLXAPIClient.health()` directly, a client goes
+    // through its function pointer. The linker keeps one copy of the code and
+    // one copy of the size record, not necessarily from the same module. With
+    // a mismatched pair the closure wrote 8 bytes past its 9,376-byte frame
+    // into the next task allocation's header, and the Swift concurrency
+    // runtime aborted in `swift_task_dealloc` ("freed pointer was not the last
+    // allocation"), found by a watchpoint on that header. Which pair the
+    // linker kept changed when 666f16e7 added a parameter ahead of these and
+    // renumbered the default arguments, which is why a cancelled start began
+    // to abort the debug test run there. One definition in this module cannot
+    // be mismatched.
+    public static func defaultHealthProbe(_ baseURL: URL, _ apiKey: String?) async -> HealthPayload? {
+        try? await MTPLXAPIClient(baseURL: baseURL, apiKey: apiKey).health()
+    }
+
+    public static func defaultRestartSleeper(_ delay: TimeInterval) async {
+        guard delay > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
     public var logs: BoundedLogStore {
