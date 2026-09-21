@@ -160,7 +160,7 @@ struct ModelPickStep: View {
             model: model,
             logo: row.logo,
             title: row.title,
-            detail: row.detail,
+            detailLocalizationKey: row.detailLocalizationKey,
             verdict: verdict,
             isInstalled: isInstalled,
             shouldShow: shouldShow,
@@ -258,7 +258,7 @@ struct ModelPickStep: View {
                         }
                     }
 
-                    Text(row.detail)
+                    Text(tr(row.detailLocalizationKey))
                         .font(.system(size: 12))
                         .foregroundStyle(Brand.typeSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -782,7 +782,7 @@ private struct PreparedRecommendedModelRow: Identifiable, Equatable, Sendable {
     let model: MTPLXModelOption
     let logo: ProviderLogoKind
     let title: String
-    let detail: String
+    let detailLocalizationKey: String
     let verdict: ModelFeasibilityVerdict
     let isInstalled: Bool
     let shouldShow: Bool
@@ -795,7 +795,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
     let modelID: String
     let logo: ProviderLogoKind
     let title: String
-    let detail: String
+    let detailLocalizationKey: String
 
     static func rows(for catalogIDs: [String]) -> [RecommendedModelRow] {
         var seen = Set<ModelPickChoice>()
@@ -840,7 +840,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen35-9b-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.5 9B Optimized Speed",
-        detail: tr("6-bit quantization. Strong small-Mac speed pick.")
+        detailLocalizationKey: "6-bit quantization. Strong small-Mac speed pick."
     )
 
     static let qwen27Speed = RecommendedModelRow(
@@ -848,7 +848,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "optimized-speed",
         logo: .qwen,
         title: "Qwen 3.6 27B Optimized Speed",
-        detail: tr("Smaller 4-bit model. A little faster for short chats.")
+        detailLocalizationKey: "Smaller 4-bit model. A little faster for short chats."
     )
 
     static let qwen38OptimizedSpeed = RecommendedModelRow(
@@ -856,7 +856,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen38-27b-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.8 27B Optimized Speed",
-        detail: tr("4-bit dynamic quant. Great coding speeds and good quality. Recommended.")
+        detailLocalizationKey: "4-bit dynamic quant. Great coding speeds and good quality. Recommended."
     )
 
     static let qwen38BareSpeed = RecommendedModelRow(
@@ -864,7 +864,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen38-27b-bare-speed",
         logo: .qwen,
         title: "Qwen 3.8 27B Bare Speed",
-        detail: tr("Quickest burst chat speeds. Lower quality and slower on long coding tasks.")
+        detailLocalizationKey: "Quickest burst chat speeds. Lower quality and slower on long coding tasks."
     )
 
     static let qwen38OptimizedQuality = RecommendedModelRow(
@@ -872,7 +872,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen38-27b-optimized-quality",
         logo: .qwen,
         title: "Qwen 3.8 27B Optimized Quality",
-        detail: tr("8-bit dynamic quant. Good coding speeds and perfect quality.")
+        detailLocalizationKey: "8-bit dynamic quant. Good coding speeds and perfect quality."
     )
 
     static let flashNextBareSpeed = RecommendedModelRow(
@@ -880,7 +880,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "flash-next-bare-speed",
         logo: .qwen,
         title: "Qwen 3.8 Flash-Next Bare Speed",
-        detail: tr("Flat 4-bit quantization. Quickest Flash-Next speeds for chat and coding.")
+        detailLocalizationKey: "Flat 4-bit quantization. Quickest Flash-Next speeds for chat and coding."
     )
 
     static let flashNextOptimizedSpeed = RecommendedModelRow(
@@ -888,7 +888,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "flash-next-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.8 Flash-Next Optimized Speed",
-        detail: tr("Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended.")
+        detailLocalizationKey: "Dynamic 4-bit quant with 8-bit attention. Higher quality and slightly slower. Recommended."
     )
 
     static let qwen27SpeedV2 = RecommendedModelRow(
@@ -896,7 +896,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "optimized-speed-v2",
         logo: .qwen,
         title: "Qwen 3.6 27B Optimized Speed V2",
-        detail: tr("Much higher quality for coding. Dynamic 4-bit hybrid quantization keeps hand-tuned sensitive parts at up to 16-bit. Faster on long agent tasks, slightly larger, and a little slower for short chats.")
+        detailLocalizationKey: "Much higher quality for coding. Dynamic 4-bit hybrid quantization keeps hand-tuned sensitive parts at up to 16-bit. Faster on long agent tasks, slightly larger, and a little slower for short chats."
     )
 
     static let qwen35Speed = RecommendedModelRow(
@@ -904,7 +904,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen36-35b-a3b-optimized-speed",
         logo: .qwen,
         title: "Qwen 3.6 35B-A3B Optimized Speed",
-        detail: tr("4-bit quantization. Blazingly fast and quite smart.")
+        detailLocalizationKey: "4-bit quantization. Blazingly fast and quite smart."
     )
 
     static let qwen35Balance = RecommendedModelRow(
@@ -912,7 +912,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "qwen36-35b-a3b-optimized-balance",
         logo: .qwen,
         title: "Qwen 3.6 35B-A3B Optimized Balance",
-        detail: tr("6-bit quantization. Stronger balance of speed and quality.")
+        detailLocalizationKey: "6-bit quantization. Stronger balance of speed and quality."
     )
 
     static let qwen27Quality = RecommendedModelRow(
@@ -920,7 +920,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "optimized-quality",
         logo: .qwen,
         title: "Qwen 3.6 27B Optimized Quality",
-        detail: tr("Maximum quality. Moderate speeds.")
+        detailLocalizationKey: "Maximum quality. Moderate speeds."
     )
 
     static let gemma31 = RecommendedModelRow(
@@ -928,7 +928,7 @@ private struct RecommendedModelRow: Identifiable, Sendable {
         modelID: "gemma4-optimized-speed",
         logo: .google,
         title: "Gemma 4 31B Optimized Speed",
-        detail: tr("High quality. Moderate speeds.")
+        detailLocalizationKey: "High quality. Moderate speeds."
     )
 }
 
