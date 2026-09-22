@@ -230,6 +230,9 @@ base_model_relation: quantized
 
 # {meta['name']}
 
+> **Requires the upcoming MTPLX {meta['min_engine_version']} release.**
+> The model is published ahead of engine support, which arrives in that release.
+
 Requires MTPLX {meta['min_engine_version']} or later. Served id: `{meta['served_id']}`.
 Recipe: `{meta['recipe']['name']}`. Source revision: `{meta['source']['revision']}`
 ({meta['source']['revision_kind']}).
@@ -249,8 +252,14 @@ Files before card/manifest generation: {actual_bytes / 1e9:.6f} GB.
 {chr(10).join(f"- **{tier}**: {text}" for tier, text in meta['ram_guidance'].items())}
 
 {meta['performance']}
-The short serving smoke covers chat, a structured tool call, and an image.
-It does not measure long-context quality or establish a Speed-pack comparison.
+Full-model load verified: **{str(runtime['verification'].get('full_load_verified', False)).lower()}**.
+The streaming audit checks stored tensors and sampled dequantization against the source.
+It does not prove full-model chat, tool calling, image handling, long-context quality,
+or a Speed-pack performance comparison. Those require a run on a supported Mac.
+
+Recommended memory: **256 GB or 512 GB**. On these Macs, MTPLX's automatic memory
+policy normally keeps the n-gram table in RAM as well as the model weights.
+The SSD-backed table is used when the memory policy calls for it.
 
 ```bash
 mtplx serve --model {meta['repo']} --model-id {meta['served_id']}
