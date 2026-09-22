@@ -179,6 +179,10 @@ def test_pack_speed_metadata_is_not_copied_into_memory_report(pack):
 
 @pytest.mark.parametrize("quant", ["off", "q8"])
 def test_gpu_adapter_executes_full_decode_and_checks_actual_kv(quant, monkeypatch):
+    # The real adapter runs in a dedicated child process. Keep its environment
+    # private here too: the final q8 case must not change later cache tests.
+    case_env = {}
+    monkeypatch.setattr(table, "os", SimpleNamespace(environ=case_env))
     calls = []
     entry = SimpleNamespace(is_trimmable=lambda: True, kv_quant=quant == "q8",
                             kv_quant_config=SimpleNamespace(normalized_mode=quant))
@@ -205,6 +209,12 @@ def test_gpu_adapter_executes_full_decode_and_checks_actual_kv(quant, monkeypatc
     row = next(r for r in report()["rows"] if r["prompt_tokens"] == 16384
                and r["decode_tokens"] == 1024 and r["kv_quantization"] == quant)
     measured = runner.run_case(row)
+    assert case_env == {
+        "MTPLX_PAGED_KV_QUANT": quant,
+        "MTPLX_VLLM_METAL_PAGED_KV_QUANT": quant,
+        "MTPLX_CURRENT_PREFILL_CONTEXT_TOKENS": "16384",
+        "MTPLX_DYNAMIC_PAGED_KV_TOKENS": "17408",
+    }
     assert measured["prefilled_tokens"] == 16384
     assert measured["decoded_tokens"] == len(calls) == 1024
     assert measured["observed_kv_quantization"] == quant

@@ -16,6 +16,9 @@ def test_unsupported_nax_attention_declines_before_touching_tensors(
     module = importlib.import_module("mtplx.kernels." + module_name)
     monkeypatch.setattr(module.mx.metal, "is_available", lambda: True)
     monkeypatch.setattr(module, "nax_available", lambda: False)
+    # This synthetic hardware refusal must not enter the process-wide ledger
+    # observed by later admission tests. Still verify the real counter update.
+    monkeypatch.setattr(module, counter, dict(getattr(module, counter)))
     counts = getattr(module, counter)
     before = counts.get("gpu_family_or_os", 0)
     assert getattr(module, function_name)(
