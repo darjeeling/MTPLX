@@ -766,8 +766,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
                 "mtplx-bonsai-38-27b-optimized-speed",
             ],
-            // Conservative GiB reading of an unverified measurement unit; a measured memory table will replace it.
-            sizeBytes: 8_847_819_423, peakMemoryGiB: 10.32,
+            // Published Hub bytes (2026-09-22) and the measured 8K context peak.
+            sizeBytes: 8_847_924_260, peakMemoryGiB: 11.80,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
