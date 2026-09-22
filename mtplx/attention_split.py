@@ -7,6 +7,12 @@ from typing import Any
 
 import mlx.core as mx
 
+from .rope_origin import (
+    cache_owns_rotary_origin,
+    note_unowned_rotary_origin,
+    rope_offset_of,
+)
+
 
 def _env_enabled(name: str, *, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -70,6 +76,18 @@ def _env_index_set(name: str) -> set[int]:
 
 def _cache_offset_value(cache: Any) -> int | mx.array:
     return getattr(cache, "offset", 0) if cache is not None else 0
+
+
+def _cache_rope_offset(cache: Any) -> int | mx.array:
+    """Where the rope rotates the next row: the cache's own rotary origin.
+
+    A stock cache has none, so this is its host offset. A tensor-offset
+    cache of the compiled routes owns one (``rope_origin.RotaryOrigin``): the
+    plain offset array for a text request and ``offset + rope_delta`` for an
+    image request, so the traced graph never reads the request context.
+    """
+
+    return rope_offset_of(cache) if cache is not None else 0
 
 
 def _cache_offset_static_int(cache: Any) -> int | None:
@@ -184,7 +202,16 @@ def _install_split_attention_hook(attn: Any) -> bool:
         mask: mx.array | None = None,
         cache: Any | None = None,
     ) -> mx.array:
-        if not getattr(self, "_mtplx_split_full_attention_enabled", False):
+        if not getattr(
+            self, "_mtplx_split_full_attention_enabled", False
+        ) and not cache_owns_rotary_origin(cache):
+            # No MTPLX attention route asked for, and the cache has no rotary
+            # origin of its own: the stock forward, untouched. A cache that
+            # owns one (an image request on a compiled route) rotates at it
+            # below; the body under it is the stock forward's, row for row.
+            # The canary first: a tensor-offset cache that SHOULD have owned
+            # one is counted here, before the stock forward ropes it plainly.
+            note_unowned_rotary_origin(cache)
             return original_call(self, x, mask=mask, cache=cache)
         if not _attention_has_gated_q_proj(self):
             return original_call(self, x, mask=mask, cache=cache)
@@ -213,7 +240,6 @@ def _install_split_attention_hook(attn: Any) -> bool:
             3,
         )
 
-        cached_prefix_offset = _cache_offset_value(cache)
         cached_prefix_len = _cache_offset_static_int(cache)
         blockwise_threshold = int(
             getattr(self, "_mtplx_blockwise_full_attention_threshold", 1024)
@@ -241,8 +267,9 @@ def _install_split_attention_hook(attn: Any) -> bool:
             and can_slice_mask
         )
         if cache is not None:
-            queries = self.rope(queries, offset=cached_prefix_offset)
-            keys = self.rope(keys, offset=cached_prefix_offset)
+            rope_offset = _cache_rope_offset(cache)
+            queries = self.rope(queries, offset=rope_offset)
+            keys = self.rope(keys, offset=rope_offset)
             if blockwise_enabled or vllm_metal_paged_enabled:
                 cache.update_without_fetch(keys, values)
             else:

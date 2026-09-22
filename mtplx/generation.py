@@ -89,6 +89,7 @@ from .graphbank import (
     paged_offsets_context_ok as _paged_offsets_context_ok,
     promote_kv_cache_offsets,
     set_paged_offsets_context_ok,
+    stamp_rope_delta,
 )
 from .native_mlp import set_native_mlp_context
 from .loop_guard import LoopGuard, loop_guard_config_from_env
@@ -454,9 +455,10 @@ _VISION_COMPILED_VERIFY_REFUSALS: dict[str, str] = {
         "verifier, as they did before the compiled image route"
     ),
     "vision_dense_mrope": (
-        "image requests on the dense path keep the eager verifier: the "
-        "compiled verifier carries a tensor offset and the image position "
-        "table is sliced by the host offset"
+        "a dense-path image request at the Flash-Next fixed-M4 door: that "
+        "lane is the QSA family's; the dense families take the compiled "
+        "verify bank through their own admission "
+        "(_dense_vision_compiled_verify_admission)"
     ),
     "vision_qsa_disabled": (
         "MTPLX_QWEN4_VISION_QSA=0 is a diagnostic only the eager verifier "
@@ -3324,6 +3326,9 @@ class GenerationStats:
     requested_speculative_depth: int = 0
     long_context_mtp_depth_policy: dict[str, object] = field(default_factory=dict)
     fixed_m4_admission: dict[str, object] = field(default_factory=dict)
+    # The dense families' sibling of fixed_m4_admission: whether the compiled
+    # verify bank carried this request's positions, and why not otherwise.
+    compiled_verify_admission: dict[str, object] = field(default_factory=dict)
     # Demotions recorded while this request ran (mtplx/demotions.py):
     # kind -> count. Exact on the serial scheduler.
     demotions: dict[str, int] = field(default_factory=dict)
@@ -5471,16 +5476,83 @@ _DRAFT_HEAD_MISALIGNED_RESTORE_REASON = (
     "prefix (a history reset in an earlier turn), so its rows keep the stock "
     "positions they were stored with"
 )
-_DENSE_MROPE_EAGER_VERIFY_REASON = (
-    "image requests on the dense path keep the eager verifier: the compiled "
-    "verifier carries a tensor offset and the image position table is sliced "
-    "by the host offset"
+_DENSE_MROPE_DRAFT_REFUSED_REASON = (
+    "this image request was kept off the compiled verify route (see "
+    "vision_request_eager_verify), so its draft head keeps the stock route "
+    "too: only an admitted request hands its compiled draft core the image "
+    "delta"
 )
-_DENSE_MROPE_STOCK_DRAFT_REASON = (
-    "image requests on the dense path keep the stock draft route: the "
-    "compiled draft core carries a tensor offset and the image position table "
-    "is sliced by the host offset"
-)
+
+
+def _dense_mrope_capable(rt: Any) -> bool:
+    """Whether the served model carries the dense image position adapter."""
+
+    from .dense_mrope import INSTALL_ATTR, DenseMRopeInstall
+
+    install = getattr(getattr(rt, "model", None), INSTALL_ATTR, None)
+    return isinstance(install, DenseMRopeInstall) and bool(install.installed)
+
+
+def _dense_vision_compiled_verify_admission(
+    vision_splice: Any | None, prompt_ids: Sequence[int]
+) -> dict[str, object]:
+    """Can the compiled verify bank carry this dense-path request's positions?
+
+    The dense sibling of ``_qwen4_vision_compiled_verify_admission``, with the
+    same vocabulary: ``positions`` (``text`` | ``vision_sequential`` |
+    ``vision_delta``), ``rope_delta`` (the request's delta, recorded whether
+    or not it is admitted), ``images`` and ``refusal`` (a key of
+    ``_VISION_COMPILED_VERIFY_REFUSALS``, or None). Host arithmetic only.
+
+    Past the last image every position of the request's table is the
+    sequence index plus one delta on all three axes, and a decode forward
+    never writes a prompt row, so a bank whose containers rotate at
+    ``offset + delta`` is the eager route bit for bit for every row it can
+    write. The dense family has no pooled indexer keys, so the Flash-Next
+    tail-block rule has no counterpart here. The draft head's first decode
+    row is the LAST prompt row; a prompt ending on an image row would put a
+    grid position there, but the prefill refuses that shape on every route
+    (the final prompt token is forwarded without embeddings and may never be
+    an image pad), so no rule is needed for it.
+
+    The refusals that keep EVERY image request eager come before the
+    sequential-positions answer, so a request whose table could not be
+    built is kept eager by the same switches as one whose table was.
+    """
+
+    if vision_splice is None:
+        return {"positions": "text", "rope_delta": None, "images": 0, "refusal": None}
+    state = _dense_mrope_state_of(vision_splice)
+    verdict: dict[str, object] = {
+        "positions": "vision_delta" if state is not None else "vision_sequential",
+        "rope_delta": None if state is None else int(state.delta),
+        "images": _vision_image_count(vision_splice, prompt_ids),
+        "refusal": None,
+    }
+    if not env_bool("MTPLX_QWEN4_VISION_COMPILED_VERIFY", default=True):
+        # One kill switch for both families: the behaviour before the
+        # compiled image routes, for every image request.
+        verdict["refusal"] = "vision_kill_switch"
+    elif _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
+        verdict["refusal"] = "vision_state_rebase"
+    # No table (the request was prefilled at plain sequence positions and
+    # decodes at them): the text trace, unless a switch above said no.
+    return verdict
+
+
+def _dense_draft_rope_delta(state: Any | None) -> int | None:
+    """The delta a compiled draft core's promoted history cache owns.
+
+    The request's delta while the draft head is row-aligned with the prompt:
+    every row the core writes then sits past the last image row, at the
+    sequence index plus the delta. None otherwise, because the eager draft
+    route ropes a released draft head at its raw offset (a fresh, windowed
+    or reset history holds no prompt rows).
+    """
+
+    if state is None or not state.mtp_aligned:
+        return None
+    return int(state.delta)
 
 
 def _dense_mrope_release_draft_head(state: Any | None, reason: str | None) -> None:
@@ -6817,7 +6889,13 @@ def _make_device_d2_draft_core(
     token_ids: mx.array,
     *,
     mtp_hidden_variant: str,
+    rope_delta: int | None = None,
 ) -> dict[str, Any]:
+    """``rope_delta``: the image delta the promoted draft cache rotates at
+    (``_dense_draft_rope_delta``), None for text and released draft heads.
+    The closure captures the cache's ``compile_state``, which carries it as
+    an implicit input."""
+
     mtp_cache = rt.make_mtp_cache()
     if not qsa_mtp_outer_device_core_supported(mtp_cache):
         raise RuntimeError(
@@ -6834,6 +6912,7 @@ def _make_device_d2_draft_core(
     )
     _eval(logits, draft_hidden)
     promoted, failures = promote_kv_cache_offsets(mtp_cache, reserve_tokens=4)
+    stamp_rope_delta(mtp_cache, rope_delta)
     _reset_tensor_offset_cache(mtp_cache)
 
     def draft2_fn(hidden_states, first_token_ids):
@@ -6990,6 +7069,7 @@ def _make_device_draft_core(
     mtp_cache: Any,
     draft_sampler: SamplerConfig,
     seed: int,
+    rope_delta: int | None = None,
 ) -> dict[str, Any]:
     # FR-Spec pruned draft head: swapped in only around the inner maker's
     # warm+trace window and restored unconditionally, so legacy draft paths
@@ -7019,6 +7099,7 @@ def _make_device_draft_core(
             mtp_cache=mtp_cache,
             draft_sampler=draft_sampler,
             seed=seed,
+            rope_delta=rope_delta,
             frspec_ids=None,
             frspec_full_vocab=0,
         )
@@ -7035,6 +7116,7 @@ def _make_device_draft_core(
             mtp_cache=mtp_cache,
             draft_sampler=draft_sampler,
             seed=seed,
+            rope_delta=rope_delta,
             frspec_ids=getattr(frspec_text, "_mtplx_frspec_ids", None),
             frspec_full_vocab=int(
                 getattr(frspec_text, "_mtplx_frspec_full_vocab", 0)
@@ -7056,6 +7138,7 @@ def _make_device_draft_core_inner(
     seed: int,
     frspec_ids: mx.array | None,
     frspec_full_vocab: int,
+    rope_delta: int | None = None,
 ) -> dict[str, Any]:
     temperature = float(draft_sampler.temperature)
     top_k = int(draft_sampler.top_k)
@@ -7068,6 +7151,9 @@ def _make_device_draft_core_inner(
         reserve_tokens=depth + 2,
         initial_reserve_tokens=_DEVICE_CORE_HISTORY_RESERVE,
     )
+    # An admitted image request: the promoted history cache rotates at
+    # offset + delta, read by the traced chain through its compile_state.
+    stamp_rope_delta(mtp_cache, rope_delta)
     # Warm one forward per level so every module and cache view is built
     # before tracing, then trim the warm entries back off the live history.
     warm_hidden, warm_tok = hidden, token_ids
@@ -9342,13 +9428,18 @@ def generate_mtpk(
     if draft_core not in {"stock", "device-d2", "device"}:
         raise ValueError("draft_core must be 'stock', 'device-d2', or 'device'")
     # Dense-path image request roped at grid positions (None otherwise, text
-    # requests included). The position table is sliced by the HOST cache
-    # offset, so this request stays off every route that carries a tensor
-    # offset: the compiled draft cores here, the compiled verifier and the
-    # graph bank below.
+    # requests included). The compiled routes carry the request's rotary
+    # delta on their tensor-offset caches (mtplx.rope_origin), so an admitted
+    # request takes the compiled verifier, the graph bank and its compiled
+    # draft core like a text request; the admission names what stays eager.
     _dense_mrope_request = _dense_mrope_state_of(vision_splice)
-    if _dense_mrope_request is not None and draft_core != "stock":
-        _note_demotion("vision_request_eager_draft", _DENSE_MROPE_STOCK_DRAFT_REASON)
+    _dense_admission = _dense_vision_compiled_verify_admission(vision_splice, prompt_ids)
+    _dense_admitted = _dense_admission["refusal"] is None
+    if _dense_mrope_request is not None and draft_core != "stock" and not _dense_admitted:
+        # A refused request keeps today's routes end to end: the eager
+        # verifier and the stock draft core, each counted once.
+        _note_demotion("vision_request_eager_draft", _DENSE_MROPE_DRAFT_REFUSED_REASON)
+        _dense_admission["draft_core_forced"] = _DENSE_MROPE_DRAFT_REFUSED_REASON
         draft_core = "stock"
     if not 0.0 <= adapter_ensemble_epsilon <= 1.0:
         raise ValueError("adapter_ensemble_epsilon must be in [0, 1]")
@@ -9842,10 +9933,21 @@ def generate_mtpk(
     # delta. Every other compiled route promotes caches without one, so it
     # stays off such a request.
     _context_roped_request = _vision_rope_request(vision_splice)
+    # A dense-path image request that the admission above let through: every
+    # cache the compiled routes promote owns this delta (rope_origin), so
+    # the graph bank and the verify bank below rotate where the eager route
+    # does. None for text requests, sequential image requests and refusals.
+    _dense_rope_delta = (
+        int(_dense_mrope_request.delta)
+        if _dense_mrope_request is not None and _dense_admitted
+        else None
+    )
     graphbank = (
-        SpecDecodeGraphBank(rt, capture_backend=verify_core_backend)
+        SpecDecodeGraphBank(
+            rt, capture_backend=verify_core_backend, rope_delta=_dense_rope_delta
+        )
         if verify_strategy in {"graphbank", "graphbank_capture_commit"}
-        and _dense_mrope_request is None
+        and _dense_admitted
         and not _context_roped_request
         else None
     )
@@ -9903,27 +10005,29 @@ def generate_mtpk(
             # promotion copy lands after TTFT, not inside it. cached_tokens
             # is 0 on cold prompts and the restored prefix length on hits.
             restored_tokens=int(getattr(prompt_state, "cached_tokens", 0) or 0),
+            # A dense-path image request: every container this bank promotes
+            # rotates at offset + delta and its verify step takes the delta
+            # as a graph input (the text trace is untouched).
+            rope_delta=_dense_rope_delta,
         )
         if _compiled_verify_mode != "off"
-        and _dense_mrope_request is None
+        and _dense_admitted
         and (
             (_generic_compiled_verify and not _context_roped_request)
             or qwen4_fixed_m4_compiled_verify
         )
         else None
     )
+    _dense_would_compile = (
+        _compiled_verify_mode != "off" and _generic_compiled_verify
+    ) or verify_strategy in {"graphbank", "graphbank_capture_commit"}
     if _dense_mrope_request is not None:
-        if (
-            _compiled_verify_mode != "off"
-            and (
-                verify_strategy in {"capture_commit", "graphbank_capture_commit"}
-                or generic_compiled_target_prefix
-            )
-        ) or verify_strategy in {"graphbank", "graphbank_capture_commit"}:
+        if not _dense_admitted and _dense_would_compile:
             # This request would have had the compiled verifier or the graph
-            # bank; it runs the eager verifier instead, and says so.
+            # bank; it runs the eager verifier instead, and says why.
             _note_demotion(
-                "vision_request_eager_verify", _DENSE_MROPE_EAGER_VERIFY_REASON
+                "vision_request_eager_verify",
+                _VISION_COMPILED_VERIFY_REFUSALS[_dense_admission["refusal"]],
             )
         if mtp_history_cache is not None and _mtp_cache_offset(
             mtp_history_cache
@@ -9933,6 +10037,34 @@ def generate_mtpk(
             _dense_mrope_release_draft_head(
                 _dense_mrope_request, _DRAFT_HEAD_MISALIGNED_RESTORE_REASON
             )
+    # The request record's answer for the dense family (the sibling of
+    # fixed_m4_admission): which route ran, and why. Filled on every request
+    # of a model that carries the dense image position adapter, so a text
+    # control and an image request read the same way.
+    compiled_verify_admission: dict[str, object] = {}
+    if _dense_mrope_capable(rt) or _dense_mrope_request is not None:
+        _dense_engaged = compiled_verify_bank is not None or graphbank is not None
+        compiled_verify_admission = {
+            "family": "dense",
+            "positions": _dense_admission["positions"],
+            "rope_delta": _dense_admission["rope_delta"],
+            "images": _dense_admission["images"],
+            "engaged": _dense_engaged,
+            "reason": (
+                _dense_admission["refusal"]
+                if not _dense_admitted
+                else "admitted"
+                if _dense_engaged
+                else "compiled_verify_off"
+                if _compiled_verify_mode == "off"
+                else "verify_strategy_not_compiled"
+            ),
+            **(
+                {"draft_core_forced": _dense_admission["draft_core_forced"]}
+                if "draft_core_forced" in _dense_admission
+                else {}
+            ),
+        }
     if (
         qwen4_fixed_m4_compiled_verify
         and compiled_verify_bank is not None
@@ -12321,6 +12453,7 @@ def generate_mtpk(
                         draft_hidden,
                         mx.array([[primary]]),
                         mtp_hidden_variant=mtp_hidden_variant,
+                        rope_delta=_dense_draft_rope_delta(_dense_mrope_request),
                     )
                     elapsed_compile = time.perf_counter() - compile_started
                     device_d2_compile_time += elapsed_compile
@@ -12400,6 +12533,7 @@ def generate_mtpk(
                     draft_hidden,
                     mx.array([[primary]]),
                     mtp_hidden_variant=mtp_hidden_variant,
+                    rope_delta=_dense_draft_rope_delta(_dense_mrope_request),
                 )
             _k2_drafts = _run_device_d2_draft_core(
                 compiled_k2_d2_core, draft_hidden, int(primary)
@@ -12496,6 +12630,7 @@ def generate_mtpk(
                             mtp_cache=mtp_cache,
                             draft_sampler=draft_sampler,
                             seed=int(rng.integers(0, 2**31 - 1)),
+                            rope_delta=_dense_draft_rope_delta(_dense_mrope_request),
                         )
                         elapsed_compile = time.perf_counter() - compile_started
                         device_core_compile_time += elapsed_compile
@@ -14985,6 +15120,7 @@ def generate_mtpk(
     stats = GenerationStats(
         mode="mtpk",
         fixed_m4_admission=fixed_m4_admission,
+        compiled_verify_admission=compiled_verify_admission,
         demotions=_demotions_since(_demotions_at_start),
         forkev=_forkev_snapshot,
         constraint_active=constraint is not None,

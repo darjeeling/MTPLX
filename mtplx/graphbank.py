@@ -8,6 +8,7 @@ steps until those offsets become tensor inputs/outputs.
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import time
@@ -21,6 +22,7 @@ import mlx.core as mx
 from .attention_context import attention_phase
 from .demotions import note as _note_demotion, note_bank_fallback as _note_bank_fallback
 from .gdn_capture import resolve_gdn_capture_backend
+from .rope_origin import RotaryOrigin, as_rope_delta, stamp_rope_delta
 
 
 # Process-wide state of the Flash-Next fixed-M4 compiled lane (PX.4):
@@ -121,6 +123,7 @@ class SpecDecodeGraphBank:
         allow_python_cache_capture: bool = False,
         promote_tensor_offsets: bool = True,
         capture_backend: str | None = None,
+        rope_delta: mx.array | int | None = None,
     ) -> None:
         self.runtime = runtime
         self.max_verify_len = max_verify_len
@@ -128,6 +131,10 @@ class SpecDecodeGraphBank:
         self.promote_tensor_offsets = promote_tensor_offsets
         self.capture_backend = resolve_gdn_capture_backend(capture_backend)
         self._capture_accepts_backend = _accepts_capture_backend(runtime)
+        # An image request's rotary delta (None for text): stamped on every
+        # cache this bank promotes. The closures below capture each cache's
+        # ``compile_state``, which carries the delta as an implicit input.
+        self._rope_delta = as_rope_delta(rope_delta)
         self.stats = GraphBankStats()
         self._compiled: dict[tuple[str, int, tuple[int, ...]], Any] = {}
 
@@ -252,6 +259,9 @@ class SpecDecodeGraphBank:
             for kind, length in sorted({(kind, length) for kind, length, _, _ in self._compiled})
         ]
         data["compiled_entry_count"] = len(self._compiled)
+        data["rope_delta"] = (
+            None if self._rope_delta is None else int(self._rope_delta.item())
+        )
         return data
 
     def reset(self) -> None:
@@ -274,6 +284,7 @@ class SpecDecodeGraphBank:
                 self.stats.promotion_failures[reason] = (
                     self.stats.promotion_failures.get(reason, 0) + count
                 )
+            stamp_rope_delta(cache, self._rope_delta)
         if cache_has_python_offsets(cache):
             return "python_cache_offsets"
         return None
@@ -442,7 +453,7 @@ def cache_has_python_offsets(cache: Any) -> bool:
     return False
 
 
-class TensorOffsetKVCache:
+class TensorOffsetKVCache(RotaryOrigin):
     """Full-attention KV cache adapter with array-backed mutable offset.
 
     Stock `KVCache.offset` is a Python integer.  In a compiled verify graph that
@@ -450,6 +461,12 @@ class TensorOffsetKVCache:
     stale.  This adapter keeps the existing key/value buffers, stores the offset
     in `cache[2]`, and mutates the three-array state through operations visible
     to `mx.compile(inputs=..., outputs=...)`.
+
+    The adapter also owns its ROTARY ORIGIN (``RotaryOrigin``): ``rope_delta``
+    is None for a text request and the image request's delta otherwise, and
+    ``rope_offset`` is where the attention routes rotate the next row. The
+    delta shifts rotary positions only; ``offset`` keeps driving the mask,
+    the rollback window and every slice write.
     """
 
     def __init__(
@@ -459,6 +476,7 @@ class TensorOffsetKVCache:
         offset: int | mx.array,
         *,
         step: int = 256,
+        rope_delta: mx.array | int | None = None,
     ) -> None:
         offset_array = (
             offset
@@ -468,6 +486,7 @@ class TensorOffsetKVCache:
         self.cache = [keys, values, offset_array]
         self.rollback_state = [None, None, None]
         self.step = step
+        self._init_rotary_origin(rope_delta)
         # Growth-budget tracking (2026-07-03): the first promotion grants
         # headroom (`initial_reserve_tokens`); any capacity expansion AFTER
         # that grant means the compiled verify graph would retrace, so the
@@ -525,7 +544,10 @@ class TensorOffsetKVCache:
 
     @property
     def compile_state(self):
-        return [self.cache, self.rollback_state]
+        # The rotary origin rides next to the leaves so a closure that
+        # captures this tree (the graph bank, the device draft cores) reads
+        # the delta at call time, never as a constant of the trace.
+        return [self.cache, self.rollback_state, self.rope_state]
 
     def ensure_capacity(self, needed: int) -> None:
         if self.keys is None or self.values is None:
@@ -714,33 +736,6 @@ class TensorOffsetKVCache:
         entry.values = self.cache[1]
         entry.offset = int(self.size()) if self.cache[0] is not None else 0
         return entry
-
-
-def as_rope_delta(value: Any) -> mx.array | None:
-    """The rotary delta of an image request as one int32 value, or None.
-
-    The delta is a graph input of the compiled verify step and the position
-    operand of the two rope kernels, whose contract is one int32 value
-    (``kernels/qwen4_m4_rope._as_i32_scalar``). Anything else is refused
-    here, where the request is admitted, instead of inside a trace. A host
-    integer becomes a one-element array; an array is checked, never read, so
-    a tracer passes through.
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, mx.array):
-        if value.dtype != mx.int32 or int(value.size) != 1:
-            raise TypeError(
-                "rope_delta must be one int32 value; got "
-                f"dtype={value.dtype}, shape={tuple(value.shape)}"
-            )
-        return value.reshape((1,))
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(
-            f"rope_delta must be an int or a one-element int32 array; got {value!r}"
-        )
-    return mx.array([int(value)], dtype=mx.int32)
 
 
 class TensorOffsetQSACache:
@@ -2157,12 +2152,13 @@ class CompiledVerifyBank:
         self._rope_delta_value = number
 
     def _stamp_rope_delta(self, cache: Any) -> None:
-        """Every fixed QSA bank of this request owns the request's rotary origin."""
+        """Every promoted container of this request owns its rotary origin.
 
-        delta = self._rope_delta
-        for entry in cache or []:
-            if isinstance(entry, TensorOffsetQSACache):
-                entry.rope_delta = delta
+        Fixed QSA banks (Flash-Next) and the full-attention tensor-offset
+        adapters (the dense families, plain and paged) alike.
+        """
+
+        stamp_rope_delta(cache, self._rope_delta)
 
     def _verify_key(
         self, length: int, hidden_variant: str | None, bucket: int
@@ -4001,6 +3997,17 @@ class CompiledVerifyBank:
             + (":rope_delta" if rope_delta_input else "")
             for length, variant, bucket, rope_delta_input in sorted(self._compiled)
         ]
+        # The generic lane's own receipt: an image request replays the trace
+        # that takes the rotary delta as an input; a text request the text
+        # trace. (The fixed-M4 lane repeats it under ``fixed_m4`` below.)
+        data["rope_delta_input"] = self._rope_delta is not None
+        data["rope_delta"] = self._rope_delta_value
+        parity2 = self.stats.get("parity2")
+        if isinstance(parity2, dict):
+            data["parity2"] = {
+                key: (dict(value) if isinstance(value, dict) else value)
+                for key, value in parity2.items()
+            }
         dispatch = self._fixed_m4_dispatch
         if dispatch is not None:
             data["fixed_m4"] = {
@@ -4265,12 +4272,15 @@ class CompiledVerifyBank:
                     rope_delta=entry.rope_delta,
                 )
             elif kind == VERIFY_SPEC_KIND_FULL_ATTN:
+                # The twin carries the request's rotary origin like every
+                # other slot; the traced body re-seeds it from the delta input.
                 if isinstance(entry, TensorOffsetKVCache):
                     twin = TensorOffsetKVCache(
                         entry.cache[0],
                         entry.cache[1],
                         entry.cache[2],
                         step=entry.step,
+                        rope_delta=entry.rope_delta,
                     )
                 elif isinstance(entry, TensorOffsetQuantizedPagedKVCache):
                     twin = TensorOffsetQuantizedPagedKVCache(
@@ -4284,6 +4294,7 @@ class CompiledVerifyBank:
                         kv_quant_config=entry.kv_quant_config,
                         source_dtypes=entry.source_dtypes,
                         head_dims=entry.head_dims,
+                        rope_delta=entry.rope_delta,
                     )
                 else:
                     twin = TensorOffsetVllmMetalPagedKVCache(
@@ -4292,6 +4303,7 @@ class CompiledVerifyBank:
                         offset=entry.cache[2],
                         block_size=entry.block_size,
                         num_blocks=entry.num_blocks,
+                        rope_delta=entry.rope_delta,
                     )
             else:
                 twin = type(entry)(len(entry.cache))
@@ -4404,11 +4416,12 @@ class CompiledVerifyBank:
 
         spec = list(self._spec or [])
         if rope_delta_input and not any(
-            kind == VERIFY_SPEC_KIND_QSA for _idx, kind, _n in spec
+            kind in (VERIFY_SPEC_KIND_QSA, VERIFY_SPEC_KIND_FULL_ATTN)
+            for _idx, kind, _n in spec
         ):
             raise ValueError(
-                "rope_delta has no consumer: only fixed QSA banks carry a "
-                "rotary origin"
+                "rope_delta has no consumer: only fixed QSA banks and "
+                "full-attention tensor-offset adapters carry a rotary origin"
             )
         layout = self._capture_layout()
         static_host = {"bank_ref": weakref.ref(self)}
@@ -4455,6 +4468,10 @@ class CompiledVerifyBank:
                         entry.cache[slot] = state_in[pos + slot]
                     for slot in range(len(entry.rollback_state)):
                         entry.rollback_state[slot] = None
+                    # The rotary origin of a dense adapter is re-seeded the
+                    # same way: the traced delta input, or None on the text
+                    # trace.
+                    entry.rope_delta = rope_delta
                 else:
                     for slot in range(n_leaves):
                         entry.cache[slot] = state_in[pos + slot]
@@ -4633,6 +4650,8 @@ class CompiledVerifyBank:
             if isinstance(rollback, list):
                 for slot in range(len(rollback)):
                     rollback[slot] = None
+            if isinstance(entry, RotaryOrigin):
+                entry.rope_delta = None
 
     # -- eager paths ---------------------------------------------------------------
 
@@ -4773,10 +4792,15 @@ class CompiledVerifyBank:
         raised — so streaming continues compiled-authoritative.
         """
         self.stats["parity2_calls"] += 1
+        record = self._parity2_record()
+        width = str(_decode_length(input_ids))
+        if not self._parity2_reference_ready(record, width):
+            self._mirror_commit(cache, compiled_state_out)
+            return compiled_logits, compiled_hidden, compiled_captures
         # Seed the clone BEFORE mirror-commit: the real entries still hold the
         # pre-step leaves here (the compiled step ran purely on the shadow).
         clone = self._parity2_clone_cache(cache, bucket)
-        with attention_phase("decode_verify"):
+        with attention_phase("decode_verify"), self._parity2_reference_scope():
             eager_logits, eager_hidden, eager_captures = self._runtime_forward(
                 input_ids,
                 cache=clone,
@@ -4801,14 +4825,7 @@ class CompiledVerifyBank:
         candidate = self._named_outputs(
             compiled_logits, compiled_hidden, compiled_captures, compiled_state_out
         )
-        # Uncapped compare so mismatched_leaves is a true count, not a preview.
-        report = compare_verify_outputs(
-            reference,
-            candidate,
-            max_report_lines=len(reference) + len(candidate) + 8,
-        )
-        if report:
-            self._record_parity2_divergence(report, reference, candidate, cache)
+        self._parity2_compare(record, width, reference, candidate, cache=cache)
         return compiled_logits, compiled_hidden, compiled_captures
 
     def _parity2_clone_cache(self, cache: Any, bucket: int) -> list[Any]:
@@ -4849,6 +4866,11 @@ class CompiledVerifyBank:
                     rope_delta=entry.rope_delta,
                 )
             elif kind == VERIFY_SPEC_KIND_FULL_ATTN:
+                # No rotary delta on the reference leg, on purpose: the eager
+                # forward on this clone positions every row from the
+                # request's host table (``_parity2_reference_scope``), which
+                # is independent of the delta under test, on the same padded
+                # buffers the compiled step reduced over.
                 if isinstance(entry, TensorOffsetKVCache):
                     twin = TensorOffsetKVCache(
                         _copy_state_leaf(entry.cache[0]),
@@ -4889,41 +4911,208 @@ class CompiledVerifyBank:
             clone[idx] = twin
         return clone
 
-    def _record_parity2_divergence(
+    def _parity2_record(self) -> dict[str, Any]:
+        """This request's parity receipt (``compiled_verify.parity2``).
+
+        The shape the fixed-M4 lane's ``fixed_m4_parity2`` has, so one reader
+        serves both families: rounds compared, rounds that differed anywhere,
+        the largest differences, and the first divergent leaf.
+        """
+
+        return self.stats.setdefault(
+            "parity2",
+            {
+                "positions": "text" if self._rope_delta is None else "vision_delta",
+                "rope_delta": self._rope_delta_value,
+                "rounds": 0,
+                "rounds_by_width": {},
+                "divergent_rounds": 0,
+                "divergent_rounds_by_width": {},
+                # Rounds of an image request NOT compared, because their
+                # caller had no request scope open (``_parity2_reference_ready``).
+                "reference_scope_missing_rounds": 0,
+                "reference_scope_missing_by_width": {},
+                "compared_leaves_per_round": 0,
+                "logits_max_abs_diff": 0.0,
+                "logits_max_kl": 0.0,
+                "hidden_max_abs_diff": 0.0,
+                "state_max_abs_diff": 0.0,
+                "capture_max_abs_diff": 0.0,
+                "first_divergence": None,
+            },
+        )
+
+    def _parity2_reference_ready(self, record: dict[str, Any], width: str) -> bool:
+        """Whether this round has a reference independent of the delta.
+
+        A text round always has one. The reference of an image round is the
+        REQUEST's own position table, read from the caller's scope by the
+        eager leg (the dense adapter through ``_parity2_reference_scope``,
+        the Flash-Next attention through ``vision_rope_state``); the bank's
+        delta is never consulted, or a wrong delta would be compared with
+        itself and pass. A caller with no scope open leaves nothing
+        independent to compare with: the round is counted, not compared, so
+        the maxima stay the maxima of real comparisons.
+        """
+
+        if self._rope_delta is None:
+            return True
+        from .attention_context import vision_rope_state
+        from .dense_mrope import dense_mrope_state
+
+        if dense_mrope_state() is not None or vision_rope_state() is not None:
+            return True
+        record["reference_scope_missing_rounds"] += 1
+        record["reference_scope_missing_by_width"][width] = (
+            record["reference_scope_missing_by_width"].get(width, 0) + 1
+        )
+        return False
+
+    def _parity2_reference_scope(self):
+        """The eager leg of an image round positions rows from the host table.
+
+        The clone carries no rotary delta (``_parity2_clone_cache``); under
+        this scope the dense adapter resolves the clone's concrete offset
+        through the request's table, exactly as the eager route on a stock
+        cache does, on the same padded buffers the compiled step used.
+        """
+
+        if self._rope_delta is None:
+            return contextlib.nullcontext()
+        from .dense_mrope import host_positions_for_tensor_offsets
+
+        return host_positions_for_tensor_offsets()
+
+    def _parity2_compare(
         self,
-        report: list[str],
+        record: dict[str, Any],
+        width: str,
         reference: dict[str, Any],
         candidate: dict[str, Any],
+        *,
         cache: Any,
     ) -> None:
+        """Bit-for-bit on the device; the host sees only a divergence."""
+
+        names = sorted(set(reference) | set(candidate))
+        comparable: list[tuple[str, Any, Any]] = []
+        mismatched: list[str] = []
+        for name in names:
+            ref, cand = reference.get(name), candidate.get(name)
+            if ref is None and cand is None:
+                continue
+            if (
+                isinstance(ref, mx.array)
+                and isinstance(cand, mx.array)
+                and ref.shape == cand.shape
+                and ref.dtype == cand.dtype
+            ):
+                comparable.append((name, ref, cand))
+            elif not hasattr(ref, "shape") and not hasattr(cand, "shape"):
+                if ref != cand:
+                    mismatched.append(name)
+            else:
+                mismatched.append(name)
+        flags = [mx.array_equal(ref, cand) for _name, ref, cand in comparable]
+        ref32 = reference["logits"].astype(mx.float32)
+        cand32 = candidate["logits"].astype(mx.float32)
+        log_p = ref32 - mx.logsumexp(ref32, axis=-1, keepdims=True)
+        log_q = cand32 - mx.logsumexp(cand32, axis=-1, keepdims=True)
+        max_kl = mx.max(mx.sum(mx.exp(log_p) * (log_p - log_q), axis=-1))
+        logits_diff = mx.max(mx.abs(ref32 - cand32))
+        hidden_diff = mx.max(
+            mx.abs(
+                reference["hidden"].astype(mx.float32)
+                - candidate["hidden"].astype(mx.float32)
+            )
+        )
+        mx.eval(flags, max_kl, logits_diff, hidden_diff)
+        mismatched.extend(
+            name for (name, _ref, _cand), flag in zip(comparable, flags)
+            if not bool(flag.item())
+        )
+        mismatched.sort(key=names.index)
+
+        record["rounds"] += 1
+        record["rounds_by_width"][width] = record["rounds_by_width"].get(width, 0) + 1
+        record["compared_leaves_per_round"] = len(names)
+        record["logits_max_abs_diff"] = max(
+            record["logits_max_abs_diff"], float(logits_diff.item())
+        )
+        record["logits_max_kl"] = max(record["logits_max_kl"], float(max_kl.item()))
+        record["hidden_max_abs_diff"] = max(
+            record["hidden_max_abs_diff"], float(hidden_diff.item())
+        )
+        if not mismatched:
+            return
+
+        record["divergent_rounds"] += 1
+        record["divergent_rounds_by_width"][width] = (
+            record["divergent_rounds_by_width"].get(width, 0) + 1
+        )
         self.stats["parity2_divergent_calls"] += 1
+        # Size of every divergence, still on the device: one scalar per leaf.
+        sized = [
+            (
+                name,
+                mx.max(
+                    mx.abs(
+                        reference[name].astype(mx.float32)
+                        - candidate[name].astype(mx.float32)
+                    )
+                ),
+            )
+            for name in mismatched
+            if isinstance(reference.get(name), mx.array)
+            and isinstance(candidate.get(name), mx.array)
+            and reference[name].shape == candidate[name].shape
+        ]
+        mx.eval([diff for _name, diff in sized])
+        for name, diff in sized:
+            family = _artifact_kind(name)
+            if family in ("state", "capture"):
+                key = f"{family}_max_abs_diff"
+                record[key] = max(record[key], float(diff.item()))
+
         ordinal = int(self.stats["calls"])
         context = self._parity2_context_estimate(cache)
-        # Split on ": " (not ":"): state leaf names embed a colon, e.g.
-        # "state[1:fa].2: value mismatch (...)".
-        first_name = report[0].split(": ", 1)[0]
+        first_name = mismatched[0]
         artifact = _artifact_kind(first_name)
-        max_abs = _leaf_max_abs_diff(
-            reference.get(first_name), candidate.get(first_name)
-        )
-        mismatched = sum(1 for line in report if not line.startswith("... "))
-        record = {
-            "call": ordinal,
-            "context": context,
-            "artifact": artifact,
-            "leaf": first_name,
-            "max_abs_diff": max_abs,
-            "mismatched_leaves": mismatched,
-        }
+        max_abs = _leaf_max_abs_diff(reference.get(first_name), candidate.get(first_name))
+        if record["first_divergence"] is None:
+            # The readable lines cross to the host, so only the first
+            # divergent round writes them and only for its first few leaves
+            # (one K bank is hundreds of megabytes at long context).
+            detailed = mismatched[:8]
+            record["first_divergence"] = {
+                "round": int(record["rounds"]),
+                "width": int(width),
+                "context": context,
+                "leaf": first_name,
+                "artifact": artifact,
+                "mismatched_leaves": len(mismatched),
+                "report": compare_verify_outputs(
+                    {name: reference.get(name) for name in detailed},
+                    {name: candidate.get(name) for name in detailed},
+                    max_report_lines=len(detailed) + 2,
+                ),
+            }
         if self.stats["parity2_first_divergence"] is None:
-            self.stats["parity2_first_divergence"] = record
+            self.stats["parity2_first_divergence"] = {
+                "call": ordinal,
+                "context": context,
+                "artifact": artifact,
+                "leaf": first_name,
+                "max_abs_diff": max_abs,
+                "mismatched_leaves": len(mismatched),
+            }
         count = int(self.stats["parity2_divergent_calls"])
         if count <= 10:
             max_abs_text = "n/a" if max_abs is None else f"{max_abs:.3e}"
             print(
                 f"[parity2] divergence call={ordinal} context={context} "
                 f"artifact={artifact} leaf={first_name} "
-                f"max_abs_diff={max_abs_text} mismatched_leaves={mismatched}",
+                f"max_abs_diff={max_abs_text} mismatched_leaves={len(mismatched)}",
                 flush=True,
             )
             if count == 10:

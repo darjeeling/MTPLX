@@ -71,6 +71,13 @@ def rig(tmp_path):
 
     # Its own LM head: greedy decoding gives varied tokens, not an echo.
     model = synth.model_with_draft_head(tmp_path, seed=8, tie=False)
+    # The product's attention hook (runtime.load installs it on every model):
+    # a cache that owns a rotary origin rotates at it, everything else is the
+    # stock forward. Without it a compiled route would rope at the plain
+    # tensor offset through the unhooked stock forward.
+    from mtplx.attention_split import configure_split_full_attention
+
+    configure_split_full_attention(model)
     assert configure_dense_mrope(model, synth.pack_config()).installed
     spies = SimpleNamespace(
         trunk=[synth.spy_on(attn) for attn in synth.full_attention(model)],
@@ -251,51 +258,102 @@ def test_sequential_image_request_is_what_it_was(rig):
     assert demotions.snapshot()["total"] == 0
 
 
-def test_compiled_verifier_is_bypassed_for_the_armed_request_and_counted(
+def test_the_armed_request_takes_the_compiled_verifier_with_its_delta(
     rig, monkeypatch
 ):
+    """The bank owns the rotary origin, so the armed request keeps the route a
+    text request has (tests/test_dense_mrope_compiled_route.py proves the
+    route bit for bit; this pins the wiring and the record)."""
     eager = _generate(rig)
     monkeypatch.setenv("MTPLX_COMPILED_VERIFY", "1")
-    built: list[bool] = []
+    built: list[dict] = []
     real_bank = generation.CompiledVerifyBank
 
     def counting_bank(*args, **kwargs):
-        built.append(True)
+        built.append(dict(kwargs))
         return real_bank(*args, **kwargs)
 
     monkeypatch.setattr(generation, "CompiledVerifyBank", counting_bank)
 
     out = _generate(rig)
-    assert built == []
-    assert "compiled_verify" not in out.stats.graphbank
+    assert len(built) == 1 and built[0]["rope_delta"] == DELTA
+    bank = out.stats.graphbank["compiled_verify"]
+    assert bank["compiled_calls"] >= 1 and bank["fallback_calls"] == 0
+    assert bank["rope_delta_input"] is True and bank["rope_delta"] == DELTA
+    assert bank["compiled_keys"] and all(k.endswith(":rope_delta") for k in bank["compiled_keys"])
     assert out.tokens == eager.tokens
+    assert out.stats.compiled_verify_admission == {
+        "family": "dense",
+        "positions": "vision_delta",
+        "rope_delta": DELTA,
+        "images": 1,
+        "engaged": True,
+        "reason": "admitted",
+    }
+    assert demotions.snapshot()["total"] == 0 and out.stats.demotions == {}
+
+    # A sequentially positioned image request keeps the route it had: the
+    # text trace, said so in the record.
+    out = _generate(rig, splice=_splice(rig, PROMPT, armed=False))
+    assert len(built) == 2 and built[1]["rope_delta"] is None
+    bank = out.stats.graphbank["compiled_verify"]
+    assert bank["rope_delta_input"] is False and bank["rope_delta"] is None
+    assert not any(k.endswith(":rope_delta") for k in bank["compiled_keys"])
+    assert out.stats.compiled_verify_admission["positions"] == "vision_sequential"
+    assert out.stats.compiled_verify_admission["reason"] == "admitted"
+    assert demotions.snapshot()["total"] == 0
+
+
+def test_the_graph_bank_and_the_compiled_draft_core_carry_the_delta(rig, monkeypatch):
+    """Both promote caches; both stamp the request's delta on them."""
+    graph_banks: list[dict] = []
+    draft_cores: list[dict] = []
+    real_graph_bank = generation.SpecDecodeGraphBank
+    real_draft_core = generation._make_device_draft_core
+
+    def counting_graph_bank(*args, **kwargs):
+        graph_banks.append(dict(kwargs))
+        return real_graph_bank(*args, **kwargs)
+
+    def counting_draft_core(*args, **kwargs):
+        draft_cores.append(dict(kwargs))
+        return real_draft_core(*args, **kwargs)
+
+    monkeypatch.setattr(generation, "SpecDecodeGraphBank", counting_graph_bank)
+    monkeypatch.setattr(generation, "_make_device_draft_core", counting_draft_core)
+    out = _generate(
+        rig,
+        verify_strategy="graphbank_capture_commit",
+        draft_core="device",
+        max_tokens=10,
+    )
+    assert _teacher_forced_gaps(rig, PROMPT, out.tokens).max() < LOGIT_NOISE
+    assert [g["rope_delta"] for g in graph_banks] == [DELTA]
+    assert out.stats.graphbank["rope_delta"] == DELTA
+    assert out.stats.graphbank["compiled_calls"] >= 1
+    assert draft_cores and all(c["rope_delta"] == DELTA for c in draft_cores)
+    assert out.stats.compiled_verify_admission["engaged"] is True
+    assert "draft_core_forced" not in out.stats.compiled_verify_admission
+    assert demotions.snapshot()["total"] == 0
+
+    # A refused request keeps today's routes end to end: the kill switch
+    # keeps the graph bank away and the draft head on the stock route, each
+    # counted once, and the record says so.
+    monkeypatch.setenv("MTPLX_QWEN4_VISION_COMPILED_VERIFY", "0")
+    graph_banks.clear()
+    draft_cores.clear()
+    out = _generate(
+        rig, verify_strategy="graphbank_capture_commit", draft_core="device", max_tokens=10
+    )
+    assert _teacher_forced_gaps(rig, PROMPT, out.tokens).max() < LOGIT_NOISE
+    assert graph_banks == [] and draft_cores == []
     snap = demotions.snapshot()
     assert snap["counts"]["vision_request_eager_verify"] == 1
-    assert "host offset" in snap["reasons"]["vision_request_eager_verify"]
-    assert snap["counts"]["vision_mrope_tensor_offset_call"] == 0
-    assert out.stats.demotions == {"vision_request_eager_verify": 1}
-
-    # A sequentially positioned image request keeps the route it had.
-    _generate(rig, splice=_splice(rig, PROMPT, armed=False))
-    assert built == [True]
-    assert demotions.snapshot()["counts"]["vision_request_eager_verify"] == 1
-
-
-def test_graph_bank_and_compiled_draft_core_are_bypassed_and_counted(rig, monkeypatch):
-    def no_graph_bank(*_args, **_kwargs):
-        raise AssertionError("the graph bank was built for an armed image request")
-
-    def no_draft_core(*_args, **_kwargs):
-        raise AssertionError("a compiled draft core was built for an armed request")
-
-    monkeypatch.setattr(generation, "SpecDecodeGraphBank", no_graph_bank)
-    monkeypatch.setattr(generation, "_make_device_draft_core", no_draft_core)
-    monkeypatch.setattr(generation, "_make_device_d2_draft_core", no_draft_core)
-    out = _generate(rig, verify_strategy="graphbank_capture_commit", draft_core="device")
-    assert _teacher_forced_gaps(rig, PROMPT, out.tokens).max() < LOGIT_NOISE
-    counts = demotions.snapshot()["counts"]
-    assert counts["vision_request_eager_verify"] == 1
-    assert counts["vision_request_eager_draft"] == 1
+    assert snap["counts"]["vision_request_eager_draft"] == 1
+    assert "kept off the compiled verify route" in snap["reasons"]["vision_request_eager_draft"]
+    record = out.stats.compiled_verify_admission
+    assert record["engaged"] is False and record["reason"] == "vision_kill_switch"
+    assert "kept off the compiled verify route" in record["draft_core_forced"]
 
 
 def test_draft_head_release_rules(rig):

@@ -16622,6 +16622,10 @@ def _metrics_envelope(
         "mtp_history_position_base": int(stats.get("mtp_history_position_base") or 0),
         **({"fixed_m4_admission": stats["fixed_m4_admission"]}
            if stats.get("fixed_m4_admission") else {}),
+        # The dense families' answer to the same question (which verify
+        # route ran an image request, and why): emitted when filled.
+        **({"compiled_verify_admission": stats["compiled_verify_admission"]}
+           if stats.get("compiled_verify_admission") else {}),
         # Demotions recorded while this request ran (kind -> count); the
         # meanings and reasons are on /health (degradation.demotions).
         **({"demotions": stats["demotions"]} if stats.get("demotions") else {}),
