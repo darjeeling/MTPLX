@@ -31,8 +31,8 @@ sys.path.insert(0, str(REPO_ROOT))
 # The Qwen 3.8 packs carry prequantized MTP heads (loader >= 2.0.1) and need
 # the 3.8 family support that landed in 2.7.0.
 BLESSED = {
-    "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality": "2.11.4",
-    "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed": "2.11.4",
+    "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality": "2.12.0",
+    "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed": "2.12.0",
     # Flash-Next (qwen4_exp) needs the family backend + streamed n-gram
     # accounting that ship in 2.10.0.
     "Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed": "2.10.0",

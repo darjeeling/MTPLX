@@ -52,7 +52,7 @@ SPEED_RECIPE = "flash-next-optimized-speed"
 QUALITY_NAME = "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality"
 QUALITY_REPO = f"Youssofal/{QUALITY_NAME}"
 QUALITY_SERVED_ID = "mtplx-flash-next-optimized-quality"
-QUALITY_ENGINE_FLOOR = "2.11.4"
+QUALITY_ENGINE_FLOOR = "2.12.0"
 OFFICIAL_SOURCE_REPO = "Qwen/Qwen3.8-Flash-Next"
 
 # Family-qualified names follow the standalone converter's speed recipe.

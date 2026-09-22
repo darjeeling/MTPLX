@@ -275,7 +275,7 @@ def test_streaming_build_never_loads_or_reuses_a_verified_stamp(tmp_path, monkey
     assert meta["verification"]["status"] == "streaming-audited"
     assert meta["verification"]["full_load_verified"] is False
     assert "verified_on" not in meta and "speed_evidence" not in meta
-    assert meta["quality_pack"]["min_engine_version"] == "2.11.4"
+    assert meta["quality_pack"]["min_engine_version"] == "2.12.0"
     assert meta["quality_pack"]["source"]["revision"].startswith("sha256:")
     assert meta["forge_provenance"]["forge_recipe"]["name"] == QUALITY_RECIPE
     # Moving to a bigger machine does not authorize stamping changed bytes.

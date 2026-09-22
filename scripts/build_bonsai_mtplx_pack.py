@@ -46,7 +46,7 @@ PACK_NAME = "Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
 PUBLIC_MODEL_ID = "mtplx-bonsai-2-27b-optimized-speed"
 HF_REPO = "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
 MODEL_FAMILY = "qwen3_8"
-MIN_ENGINE_VERSION = "2.11.4"
+MIN_ENGINE_VERSION = "2.12.0"
 SOURCE_REPO = "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit"
 BASE_TRUNK = "Qwen/Qwen3.8-27B"
 MODEL_TYPE = "prism_hadamard_qwen35"
@@ -559,7 +559,7 @@ mtplx start
 
 Pass `--model Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` to
 `mtplx serve`. The served id is `mtplx-bonsai-2-27b-optimized-speed`.
-This pack requires MTPLX **2.11.4 or newer**. Its trunk family is `qwen3_8`;
+This pack requires MTPLX **2.12.0 or newer**. Its trunk family is `qwen3_8`;
 `prism_hadamard_qwen35` identifies the Prism quantization container and loader.
 
 ## Recommended settings

@@ -144,8 +144,8 @@ def test_bonsai_builder_stamps_catalog_identity_family_and_engine_floor():
     contract = builder.build_runtime_contract(mtplx_version="2.11.3", provenance={}, head=None)
     assert contract["model_family"] == "qwen3_8"
     assert contract["public_model_id"] == builder.PUBLIC_MODEL_ID
-    assert contract["min_engine_version"] == "2.11.4"
+    assert contract["min_engine_version"] == "2.12.0"
     card = builder.render_card(source_sha="test-digest", head_note="test head")
     assert f"--model {pack.hf_model_id}" in card
     assert "Bonsai 2 27B" in card and "Prism ML" in card
-    assert "2.11.4 or newer" in card
+    assert "2.12.0 or newer" in card
