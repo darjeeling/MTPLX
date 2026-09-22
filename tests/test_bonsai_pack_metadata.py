@@ -64,10 +64,10 @@ def test_stamps_use_a_floor_independent_of_builder_version(pack):
     assert stamps["hf_repo"] == "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed"
     assert stamps["public_model_id"] == "mtplx-bonsai-2-27b-optimized-speed"
     assert stamps["model_family"] == "qwen3_8"
-    assert stamps["min_engine_version"] == "2.11.4"
+    assert stamps["min_engine_version"] == "2.12.0"
     runtime = builder.build_runtime_contract(mtplx_version="2.11.3", provenance={}, head=None)
     assert runtime["mtplx_version"] == "2.11.3"
-    assert runtime["min_engine_version"] == "2.11.4"
+    assert runtime["min_engine_version"] == "2.12.0"
     assert runtime["quantization"]["format"] == "prism_hadamard_qwen35"
     for name in ("mtplx_runtime.json", "MTPLX_PACK_MANIFEST.json"):
         written = json.loads((pack / name).read_text())
@@ -98,7 +98,7 @@ def test_restamp_preserves_all_source_bytes_and_parity_metadata(pack, tmp_path, 
         assert (output / name).read_bytes() == (pack / name).read_bytes()
     new_runtime = json.loads((output / "mtplx_runtime.json").read_text())
     assert new_runtime["mtplx_version"] == "2.11.3"
-    assert new_runtime["min_engine_version"] == "2.11.4"
+    assert new_runtime["min_engine_version"] == "2.12.0"
     assert new_runtime["exactness_baseline"] == runtime["exactness_baseline"]
     assert new_runtime["custom_metadata"] == runtime["custom_metadata"]
     old_config = json.loads((pack / "config.json").read_text())
@@ -126,7 +126,7 @@ def test_default_card_has_credit_historical_parity_and_no_unmeasured_ram_or_spee
     assert "No speed measurements supplied" in card
     assert "RAM recommendations are pending" in card
     assert "32K tokens or lower" not in card and "16 to 24 GB" not in card
-    assert "2.11.4 or newer" in card
+    assert "2.12.0 or newer" in card
     assert "—" not in card and "–" not in card
     runtime = json.loads((pack / "mtplx_runtime.json").read_text())
     assert runtime["exactness_baseline"]["status"] == "pending_measurement"

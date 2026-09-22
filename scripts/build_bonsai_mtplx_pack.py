@@ -467,6 +467,7 @@ def render_card(*, source_sha: str, head_note: str,
         speed_table=render_speed_table(speed_evidence),
         memory_guidance=render_memory_guidance(memory_evidence),
         memory_table=render_memory_table(memory_evidence),
+        min_engine_version=MIN_ENGINE_VERSION,
     )
 
 
@@ -494,6 +495,9 @@ tags:
 ---
 
 # Ternary Bonsai 2 27B MTPLX Optimized Speed
+
+> **Requires the upcoming MTPLX {min_engine_version} release.**
+> The model is published ahead of engine support, which arrives in that release.
 
 A 27B-class vision-language model for Apple Silicon Macs, with a
 draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
@@ -559,13 +563,13 @@ mtplx start
 
 Pass `--model Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` to
 `mtplx serve`. The served id is `mtplx-bonsai-2-27b-optimized-speed`.
-This pack requires MTPLX **2.12.0 or newer**. Its trunk family is `qwen3_8`;
+This pack requires MTPLX **{min_engine_version} or newer**. Its trunk family is `qwen3_8`;
 `prism_hadamard_qwen35` identifies the Prism quantization container and loader.
 
 ## Recommended settings
 
-These are Prism ML's and Qwen's recommendations, and MTPLX applies them by
-default.
+These are Prism ML's and Qwen's recommendations. MTPLX defaults to the
+thinking-mode sampler; the non-thinking settings are listed separately.
 
 | Mode | temperature | top_p | top_k | presence penalty |
 | :--- | ---: | ---: | ---: | ---: |
@@ -859,7 +863,7 @@ def restamp_pack(source: Path, output: Path, *, link_mode: str = "hardlink",
     (output / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     contract.update(identity_stamps())
     contract["restamp_provenance"] = {
-        "source_directory": str(source),
+        "source_pack": source.name,
         "source_manifest_sha256": sha256_file(source / "MTPLX_PACK_MANIFEST.json"),
         "restamped_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "weights_changed": False,
