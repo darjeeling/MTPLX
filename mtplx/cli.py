@@ -622,8 +622,10 @@ def _add_reasoning_effort_arg(parser: argparse.ArgumentParser) -> None:
         choices=list(REASONING_EFFORT_CHOICES),
         default="auto",
         help=(
-            "Reasoning effort for models that expose levels, such as Qwen 3.8 "
-            "(xhigh/medium/low, MTPLX coding default medium) or Step-3.7 Flash."
+            "Reasoning effort for models that expose levels; auto uses the "
+            "model's default. Qwen 3.8 27B offers xhigh/medium/low and Bonsai 2 "
+            "xhigh/medium, both defaulting to medium; Flash-Next defaults to "
+            "xhigh in chat and medium in coding-agent configs."
         ),
     )
 
