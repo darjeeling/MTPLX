@@ -1,10 +1,9 @@
 """Flash-Next Optimized-Quality on the 256 GB and 512 GB M5 Ultra: CPU-only pins.
 
 Every figure here is arithmetic on the shipped catalog entry and the memory
-planner. Nothing loads a model or touches Metal. The pack byte counts are
-the shape-derived estimates the catalog carries (release-2114 R1 report:
-body 134.235 GB + MTP 2.801 GB + vision 0.898 GB, n-gram table 32.000 GB);
-replace them with the built artifact's sizes when it exists.
+planner. Nothing loads a model or touches Metal. The weight-file byte counts
+come from the published Quality pack at revision
+3908bbfcfde1c331f3c29b3ad04228e5f00fbaff, verified against its Hub inventory.
 """
 from __future__ import annotations
 
@@ -36,11 +35,10 @@ GIB = 1024**3
 QUALITY_ID = "flash-next-optimized-quality"
 QUALITY_HF = "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality"
 
-# Shape-derived pack payload (R1 report, section 5): what model_weights_bytes
-# (every model*.safetensors + mtp.safetensors, the streamed table excluded)
-# and ngram_table_bytes will read off the built pack.
-BODY_MTP_VISION_BYTES = 137_934_202_000
-NGRAM_TABLE_BYTES = 32_000_154_000
+# Same file-size accounting as engine_session.model_weights_bytes and
+# ngram_table_bytes: 37 body/vision shards, the MTP head, and the separate table.
+BODY_MTP_VISION_BYTES = 137_934_585_655
+NGRAM_TABLE_BYTES = 32_000_153_976
 RESIDENT_WEIGHTS_BYTES = BODY_MTP_VISION_BYTES + NGRAM_TABLE_BYTES  # table resident >= 160 GiB
 # openai._resident_floor_margin_bytes at 112 GB and up.
 RESIDENT_FLOOR_MARGIN_BYTES = 6 * GIB
