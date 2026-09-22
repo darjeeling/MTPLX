@@ -56,6 +56,20 @@ if (( LAST_SHIPPED_BUILD > 0 && CANDIDATE_BUILD <= LAST_SHIPPED_BUILD )); then
   exit 1
 fi
 
+RELEASE_NOTES_MD="$ROOT/docs/releases/v$VERSION.md"
+if [[ ! -f "$RELEASE_NOTES_MD" ]]; then
+  echo "error: release notes source missing: $RELEASE_NOTES_MD" >&2
+  echo "write the user-facing notes for v$VERSION before releasing" >&2
+  exit 1
+fi
+# The notes become the Sparkle and site pages and README.md the PyPI page, so
+# draft wording in either would ship verbatim.
+if /usr/bin/grep -n -E 'Release draft|Pending|Unreleased|release candidate|provisional' \
+  "$RELEASE_NOTES_MD" "$ROOT/README.md" >&2; then
+  echo "error: draft wording above in the release notes or README.md; finish them before releasing" >&2
+  exit 1
+fi
+
 export MTPLX_SPARKLE_PUBLIC_ED_KEY="${MTPLX_SPARKLE_PUBLIC_ED_KEY:-GQ0sTm6nb5kv+Btri7wc4LqnXGZ48vIs6PGMwsI/mBM=}"
 SPARKLE_PRIVATE_KEY="${MTPLX_SPARKLE_PRIVATE_KEY:-${SPARKLE_PRIVATE_KEY:-}}"
 SPARKLE_PRIVATE_KEY_FILE="${MTPLX_SPARKLE_PRIVATE_KEY_FILE:-${SPARKLE_PRIVATE_KEY_FILE:-}}"
@@ -154,13 +168,6 @@ if [[ "${MTPLX_RELEASE_SKIP_PILLAR_QA:-0}" != "1" ]]; then
   fi
 else
   echo "warning: MTPLX_RELEASE_SKIP_PILLAR_QA=1 — pillar gate skipped; this artifact is not release-ready" >&2
-fi
-
-RELEASE_NOTES_MD="$ROOT/docs/releases/v$VERSION.md"
-if [[ ! -f "$RELEASE_NOTES_MD" ]]; then
-  echo "error: release notes source missing: $RELEASE_NOTES_MD" >&2
-  echo "write the user-facing notes for v$VERSION before releasing" >&2
-  exit 1
 fi
 
 submit_notarization() {
