@@ -255,7 +255,7 @@ Every command takes `--help`, and most inspection/diagnostic commands take `--js
 | **Turbo** | NAX verify kernels + compiled verify; the default for the quantized 27B and 9B flagship models | Picked automatically for those models |
 | **Sustained** | Default for all other models. Long-context MTP path with chunked prefill and request-sized KV | Everyday use, big files, 16K-200K prompts |
 | **Sustained Max** | Sustained with fans pinned at 100% | Long work where you want maximum cooling |
-| **Burst** | Legacy short-context benchmark lane, loud | Short prompts and benchmarks only |
+| **Burst** | Legacy short-context benchmark mode, loud | Short prompts and benchmarks only |
 
 Fan-backed modes restore your fans to automatic if MTPLX dies for any reason, including `kill -9` and closing the terminal. A detached watchdog handles it; this is verified on hardware, not assumed.
 
