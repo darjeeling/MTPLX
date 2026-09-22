@@ -87,6 +87,8 @@ dev = [
   "pytest>=8",
   "ruff>=0.8",
   "twine>=5",
+  # tests/test_bundle_native_runtime_wheel.py skips without it.
+  "wheel>=0.45",
 ]
 
 [project.scripts]
