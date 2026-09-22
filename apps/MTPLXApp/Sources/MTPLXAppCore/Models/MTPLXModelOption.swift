@@ -32,8 +32,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
     public var aliases: [String]
     /// Approximate on-disk download size for the artifact in bytes.
     /// Used by the onboarding download step for percentage + ETA, and
-    /// by `ModelFeasibility` for disk-space pre-flight (it multiplies
-    /// by 2.5 to mirror the daemon's `required_download_free_bytes`).
+    /// by `ModelFeasibility` for disk-space pre-flight (it adds the
+    /// 5 GiB headroom `mtplx pull` keeps).
     /// Measured from real on-disk symlink-resolved sizes (Speed) or HF
     /// staging manifests (Quality); FP16 is the exact sum of the
     /// published HF repo files (2026-07-03 audit — FP16 keeps INT4
@@ -745,8 +745,9 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Flash-Next Optimized Quality",
             ],
             // Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
-            // Calculated download and planner need at 128K; replace together with measured figures.
-            sizeBytes: 169_958_537_278, peakMemoryGiB: 166.2,
+            // Planner need at 128K with the n-gram table streamed from SSD (calculated,
+            // not yet measured on a 256 GB Mac).
+            sizeBytes: 169_958_537_278, peakMemoryGiB: 136.4,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
@@ -1135,9 +1136,15 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                let trioEnd = ids.lastIndex(where: { qwen38TrioIDs.contains($0) }) {
                 ids.insert(contentsOf: flashNextIDs, at: ids.index(after: trioEnd))
             }
+            if hardware.unifiedMemoryGiB < 128 {
+                // Its wired floor (80.3 GiB) is above a 96 GB Mac's stock GPU limit (about 72 GiB).
+                ids.removeAll { $0 == "flash-next-optimized-speed" }
+            }
             if hardware.unifiedMemoryGiB >= 256 {
-                ids.removeAll { $0 == "flash-next-optimized-quality" }
-                ids.insert("flash-next-optimized-quality", at: 0)
+                // Optimized Speed leads and Optimized Quality follows, as the 27B trio does.
+                let leading = ["flash-next-optimized-speed", "flash-next-optimized-quality"]
+                ids.removeAll { leading.contains($0) }
+                ids.insert(contentsOf: leading, at: 0)
             }
             ids.append(contentsOf: tinyIDs)
             return ids
@@ -1181,8 +1188,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen38-27b-optimized-quality",
     ]
 
-    /// Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
-    /// Mirrors model_catalog.FLASH_NEXT_IDS.
+    /// Flash-Next options on modern chips; Optimized Speed and Quality lead
+    /// from 256 GiB. Mirrors model_catalog._FLASH_NEXT_IDS.
     private static let flashNextIDs = [
         "flash-next-bare-speed",
         "flash-next-optimized-speed",

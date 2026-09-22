@@ -174,11 +174,16 @@ struct ModelPickStep: View {
         isInstalled: Bool
     ) -> ModelFeasibilityVerdict {
         let diskFreeGiB = isInstalled ? Double.greatestFiniteMagnitude : freeDiskGiB()
+        // A paused download only needs its remaining bytes.
+        let downloadedBytes = isInstalled
+            ? 0
+            : ModelDownloader.recursiveSize(of: ModelDownloader().cachedModelPath(for: model.hfModelID))
         return ModelFeasibility().evaluate(
             model: model,
             chipTier: hardware?.tier ?? .unknown,
             ramGiB: hardware?.unifiedMemoryGiB ?? 0,
-            diskFreeGiB: diskFreeGiB
+            diskFreeGiB: diskFreeGiB,
+            downloadedBytes: downloadedBytes
         )
     }
 

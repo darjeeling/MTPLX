@@ -351,7 +351,6 @@
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "flash-next-optimized-quality",
       "optimized-speed-v2",
       "optimized-speed",
@@ -369,7 +368,6 @@
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "optimized-speed-v2",
       "optimized-speed",
       "optimized-quality",
@@ -549,12 +547,12 @@
     "ram_gib": 256,
     "tier": "modern",
     "raw": [
+      "flash-next-optimized-speed",
       "flash-next-optimized-quality",
       "qwen38-27b-optimized-speed",
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "optimized-speed-v2",
       "optimized-speed",
       "optimized-quality",
@@ -567,12 +565,12 @@
       "qwen35-4b-optimized-quality"
     ],
     "visible": [
+      "flash-next-optimized-speed",
       "flash-next-optimized-quality",
       "qwen38-27b-optimized-speed",
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "optimized-speed-v2",
       "optimized-speed",
       "optimized-quality",
@@ -584,7 +582,7 @@
       "qwen35-4b-optimized-speed",
       "qwen35-4b-optimized-quality"
     ],
-    "default": "flash-next-optimized-quality"
+    "default": "flash-next-optimized-speed"
   },
   {
     "ram_gib": 256,
@@ -617,12 +615,12 @@
     "ram_gib": 512,
     "tier": "modern",
     "raw": [
+      "flash-next-optimized-speed",
       "flash-next-optimized-quality",
       "qwen38-27b-optimized-speed",
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "optimized-speed-v2",
       "optimized-speed",
       "optimized-quality",
@@ -635,12 +633,12 @@
       "qwen35-4b-optimized-quality"
     ],
     "visible": [
+      "flash-next-optimized-speed",
       "flash-next-optimized-quality",
       "qwen38-27b-optimized-speed",
       "qwen38-27b-bare-speed",
       "qwen38-27b-optimized-quality",
       "flash-next-bare-speed",
-      "flash-next-optimized-speed",
       "optimized-speed-v2",
       "optimized-speed",
       "optimized-quality",
@@ -652,7 +650,7 @@
       "qwen35-4b-optimized-speed",
       "qwen35-4b-optimized-quality"
     ],
-    "default": "flash-next-optimized-quality"
+    "default": "flash-next-optimized-speed"
   },
   {
     "ram_gib": 512,

@@ -7,7 +7,7 @@ change:
 - apps/MTPLXApp/Sources/MTPLXAppCore/Models/MTPLXModelOption.swift
   (``officialCatalog``, ``recommendedCatalogIDs``/``recommendationIDs``)
 - apps/MTPLXApp/Sources/MTPLXAppCore/Onboarding/ModelFeasibility.swift
-  (``memorySafetyFactor``, ``diskMultiplier``, verdict rules)
+  (``memorySafetyFactor``, ``downloadHeadroomGiB``, verdict rules)
 
 The CLI previously picked default models from chip generation alone, which
 offered a 27B download to 8 GB Macs. This catalog gives every surface the
@@ -25,8 +25,10 @@ from typing import Iterable
 from mtplx.hf_loader import cached_model_is_complete, model_library_roots
 
 MEMORY_SAFETY_FACTOR = 1.5
-DISK_MULTIPLIER = 2.5
-# Change this single bound when the measured memory table is available.
+# `mtplx pull` needs the bytes still to download plus this headroom. Files land
+# as `.incomplete` beside their final names and are renamed in place.
+DOWNLOAD_HEADROOM_GIB = 5.0
+# Bonsai 2 leads from this much RAM; its measured 8K-context peak is 11.80 GiB.
 BONSAI_RECOMMENDATION_MIN_GIB = 16.0
 
 MODERN_TIER = "modern"
@@ -303,8 +305,9 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         detail="8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build.",
         hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
         # Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
-        # Calculated download and planner need at 128K; replace together with measured figures.
-        size_bytes=169_958_537_278, peak_memory_gib=166.2,
+        # Planner need at 128K with the n-gram table streamed from SSD (calculated,
+        # not yet measured on a 256 GB Mac).
+        size_bytes=169_958_537_278, peak_memory_gib=136.4,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
             "mtplx-flash-next-optimized-quality",
@@ -517,8 +520,8 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "bonsai-2-27b-optimized-speed",
 )
 
-# Flash-Next options on modern chips; Quality moves to the front at 256 GiB.
-# Mirrors MTPLXModelOption.flashNextIDs.
+# Flash-Next options on modern chips; Optimized Speed and Quality lead from
+# 256 GiB. Mirrors MTPLXModelOption.flashNextIDs.
 _FLASH_NEXT_IDS = (
     "flash-next-bare-speed",
     "flash-next-optimized-speed",
@@ -641,13 +644,17 @@ def recommended_catalog_ids(
             "bonsai-2-27b-optimized-speed",
             *tiny_ids,
         ]
-    # Offer Flash-Next from 96 GiB; Quality leads from 256 GiB.
-    # The normal peak-memory filter still applies to every pack.
+    # Offer Flash-Next from 96 GiB, Optimized Speed from 128 GiB: its wired
+    # floor (80.3 GiB) is above a 96 GB Mac's stock GPU limit (about 72 GiB).
+    # From 256 GiB Optimized Speed leads and Optimized Quality follows, as
+    # the 27B trio does. The normal peak-memory filter still applies.
     flash_next = list(_FLASH_NEXT_IDS) if chip_tier != LEGACY_TIER and memory_gib >= 96 else []
+    if memory_gib < 128:
+        flash_next = [model_id for model_id in flash_next if model_id != "flash-next-optimized-speed"]
     leading = []
     if chip_tier != LEGACY_TIER and memory_gib >= 256:
-        leading = ["flash-next-optimized-quality"]
-        flash_next.remove(leading[0])
+        leading = ["flash-next-optimized-speed", "flash-next-optimized-quality"]
+        flash_next = [model_id for model_id in flash_next if model_id not in leading]
     return [
         *leading,
         *trio38,
@@ -712,10 +719,12 @@ def evaluate_feasibility(
     chip_tier: str,
     ram_gib: float,
     disk_free_gib: float | None = None,
+    downloaded_bytes: int = 0,
 ) -> FeasibilityVerdict:
     safe_memory_floor = model.peak_memory_gib * MEMORY_SAFETY_FACTOR
-    if disk_free_gib is not None:
-        disk_required = model.download_gib * DISK_MULTIPLIER
+    if disk_free_gib is not None and model.size_bytes > 0:
+        remaining_gib = max(0, model.size_bytes - downloaded_bytes) / 1_073_741_824.0
+        disk_required = remaining_gib + DOWNLOAD_HEADROOM_GIB
         if disk_free_gib < disk_required:
             return FeasibilityVerdict("insufficient_disk", needs_gib=disk_required)
     if chip_tier == INTEL_TIER:

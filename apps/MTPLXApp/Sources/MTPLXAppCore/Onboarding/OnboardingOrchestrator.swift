@@ -240,14 +240,13 @@ public final class OnboardingOrchestrator: ObservableObject {
         let hw = state.hardware
         let chipTier = hw?.tier ?? .unknown
         let ramGiB = hw?.unifiedMemoryGiB ?? 0
-        let diskFreeGiB = model.isInstalled(in: modelLibrary)
-            ? Double.greatestFiniteMagnitude
-            : freeDiskGiB()
+        let installed = model.isInstalled(in: modelLibrary)
         return feasibility.evaluate(
             model: model,
             chipTier: chipTier,
             ramGiB: ramGiB,
-            diskFreeGiB: diskFreeGiB
+            diskFreeGiB: installed ? Double.greatestFiniteMagnitude : freeDiskGiB(),
+            downloadedBytes: installed ? 0 : downloadedBytes(forRepo: model.hfModelID)
         )
     }
 
@@ -257,6 +256,13 @@ public final class OnboardingOrchestrator: ObservableObject {
 
     public func freeDiskGiB() -> Double {
         ModelStoreVolume.freeGiB(at: ModelStoreVolume.measurementURL(for: modelLibrary.primaryDirectory))
+    }
+
+    /// Bytes an interrupted pull already left in `repo`'s model folder.
+    func downloadedBytes(forRepo repo: String) -> Int64 {
+        ModelDownloader.recursiveSize(
+            of: modelDownloader.cachedModelPath(for: repo, cacheRoot: modelLibrary.primaryDirectory)
+        )
     }
 
     private static func modelFamilyLabel(_ family: String) -> String {
@@ -343,13 +349,16 @@ public final class OnboardingOrchestrator: ObservableObject {
     public func startDownload() {
         guard !isDownloading, let repo = state.resolvedRepoID else { return }
         let totalBytes = state.resolvedModel?.sizeBytes
-        // Disk pre-flight before spawning the subprocess. Mirrors the
-        // daemon's `required_download_free_bytes` heuristic (model * 2.5).
+        // Disk pre-flight before spawning the subprocess, with the rule
+        // `mtplx pull` itself enforces: the bytes still to fetch + 5 GiB.
         // For `Other`, we don't know the size yet, so we skip this gate
         // — the user accepted the risk by pasting a custom repo.
         if let bytes = totalBytes, bytes > 0 {
             let freeGiB = freeDiskGiB()
-            let neededGiB = Double(bytes) / 1_073_741_824.0 * ModelFeasibility.diskMultiplier
+            let neededGiB = ModelFeasibility.requiredFreeDiskGiB(
+                sizeBytes: bytes,
+                downloadedBytes: downloadedBytes(forRepo: repo)
+            )
             if freeGiB < neededGiB {
                 downloadFailure = String(
                     format: "Not enough free disk space. Need %.0f GB free, you have %.0f GB.",

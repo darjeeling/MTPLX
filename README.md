@@ -127,7 +127,7 @@ The catalog lists MTPLX packs under [Youssofal](https://huggingface.co/Youssofal
 | `Qwen3.8-27B-MTPLX-Optimized-Quality-FP16` | 36 GB and up, peaks at 33.0 GiB | The Optimized Quality pack for M1 and M2. | Turbo, depth 3 |
 | `Qwen3.8-Flash-Next-MTPLX-Bare-Speed` | 96 GB and up, peaks at 78 GiB | The 125B MoE at flat 4-bit, the quickest Flash Next build and the Flash Next pick for 96 GB Macs. Its 32 GB n-gram table streams from SSD. | Turbo, depth 3 |
 | `Qwen3.8-Flash-Next-MTPLX-Optimized-Speed` | 128 GB and up, peaks at 87 GiB | The 125B MoE, dynamic 4-bit with 8-bit attention. Its 32 GB n-gram table streams from SSD. 125.8 tok/s on an OpenCode request on an M5 Max. The first recommendation from 256 GB. | Turbo, depth 3. This family accepts up to depth 5 |
-| `Qwen3.8-Flash-Next-MTPLX-Optimized-Quality` | 256 GB and up; weights about 128.5 GiB | 8-bit body and MTP head, BF16 structural tensors, 4-bit n-gram table. The highest-fidelity Flash Next build, listed second from 256 GB. | Turbo, depth 3 |
+| `Qwen3.8-Flash-Next-MTPLX-Optimized-Quality` | 256 GB and up, peaks at 136.4 GiB | 8-bit body and MTP head, BF16 structural tensors, 4-bit n-gram table. The highest-fidelity Flash Next build, listed second from 256 GB. | Turbo, depth 3 |
 | `Gemma4-MTPLX-Optimized-Speed` | 32 GB and up, peaks at 18.0 GiB | High quality, moderate speeds. Runs as an assistant pair, so the tuned control is the draft block size rather than depth. | Sustained |
 | **What the author runs** | M5 Max, 128 GB | Flash-Next Optimized Speed, for everything | Turbo, depth 3 |
 

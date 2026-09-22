@@ -410,6 +410,21 @@ final class OnboardingFeatureStateTests: XCTestCase {
     }
 
     @MainActor
+    func testPausedDownloadBytesCountTowardTheDiskGate() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtplx-paused-download-\(UUID().uuidString)", isDirectory: true)
+        let folder = root.appendingPathComponent("Example--Paused", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(count: 4096).write(to: folder.appendingPathComponent("model-00001-of-00002.safetensors"))
+        try Data(count: 1024).write(to: folder.appendingPathComponent("model-00002-of-00002.safetensors.incomplete"))
+
+        let orchestrator = OnboardingOrchestrator(modelLibrary: ModelLibrary(primaryDirectory: root.path))
+        XCTAssertEqual(orchestrator.downloadedBytes(forRepo: "Example/Paused"), 5120)
+        XCTAssertEqual(orchestrator.downloadedBytes(forRepo: "Example/NotStarted"), 0)
+    }
+
+    @MainActor
     func testInstalledModelBypassesDownloadDiskFeasibility() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mtplx-installed-feasibility-\(UUID().uuidString)", isDirectory: true)

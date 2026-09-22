@@ -12,7 +12,7 @@ from mtplx.app_settings import (
 )
 from mtplx.default_models import select_default_model
 from mtplx.model_catalog import (
-    DISK_MULTIPLIER,
+    DOWNLOAD_HEADROOM_GIB,
     INTEL_TIER,
     LEGACY_TIER,
     MEMORY_SAFETY_FACTOR,
@@ -269,7 +269,7 @@ def test_feasibility_verdicts_mirror_app_rules():
     )
     assert no_disk.verdict == "insufficient_disk"
     assert no_disk.needs_gib == pytest.approx(
-        speed.download_gib * DISK_MULTIPLIER
+        speed.download_gib + DOWNLOAD_HEADROOM_GIB
     )
 
     intel = evaluate_feasibility(
@@ -596,15 +596,7 @@ def test_readme_model_table_quotes_the_catalog_peak_memory():
     for row in _readme_model_rows():
         repo = f"Youssofal/{row.group('repo')}"
         stated = _README_PEAK.search(row.group("fits"))
-        if stated is None:
-            # Provisional packs link to the single figures record instead of
-            # duplicating a calculated peak in prose that can go stale.
-            assert repo in {
-                "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
-                "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
-            }
-            assert "[provisional catalog figures](mtplx/model_catalog.py)" in row.group("fits")
-            continue
+        assert stated is not None, f"README row for {repo} states no peak"
         assert abs(float(stated.group("peak")) - peaks[repo]) <= 0.05, (
             f"README peak for {repo} drifted from the catalog"
         )

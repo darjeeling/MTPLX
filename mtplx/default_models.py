@@ -183,13 +183,14 @@ _OPTIMIZED_35B_SPEED_LOCAL_CANDIDATES = (
     "~/Documents/MTPLX/models/Qwen3.6-35B-A3B-MTPLX-Official4-CyanKiwiMTP-CleanRecipe",
     "~/.mtplx/models/Youssofal--Qwen3.6-35B-A3B-MTPLX-Optimized-Speed",
 )
+# Flash-Next packs stay off this set and verified_default_refs(), although
+# Optimized Speed is the 256 GiB default: smaller Macs run them by choice, and
+# a listed ref is swapped for the machine's own default on the next start.
 _VERIFIED_DEFAULT_LOCAL_NAMES = frozenset(
     {
         Path(BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID).name,
         BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID.replace("/", "--"),
         BONSAI_LEGACY_LOCAL_NAME,
-        Path(FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID).name,
-        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID.replace("/", "--"),
         "Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Youssofal--Qwen3.8-27B-MTPLX-Optimized-Speed",
         "Qwen3.8-27B-MTPLX-Bare-Speed",
@@ -243,7 +244,7 @@ class DefaultModelSelection:
 
     @property
     def display_name(self) -> str:
-        for model_id in ("bonsai-2-27b-optimized-speed", "flash-next-optimized-quality"):
+        for model_id in ("bonsai-2-27b-optimized-speed", "flash-next-optimized-speed"):
             pack = catalog_model_with_id(model_id)
             if pack and self.hf_model == pack.hf_model_id:
                 return pack.display_name
@@ -891,7 +892,7 @@ def select_default_model(
     """Select the verified default model for this machine.
 
     Auto policy is intentionally simple and visible: M1/M2 -> FP16, modern
-    Macs from 256 GiB -> Flash-Next Optimized Quality; 32-255 GiB ->
+    Macs from 256 GiB -> Flash-Next Optimized Speed; 32-255 GiB ->
     Qwen 3.8 Optimized Speed (the complete local
     build when installed, otherwise the published Hub repo), under 32 GiB ->
     the smaller pack the app's picker lists first for that much memory (the
@@ -997,7 +998,7 @@ def select_default_model(
     if variant == "speed" and not legacy_speed_override and memory_gib is not None:
         candidate = recommended_models(memory_gib=memory_gib, chip_tier=MODERN_TIER)[0]
         explicit_speed = str(os.environ.get(QWEN38_OPTIMIZED_SPEED_MODEL_ENV) or "").strip()
-        if candidate.id == "flash-next-optimized-quality" and (not explicit_speed or _env_ref_disabled(explicit_speed)):
+        if candidate.id == "flash-next-optimized-speed" and (not explicit_speed or _env_ref_disabled(explicit_speed)):
             large_pack = candidate
     if large_pack is not None:
         model = catalog_model_ref(large_pack)
@@ -1064,9 +1065,7 @@ def verified_default_refs() -> set[str]:
     refs = {
         BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
         BONSAI_LEGACY_PUBLIC_MODEL_ID,
-        FLASH_NEXT_OPTIMIZED_QUALITY_PUBLIC_MODEL_ID,
         BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
-        FLASH_NEXT_OPTIMIZED_QUALITY_HF_MODEL_ID,
         DEFAULT_HF_MODEL_ID,
         DEFAULT_FP16_HF_MODEL_ID,
         DEFAULT_MODEL_ID,
