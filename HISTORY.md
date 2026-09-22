@@ -14,8 +14,8 @@ The speed records, each with its conditions. Every number was measured on a MacB
 
 | Date | Model | tok/s | Conditions | Source |
 |---|---|---|---|---|
-| 22 September 2026 | Qwen 3.8 Flash Next, Optimized Speed | 79.6 | Pre-release candidate def3894d; 65,502-token prompt, 512 tokens generated, native sampler, fans at maximum; 65.0 on 2.11.3 in this pair | [2.12.0 draft](docs/releases/v2.12.0.md) |
-| 22 September 2026 | Ternary Bonsai 2 27B, Optimized Speed | 50.0 / 42.6 | Pre-release candidate; 4K / 16K prompts, 512 tokens, MTP depth 1, temperature 1.0; plain decoding 38.8 / 34.3, dense 27B 49.8 / 49.4 | [2.12.0 draft](docs/releases/v2.12.0.md) |
+| 22 September 2026 | Qwen 3.8 Flash Next, Optimized Speed | 79.6 | 65,502-token prompt, 512 tokens generated, native sampler, thinking off, MTPLX 2.12.0; 65.0 on 2.11.3 in the same pair | [2.12.0 notes](https://mtplx.com/releases/2.12.0/) |
+| 22 September 2026 | Ternary Bonsai 2 27B, Optimized Speed | 50.0 and 42.6 | 4,061 and 16,350-token prompts, 512 tokens generated, MTP depth 1, native sampler, MTPLX 2.12.0; 38.8 and 34.3 with plain decoding | [2.12.0 notes](https://mtplx.com/releases/2.12.0/) |
 | 16 September 2026 | Qwen 3.8 Flash Next, Optimized Speed | 125.8 | one OpenCode request, 1,301 tokens generated, 18,539-token prompt with 18,364 tokens served from cache, MTP depth 3, MTPLX 2.11.3 | [2.11.3 notes](https://mtplx.com/releases/2.11.3/) |
 | 16 September 2026 | Qwen 3.8 Flash Next | 79.3 | 9k-token code prompt, 1,500 tokens generated, seeded sampler, thinking off, two alternating boots each; 62.5 on 2.11.2 | [2.11.3 notes](https://mtplx.com/releases/2.11.3/) |
 | 29 August 2026 | Qwen 3.8 27B, Optimized Speed | 87.6 | rewriting a file it just wrote, stock settings, MTPLX 2.10.0 | [2.10.0 notes](https://mtplx.com/releases/2.10.0/) |
@@ -52,7 +52,7 @@ The speed records, each with its conditions. Every number was measured on a MacB
 
 **17 September.** MTPLX 2.11.3. Eight exactness defects found in our own engine and fixed, each with a test that pins it. At temperature 1, top-p 0.95, top-k 20, a thousand four-token draws from the fast path match a thousand from the plain path within the plain path's own noise, on both Flash Next and the 27B Quality pack. A Flash Next OpenCode request decodes at 125.8 tok/s on an M5 Max, a 9k-token code prompt at 79.3 tok/s (62.5 on 2.11.2), a 109k-token OpenCode turn at 61.8 tok/s and a 200k-token turn at 50.3. 261,120-token prompts decode. [2.11.3 notes](https://mtplx.com/releases/2.11.3/).
 
-**22 September, release candidate.** MTPLX 2.12.0 brings the earlier unpublished 2.11.4 work forward: reasoning-leak and Gemma 4 stream fixes, image-position repairs, compiled image verification, session-cache and memory protection, and Bonsai 2 support. The saved Flash-Next pair measured 79.6 tok/s decode and 1,269 tok/s prompt processing at 65,502 tokens, against 65.0 and 902 on public 2.11.3. Bonsai used about half the dense 27B's memory, tied its decode at 4K and trailed it at 16K. Quality-pack construction, public model downloads, final image exactness, package/client QA and the frozen-candidate performance gates are tracked separately. This is a candidate record, not a publication claim. [2.12.0 draft](docs/releases/v2.12.0.md).
+**22 September.** MTPLX 2.12.0. Prism ML's Ternary Bonsai 2 27B runs with an MTP head on Macs from 16 GB, and Flash Next gets an 8-bit Optimized Quality build for Macs with 256 GB. Flash Next reads a 65,502-token prompt at 1,269 tok/s against 902 on 2.11.3, shows the first token after 51.9 s instead of 72.9 s, and decodes it at 79.6 tok/s against 65.0. Image requests take the compiled verifier on Flash Next and the 27B. [2.12.0 notes](https://mtplx.com/releases/2.12.0/).
 
 ## Used by
 
