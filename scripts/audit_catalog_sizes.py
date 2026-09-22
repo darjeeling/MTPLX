@@ -8,7 +8,7 @@ so this must run after every pack upload and both pins updated to match.
 
 Prints one line per catalog entry: OK or MISMATCH with the exact new value
 to pin. Exits 1 on a lookup error, missing size metadata, or any mismatch.
-The two new 2.11.4 repos can each be explicitly marked with
+The two new 2.12.0 repos can each be explicitly marked with
 ``--not-yet-published REPO`` until upload; all other failures remain errors.
 """
 

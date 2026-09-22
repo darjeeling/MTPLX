@@ -1,4 +1,10 @@
-# Flash-Next Optimized-Quality (2.11.4)
+# Flash-Next Optimized Quality (MTPLX 2.12.0)
+
+The published pack is
+[Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality](https://huggingface.co/Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality)
+(169,958,537,278 bytes in 57 files) and needs MTPLX 2.12.0 or later. When it
+serves, MTPLX streams the n-gram table from SSD on every Mac, so the weights
+need about 128.5 GiB. This page describes how the pack is built.
 
 From this checkout on an Apple Silicon Mac with **256 GB or more**, with
 MTPLX's dependencies, **MLX 0.32.2**, and the `hf` CLI already installed:
@@ -29,8 +35,9 @@ failed conversion choose a new output directory; the BF16 download is reused.
 
 ## Storage and memory
 
-Estimates are from the R1 tensor inventory, with the **Q4 table**, in decimal GB
-unless labelled GiB. They are planning numbers, not measured conversion peaks.
+Estimates come from the tensor inventory of the official BF16 checkpoint, with
+the **Q4 table**, in decimal GB unless labelled GiB. They are planning numbers,
+not measured conversion peaks.
 
 | Stage | Disk | RAM |
 |---|---|---|
@@ -38,15 +45,15 @@ unless labelled GiB. They are planning numbers, not measured conversion peaks.
 | Conversion | Source + about 170 GB output + 40 GB headroom = **570 GB free initially** (530.85 GiB) | Whole-body Q8 peak unmeasured. N-gram input shards are about 0.8 GB; body tensors are evaluated individually into nominal 4 GiB shards |
 | Existing source | **210 GB additional free** on the output filesystem | Same conversion uncertainty |
 | Header/checksum/sample audit | No second pack copy; metadata/logs only | Host row samples and streaming SHA-256; never materializes an expert bank or whole table |
-| Full-load verification and serve smoke | About 170 GB artifact, source retained | About 158.26 GiB resident weights; planning estimates at 128K: 166.22 GiB sparse / 178.97 GiB dense. Requires 256 GB machine for this pipeline |
+| Full-load verification and serve smoke | About 170 GB artifact, source retained | About 128.5 GiB of weights, with the n-gram table streamed from SSD. Requires a 256 GB machine for this pipeline |
 
 The 40 GB reserve is an explicit disk safety allowance, not a claimed scratch
 peak. Resumed downloads conservatively reserve the full 360 GB again at
 preflight. Free space is checked per device; shared APFS space is not summed.
 The script records the actual listener PID, sampled listener/process-tree RSS,
 available MLX peak counters, request JSON, responses, and runtime snapshots.
-The smoke opens a 128K context but sends **short** chat/tool/image requests;
-128K workload and real-client quality acceptance still require separate runs.
+The smoke opens a 128K context but sends **short** chat/tool/image requests.
+It does not test a 128K workload or a real client.
 
 The explicit smoke response budget is 2,048 tokens per request, with a
 1,800-second startup timeout and 600-second request timeout. Override using
@@ -83,7 +90,8 @@ tensor parity. Source SHA-256s identify local sources without Hub provenance.
 Streaming produces **`streaming-audited`**, no `verified_on`, no inherited
 speed evidence, and `full_load_verified=false`. It does not silently fall back
 from full-load verification. A 128 GB Mac cannot load this model even with its
-table streamed; staged construction on that tier is not yet memory-certified.
+table streamed, and building it on a 128 GB Mac has not been measured for
+memory.
 Move the exact artifact to a larger Mac, then explicitly promote it with:
 
 ```bash
@@ -92,9 +100,8 @@ mtplx forge verify /data/models/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality --sta
 
 The generated card reads the artifact's metadata, including all observed
 tensor classes, license/credits, source revision and verification mode. It
-states 256 GB resident-table guidance at 128K, 192 GB streamed-table guidance,
-and the 128 GB load exclusion. Q8 decode is expected to be more bandwidth
-limited than Speed; no performance number is claimed. `size-checksums.json`
+gives the memory guidance by Mac size, including why a 128 GB Mac cannot load
+the pack, and it makes no speed claim. `size-checksums.json`
 lists all final files except itself, with actual sizes and SHA-256s.
 
 ## Local validation and component parity
@@ -117,5 +124,4 @@ individually, not whole-layer recurrence/attention, full-head generation, or
 checkpoint quality. Output is JSON; missing Metal/import failure returns
 status `unavailable` and exit 2. `--dry-run` prints shapes without touching MLX.
 
-Full-pack construction, full-load verification, real-shape numerical parity,
-native-app/client QA and measured performance must be reported separately.
+These checks do not replace a full load of the real pack on a 256 GB Mac.
