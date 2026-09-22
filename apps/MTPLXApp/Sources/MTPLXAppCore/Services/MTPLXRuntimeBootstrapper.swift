@@ -239,6 +239,20 @@ public struct MTPLXRuntimeBootstrapper: Sendable {
     /// Exit-0 iff the venv's python can import the native stack. `-I`
     /// (isolated mode) ignores PYTHONPATH and user site-packages, so the
     /// probe sees exactly what the daemon's hermetic launch sees.
+    /// What a failed import check tells the user. MLX's macOS 26 wheels need
+    /// 26.2 or later, so on 26.0 and 26.1 the import fails however good the
+    /// network is.
+    static func importCheckFailureDetail(
+        os: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) -> String {
+        if os.majorVersion == 26 && os.minorVersion < 2 {
+            return "The engine needs macOS 26.2 or later; its MLX libraries do not load on "
+                + "macOS 26.\(os.minorVersion). Update macOS, then press Retry."
+        }
+        return "Bundled runtime installed, but the engine failed its import check "
+            + "(mlx native libraries). Check network access to PyPI, then press Retry."
+    }
+
     func runtimeImportProbeSucceeds(runtimeDir: URL) -> Bool {
         let venvPython = runtimeDir
             .appendingPathComponent("bin")
@@ -557,8 +571,7 @@ public struct MTPLXRuntimeBootstrapper: Sendable {
         // a daemon that dies before /health with no explanation.
         guard runtimeImportProbeSucceeds(runtimeDir: runtimeDir) else {
             throw MTPLXRuntimeBootstrapperError.runtimeStillMissing(
-                output: "Bundled runtime installed, but the engine failed its import check "
-                    + "(mlx native libraries). Check network access to PyPI, then press Retry."
+                output: Self.importCheckFailureDetail()
             )
         }
         Self.recordWheelFingerprint(for: wheel, runtimeDir: runtimeDir)

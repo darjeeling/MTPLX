@@ -653,7 +653,7 @@ public final class ChatViewModel: ObservableObject {
         // still stands at the last finished turn, and that session is
         // what lets the next message put the earlier turns' reasoning
         // back and restore their state. A fresh id after every Stop (the
-        // behavior until 2.11.4) reached the daemon as an unknown
+        // behavior before 2.12.0) reached the daemon as an unknown
         // conversation: the whole history was prefilled again (26,294
         // tokens, 24.5 s to the first token, 2026-09-20) and the old
         // session's state stayed in memory with nothing left to use it.
