@@ -210,9 +210,18 @@ fi
 # on older macOS or a different Python ABI rather than breaking installation.
 NATIVE_BUILD_VENV="$OUT_ROOT/native-build-venv"
 NATIVE_DIST="$OUT_ROOT/native-wheels"
+NATIVE_MLX_DIST="$OUT_ROOT/native-mlx-macos15-wheels"
 "$PBS_EXTRACT_DIR/bin/python3" -m venv "$NATIVE_BUILD_VENV"
 "$NATIVE_BUILD_VENV/bin/python" -m pip install \
-  build wheel setuptools 'cmake>=3.27' 'mlx==0.32.2' 'nanobind==2.15.0'
+  build wheel setuptools 'cmake>=3.27' 'nanobind==2.15.0'
+# pip otherwise selects the host's macOS 26 MLX library, whose minimum OS
+# is 26.2, even though the native wheel below is tagged for macOS 15.
+"$NATIVE_BUILD_VENV/bin/python" -m pip download \
+  --only-binary=:all: --platform macosx_15_0_arm64 \
+  --dest "$NATIVE_MLX_DIST" 'mlx==0.32.2'
+# Explicit wheel paths also replace a newer-platform copy in a reused venv.
+"$NATIVE_BUILD_VENV/bin/python" -m pip install --force-reinstall --no-deps \
+  "$NATIVE_MLX_DIST"/*-macosx_15_0_arm64.whl
 MACOSX_DEPLOYMENT_TARGET=15.0 "$NATIVE_BUILD_VENV/bin/python" -m build \
   --wheel --no-isolation "$ROOT/native_extensions/qsa_kernels" --outdir "$NATIVE_DIST"
 NATIVE_WHEELS=("$NATIVE_DIST"/mtplx_qsa_kernels-*.whl)
