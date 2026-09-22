@@ -32,6 +32,11 @@ KINDS: dict[str, str] = {
         "A Flash-Next sparse prefill chunk selected its blocks but no sparse "
         "consumer took them, so the dense mask was rebuilt."
     ),
+    "qsa_prefill_direct_retired": (
+        "The Steel sparse prefill kernel (the M1 to M4 lane) was retired for "
+        "this process: it was built against a different MLX or failed its "
+        "readiness proof, so Flash-Next prefill runs the pure-MLX path."
+    ),
     "qwen4_wide_prefill_chunk_refused": (
         "A Flash-Next prompt prefilled in 2,048-row chunks because the wider "
         "chunk did not fit under the memory line for that request."

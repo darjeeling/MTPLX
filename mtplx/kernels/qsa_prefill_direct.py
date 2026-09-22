@@ -23,7 +23,11 @@ Three properties make this module safe to have installed:
 * **Proven once, then trusted — and retired on failure.** ``abi_probe`` at
   import proves the nanobind type casters match the mlx wheel, and
   ``BUILT_AGAINST_MLX`` is compared against the imported mlx because this
-  primitive links MLX's private C++ ABI.  Symbol presence is not pipeline
+  primitive links MLX's private C++ ABI.  The version string cannot see a
+  build against a different platform wheel of the same MLX (the app builds
+  against the macOS 15 wheel and runs the macOS 26 one), so the readiness
+  proof also checks the numbers: one small random call against the pure-MLX
+  dense path this lane demotes to.  Symbol presence is not pipeline
   readiness, so the *first* dispatch is evaluated eagerly: a missing/stale
   metallib surfaces as a pipeline error at a known point rather than at an
   arbitrary later ``mx.eval``.  The proof is PER QUERY DTYPE, because the
@@ -34,8 +38,10 @@ Three properties make this module safe to have installed:
   evaluation of either dtype — disables the whole lane for the whole process,
   so ``qsa_prefill_direct_ready`` goes False, the M3 producer auto-gate
   disarms, and traffic routes to gather instead of re-hitting the same wall
-  on every request.  FAILED is terminal and lock-guarded: a proof that
-  succeeds after another has failed cannot reopen the lane.
+  on every request.  The retirement and its reason land on the demotion
+  ledger (``/health`` ``degradation.demotions``).  FAILED is terminal and
+  lock-guarded: a proof that succeeds after another has failed cannot
+  reopen the lane.
 
 The Topk ABI seam
 -----------------
@@ -72,6 +78,8 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from mtplx.demotions import note as _note_demotion
+
 logger = logging.getLogger(__name__)
 
 _BATCH = 1
@@ -90,6 +98,12 @@ _SUPPORTED_DTYPES = (mx.float16, mx.bfloat16)
 # instantiated in MTPLX's metallib.
 _KEY_TILE = 64
 _DIMENSION_TILE = 64
+
+# Max abs error the readiness proof accepts against the pure-MLX reference:
+# the oMLX long-prefix bound tests/test_qsa_prefill_direct_numeric.py pins.
+_PROOF_MAX_ERROR = 5e-3
+
+_DEMOTION_KIND = "qsa_prefill_direct_retired"
 
 __all__ = [
     "qsa_prefill_direct",
@@ -224,7 +238,7 @@ def _dtype_proven(dtype: mx.Dtype) -> bool:
     return _dtype_key(dtype) in _PIPELINE_PROVEN_DTYPES
 
 
-def _record_pipeline_failure() -> None:
+def _record_pipeline_failure(reason: str) -> None:
     """Retire the lane for the process.  FAILED is terminal."""
 
     global _PIPELINE_STATE, _PIPELINE_PROVEN_DTYPES
@@ -234,6 +248,7 @@ def _record_pipeline_failure() -> None:
     # a stale PROVEN dtype would otherwise let a later dispatch skip its own
     # proof.
     _PIPELINE_PROVEN_DTYPES = frozenset()
+    _note_demotion(_DEMOTION_KIND, reason)
 
 
 def _record_pipeline_success(dtype: mx.Dtype) -> None:
@@ -348,6 +363,7 @@ def _lane_unavailable_reason() -> str | None:
     if mismatch is not None:
         if not _RECEIPT_WARNED:
             _RECEIPT_WARNED = True
+            _note_demotion(_DEMOTION_KIND, mismatch)
             logger.warning(
                 "%s: %s; the direct prefill lane is disabled — rebuild the "
                 "extension in the venv that serves (see "
@@ -683,6 +699,36 @@ def qsa_prefill_direct(
     function dispatches, later Metal failures propagate to the caller.
     """
 
+    out = _dispatch(
+        queries,
+        keys,
+        values,
+        block_ids,
+        block_valid,
+        pos_start=pos_start,
+        total_tokens=total_tokens,
+        scale=scale,
+        compress_ratio=compress_ratio,
+        block_topk=block_topk,
+    )
+    return _prove_first_dispatch(out, dtype=queries.dtype)
+
+
+def _dispatch(
+    queries: mx.array,
+    keys: mx.array,
+    values: mx.array,
+    block_ids: mx.array,
+    block_valid: mx.array,
+    *,
+    pos_start: int,
+    total_tokens: int,
+    scale: float,
+    compress_ratio: int = _COMPRESS_RATIO,
+    block_topk: int = _TOP_K_BLOCKS,
+) -> mx.array:
+    """The contract check and the lazy native call, with no proof."""
+
     reason = qsa_prefill_direct_unsupported_reason(
         queries,
         keys,
@@ -704,7 +750,7 @@ def qsa_prefill_direct(
         pos_start=int(pos_start),
         compress_ratio=int(compress_ratio),
     )
-    out = _EXT.qwen4_qsa_sparse_gqa_attention(
+    return _EXT.qwen4_qsa_sparse_gqa_attention(
         queries,
         keys,
         values,
@@ -714,7 +760,6 @@ def qsa_prefill_direct(
         key_tile=_KEY_TILE,
         dimension_tile=_DIMENSION_TILE,
     )
-    return _prove_first_dispatch(out, dtype=queries.dtype)
 
 
 def _prove_first_dispatch(out: mx.array, *, dtype: mx.Dtype) -> mx.array:
@@ -741,8 +786,10 @@ def _prove_first_dispatch(out: mx.array, *, dtype: mx.Dtype) -> mx.array:
             return out
         try:
             mx.eval(out)
-        except Exception:
-            _record_pipeline_failure()
+        except Exception as exc:
+            _record_pipeline_failure(
+                f"{_dtype_key(dtype)} first evaluation failed: {exc}"
+            )
             logger.warning(
                 "%s: the QSA direct kernel failed its first %s evaluation; "
                 "the lane is disabled for this process.",
@@ -814,16 +861,25 @@ def _prove_pipeline_locked(dtype: mx.Dtype) -> bool:
     # production gate requires (total // 4 > 512).
     total = 2056
     pos_start = total - rows
-    queries = mx.zeros((_BATCH, _Q_HEADS, rows, _HEAD_DIM), dtype=dtype)
-    keys = mx.zeros((_BATCH, _KV_HEADS, total, _HEAD_DIM), dtype=dtype)
-    values = mx.zeros((_BATCH, _KV_HEADS, total, _HEAD_DIM), dtype=dtype)
-    ids = mx.broadcast_to(
-        mx.arange(_TOP_K_BLOCKS, dtype=mx.int32)[None, :], (rows, _TOP_K_BLOCKS)
+    # Random inputs: all-zero ones give zero attention whatever the kernel
+    # computes, so they prove the dispatch and not the numbers.
+    queries = mx.random.normal(
+        (_BATCH, _Q_HEADS, rows, _HEAD_DIM), key=mx.random.key(1)
+    ).astype(dtype)
+    keys = mx.random.normal(
+        (_BATCH, _KV_HEADS, total, _HEAD_DIM), key=mx.random.key(2)
+    ).astype(dtype)
+    values = mx.random.normal(
+        (_BATCH, _KV_HEADS, total, _HEAD_DIM), key=mx.random.key(3)
+    ).astype(dtype)
+    # Each row selects its newest 512 complete blocks, as the selectors do.
+    complete = (mx.arange(pos_start, total, dtype=mx.int32) + 1) // _COMPRESS_RATIO
+    block_ids = (
+        complete[:, None] - _TOP_K_BLOCKS + mx.arange(_TOP_K_BLOCKS, dtype=mx.int32)
     )
-    block_ids = mx.contiguous(ids)
     block_valid = mx.ones((rows, _TOP_K_BLOCKS), dtype=mx.bool_)
     try:
-        out = qsa_prefill_direct(
+        out = _dispatch(
             queries,
             keys,
             values,
@@ -833,9 +889,19 @@ def _prove_pipeline_locked(dtype: mx.Dtype) -> bool:
             total_tokens=total,
             scale=_EXPECTED_SCALE,
         )
-        mx.eval(out)
+        reference = _reference_attention(
+            queries, keys, values, block_ids, block_valid, pos_start=pos_start
+        )
+        error = float(
+            mx.max(mx.abs(out.astype(mx.float32) - reference)).item()
+        )
+        if not error <= _PROOF_MAX_ERROR:
+            raise ValueError(
+                f"max error {error:.3g} against the pure-MLX reference "
+                f"(bound {_PROOF_MAX_ERROR:g})"
+            )
     except Exception as exc:
-        _record_pipeline_failure()
+        _record_pipeline_failure(f"{_dtype_key(dtype)} readiness proof failed: {exc}")
         logger.warning(
             "%s: QSA direct-kernel %s preflight failed; the lane is disabled "
             "for this process: %s",
@@ -846,3 +912,32 @@ def _prove_pipeline_locked(dtype: mx.Dtype) -> bool:
         return False
     _record_pipeline_success(dtype)
     return True
+
+
+def _reference_attention(
+    queries: mx.array,
+    keys: mx.array,
+    values: mx.array,
+    block_ids: mx.array,
+    block_valid: mx.array,
+    *,
+    pos_start: int,
+) -> mx.array:
+    """The pure-MLX dense path this lane demotes to, in float32."""
+
+    from mtplx.models.qwen4_exp import _qsa_blocks_to_dense_mask
+
+    mask = _qsa_blocks_to_dense_mask(
+        block_ids,
+        block_valid,
+        pos_start=pos_start,
+        total_tokens=int(keys.shape[2]),
+        compress_ratio=_COMPRESS_RATIO,
+    )
+    return mx.fast.scaled_dot_product_attention(
+        queries.astype(mx.float32),
+        keys.astype(mx.float32),
+        values.astype(mx.float32),
+        scale=_EXPECTED_SCALE,
+        mask=mask,
+    )

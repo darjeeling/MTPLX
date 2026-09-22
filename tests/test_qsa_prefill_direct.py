@@ -18,6 +18,7 @@ import mlx.core as mx
 import pytest
 
 import mtplx.kernels.qsa_prefill_direct as direct
+from mtplx import demotions
 
 _ROWS = 8
 _TOTAL = 2056  # 2056 // 4 == 514 > 512: past the dense/sparse boundary
@@ -54,9 +55,18 @@ class _FakeExt:
                 key_tile=key_tile,
                 dimension_tile=dimension_tile,
                 k_len=int(k.shape[2]),
+                q_all_zero=bool(mx.all(q == 0).item()),
             )
         )
-        return mx.zeros(tuple(q.shape), dtype=q.dtype)
+        # A healthy kernel: the dense reference over the selection the native
+        # ABI carries (the first min(512, complete blocks) slots are valid).
+        rows = int(q.shape[2])
+        complete = (mx.arange(q_offset, q_offset + rows, dtype=mx.int32) + 1) // 4
+        valid = mx.arange(512, dtype=mx.int32)[None, :] < mx.minimum(complete, 512)[:, None]
+        ids = selected[0, 0].astype(mx.int32)
+        return direct._reference_attention(
+            q, k, v, ids, valid, pos_start=q_offset
+        ).astype(q.dtype)
 
 
 def _inputs(dtype=mx.bfloat16, *, rows=_ROWS, total=_TOTAL):
@@ -91,6 +101,13 @@ def _kwargs(**overrides):
     )
     base.update(overrides)
     return base
+
+
+@pytest.fixture(autouse=True)
+def _clean_ledger():
+    demotions.reset()
+    yield
+    demotions.reset()
 
 
 @pytest.fixture()
@@ -726,6 +743,47 @@ def test_mismatched_mlx_build_receipt_disables_the_lane(ext, monkeypatch, caplog
     info = direct.qsa_prefill_direct_build_info()
     assert info["built_against_mlx"] == "0.31.0"
     assert info["imported_mlx"] == mx.__version__
+
+
+def test_mismatched_receipt_retirement_lands_on_the_demotion_ledger(ext, monkeypatch):
+    monkeypatch.setattr(ext, "BUILT_AGAINST_MLX", "0.31.0", raising=False)
+    monkeypatch.setattr(direct, "_RECEIPT_WARNED", False)
+
+    assert direct.qsa_prefill_direct_ready() is False
+    assert direct.qsa_prefill_direct_ready() is False
+
+    snap = demotions.snapshot()
+    assert snap["counts"]["qsa_prefill_direct_retired"] == 1
+    assert "0.31.0" in snap["reasons"]["qsa_prefill_direct_retired"]
+
+
+def test_readiness_proof_checks_numbers_not_only_dispatch(ext, monkeypatch):
+    """A build linked against a different libmlx can dispatch and still
+    compute wrong numbers; the proof runs random inputs against the pure-MLX
+    reference and retires the lane when they disagree."""
+
+    healthy = ext.qwen4_qsa_sparse_gqa_attention
+
+    def _wrong(q, k, v, selected, scale, q_offset, key_tile=64, dimension_tile=64):
+        healthy(q, k, v, selected, scale, q_offset, key_tile, dimension_tile)
+        return mx.zeros(tuple(q.shape), dtype=q.dtype)
+
+    monkeypatch.setattr(ext, "qwen4_qsa_sparse_gqa_attention", _wrong)
+
+    assert direct.qsa_prefill_direct_ready() is False
+    assert direct._PIPELINE_STATE == direct._PIPELINE_FAILED
+    assert ext.calls and not ext.calls[0]["q_all_zero"], "the proof must use real inputs"
+    q, k, v, ids, valid = _inputs()
+    assert direct.qsa_prefill_direct_supported(q, k, v, ids, valid, **_kwargs()) is False
+    snap = demotions.snapshot()
+    assert snap["counts"]["qsa_prefill_direct_retired"] == 1
+    assert "max error" in snap["reasons"]["qsa_prefill_direct_retired"]
+
+
+def test_a_healthy_kernel_passes_the_numeric_proof(ext):
+    assert direct.qsa_prefill_direct_ready() is True
+    assert all(not call["q_all_zero"] for call in ext.calls)
+    assert demotions.counts()["qsa_prefill_direct_retired"] == 0
 
 
 def test_missing_build_receipt_is_refused(ext, monkeypatch):
