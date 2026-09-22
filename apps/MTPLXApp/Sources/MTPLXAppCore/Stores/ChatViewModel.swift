@@ -219,12 +219,6 @@ public final class ChatViewModel: ObservableObject {
     /// what the header chip shows after a turn finishes, surviving a
     /// switch away and back.
     private var heldDecodeReadings: [UUID: HeadlineDecodeReading] = [:]
-    /// Per-conversation server session id override. Normally the session
-    /// id is the stable `conversation.id` (so SessionBank warm-prefix
-    /// reuse works across turns); after a cancel we rotate it to a fresh
-    /// UUID so the daemon can't resume the cancelled prompt's committed
-    /// prefix into the next turn.
-    private var sessionOverrides: [UUID: UUID] = [:]
     private var streamFlushTask: Task<Void, Never>?
     private var streamDisplayLink: CADisplayLink?
     private let streamDisplayLinkTarget = StreamFlushLinkTarget()
@@ -654,21 +648,20 @@ public final class ChatViewModel: ObservableObject {
         // Wait for the stream task to actually stop before finalizing,
         // so a new send() can't race a still-draining cancelled task.
         await task?.value
-        // Rotate the server session so the cancelled prompt's committed
-        // prefix can't be resumed into the next message.
-        sessionOverrides[stream.conversationID] = UUID()
+        // The conversation keeps its server session across a Stop. The
+        // daemon never commits a cancelled generation, so its session
+        // still stands at the last finished turn, and that session is
+        // what lets the next message put the earlier turns' reasoning
+        // back and restore their state. A fresh id after every Stop (the
+        // behavior until 2.11.4) reached the daemon as an unknown
+        // conversation: the whole history was prefilled again (26,294
+        // tokens, 24.5 s to the first token, 2026-09-20) and the old
+        // session's state stayed in memory with nothing left to use it.
         if persistPartial {
             finalizePartialAssistantTurn(of: stream, reason: "cancelled")
         } else {
             finalizeTurnUI(of: stream)
         }
-    }
-
-    /// Server session id for a conversation. Stable (== conversation.id)
-    /// across normal turns so warm-prefix reuse works; rotated after a
-    /// cancel so the daemon starts a clean session for the next turn.
-    private func liveSessionId(for conversation: ChatConversation) -> UUID {
-        sessionOverrides[conversation.id] ?? conversation.id
     }
 
     // MARK: - Streaming
@@ -693,7 +686,9 @@ public final class ChatViewModel: ObservableObject {
             from: visibleMessages,
             overrideLastUserContent: fullUserContent
         )
-        let sessionId = liveSessionId(for: conversation)
+        // One conversation is one daemon session for its whole life,
+        // across Stop and across app restarts (see cancelTurn).
+        let sessionId = conversation.id
         let useTools = conversation.webSearchEnabled
         let tools = useTools ? toolFactory.toolDefinitions() : nil
         let toolChoice: String? = useTools ? "auto" : nil
