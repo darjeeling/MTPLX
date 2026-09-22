@@ -191,8 +191,7 @@ def _cold(model, prompt, *, layers, monkeypatch):
 
 @pytest.mark.parametrize("inforward", [False, True])
 def test_the_real_cold_loop_is_bit_identical_with_and_without_it(tiny, monkeypatch, inforward):
-    if inforward:
-        monkeypatch.setenv("MTPLX_GDN_BOUNDARY_INFORWARD", "1")
+    monkeypatch.setenv("MTPLX_GDN_BOUNDARY_INFORWARD", "1" if inforward else "0")
     prompt = _prompt(131)
     ref_rt, ref_cache, ref_logits, ref_hidden, ref_sink = _cold(
         tiny, prompt, layers=0, monkeypatch=monkeypatch

@@ -2141,7 +2141,7 @@ def _dense_decode_max_context() -> int:
         # value the loader derived from the served model's config.json
         # (runtime.load exports it; Flash-Next is 24,576), else 65536, the
         # Qwen3.8-27B truth (16 full-attn layers x K+V x 4 kv heads x D256
-        # x bf16). Before 2.11.4 nothing set the env, so every model was
+        # x bf16). Before 2.12.0 nothing set the env, so every model was
         # budgeted with the 27B's geometry.
         operator_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN", 0)
         derived_bytes = _env_int("MTPLX_DENSE_KV_BYTES_PER_TOKEN_DERIVED", 0)
@@ -5049,21 +5049,24 @@ def _prefill_spans_with_tail_grid(
 
 
 def _gdn_boundary_inforward_enabled() -> bool:
-    """``MTPLX_GDN_BOUNDARY_INFORWARD=1``: record tail boundaries INSIDE the
-    last wide forward instead of ending a forward at each of them.
+    """Record tail boundaries INSIDE the last wide forward instead of ending a
+    forward at each of them.  On by default; ``MTPLX_GDN_BOUNDARY_INFORWARD=0``
+    restores the ladder.
 
-    Opt-in.  On Flash-Next every forward of 64 rows or more reads nearly all
-    512 experts of every layer once, about 0.1 s whatever its width (M5 Max,
+    On Flash-Next every forward of 64 rows or more reads nearly all 512
+    experts of every layer once, about 0.1 s whatever its width (M5 Max,
     2026-09-18: 64 rows 0.17 to 0.26 s, 1,024 rows 0.69 to 1.28 s), and the
     tail ladder puts two of them behind every cold prompt and one behind every
-    warm agent turn.  The boundary POSITIONS are the ladder's, so restores,
+    warm agent turn.  Through the daemon (M5 Max, 2026-09-22, off/on/on/off)
+    a cold 4,061-token prompt prefills in 2.79 to 2.81 s against 3.06 to
+    3.10 s.  The boundary POSITIONS are the ladder's, so restores,
     retention and the bank see the same records; what changes is the chunk
     layout of the last chunk, which is the rounding class every chunk-layout
     change is in (the recurrent state at p now comes from the wide forward's
     own arithmetic, exactly as the KV rows before p do).
     """
 
-    return _env_truthy("MTPLX_GDN_BOUNDARY_INFORWARD")
+    return not _env_falsey("MTPLX_GDN_BOUNDARY_INFORWARD")
 
 
 def _resolve_inforward_boundary_hooks(rt: Any, *, vision_splice: Any = None):

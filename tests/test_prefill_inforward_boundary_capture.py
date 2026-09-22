@@ -2,8 +2,8 @@
 
 The tail ladder ends a forward at every boundary it wants, and on Flash-Next a
 forward costs about 0.1 s whatever its width (one pass over the routed
-experts).  ``MTPLX_GDN_BOUNDARY_INFORWARD=1`` keeps the plain chunk grid and
-asks the model to record the recurrent state at the ladder's positions inside
+experts).  The in-forward boundary (on by default, ``MTPLX_GDN_BOUNDARY_INFORWARD=0``
+restores the ladder) keeps the plain chunk grid and asks the model to record the recurrent state at the ladder's positions inside
 the forwards that contain them.
 
 What these tests pin, on the tiny Flash-Next model and the real prefill loops:
@@ -265,10 +265,7 @@ def _prompt(tokens: int, seed: int = 7) -> list[int]:
 
 
 def _cold(model, prompt, *, sink, inforward, monkeypatch, stable_prefix_len=None):
-    if inforward:
-        monkeypatch.setenv(SWITCH, "1")
-    else:
-        monkeypatch.delenv(SWITCH, raising=False)
+    monkeypatch.setenv(SWITCH, "1" if inforward else "0")
     rt = _TinyRuntime(model)
     out = _prefill_committed_mtp_history_streaming(
         rt, list(prompt), gdn_boundary_sink=sink, stable_prefix_len=stable_prefix_len
@@ -599,7 +596,12 @@ def test_an_image_request_keeps_the_ladder(tiny, monkeypatch):
     )
 
 
-def test_the_switch_is_off_by_default(tiny):
+def test_the_switch_is_on_by_default(tiny):
+    assert generation._resolve_inforward_boundary_hooks(_TinyRuntime(tiny)) is not None
+
+
+def test_zero_restores_the_ladder(tiny, monkeypatch):
+    monkeypatch.setenv(SWITCH, "0")
     assert generation._resolve_inforward_boundary_hooks(_TinyRuntime(tiny)) is None
 
 
@@ -639,7 +641,7 @@ def _warm(model, prompt, cached, *, inforward, capture, monkeypatch):
 
     from types import SimpleNamespace
 
-    monkeypatch.delenv(SWITCH, raising=False)
+    monkeypatch.setenv(SWITCH, "0")
     monkeypatch.setenv("MTPLX_SMALL_SUFFIX_FUSED_MAX", "0")
     rt = _TinyRuntime(model)
     cache = rt.make_cache()
