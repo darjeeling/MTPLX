@@ -27443,6 +27443,11 @@ class _ThinkingContentStreamSplitter:
         # eat the rest of the turn (2.7.1 known issue).
         self._orphan_span_buffer = ""
         self._orphan_span_search_from = 0
+        # The closer the open span waits for. A `<tool_call>` span wraps a
+        # `<function=...>...</function>` body, so closing on the first closer
+        # of either kind ended the span at `</function>` and streamed the
+        # block's own `</tool_call>` to the user as visible text.
+        self._orphan_span_closer: str | None = None
         # Code-fence exemption state: content inside ``` fences streams
         # through unfiltered, mirroring _strip_orphan_tool_markup.
         self._orphan_fence_open = False
@@ -27639,14 +27644,23 @@ class _ThinkingContentStreamSplitter:
         """
         self._orphan_span_buffer += s
         lower = self._orphan_span_buffer.lower()
+        # Only the closer that matches the opener ends the span: a
+        # `<tool_call>` span runs through `</tool_call>` even though the
+        # `</function>` of its body arrives first (the non-stream
+        # _ORPHAN_TOOL_MARKUP_RE contract).
+        closers = (
+            (self._orphan_span_closer,)
+            if self._orphan_span_closer
+            else self._ORPHAN_CLOSERS
+        )
         close_at = -1
         close_len = 0
-        for closer in self._ORPHAN_CLOSERS:
+        for closer in closers:
             at = lower.find(closer, self._orphan_span_search_from)
             if at >= 0 and (close_at < 0 or at < close_at):
                 close_at, close_len = at, len(closer)
         if close_at < 0:
-            max_closer = max(len(closer) for closer in self._ORPHAN_CLOSERS)
+            max_closer = max(len(closer) for closer in closers)
             self._orphan_span_search_from = max(
                 0, len(self._orphan_span_buffer) - (max_closer - 1)
             )
@@ -27657,6 +27671,7 @@ class _ThinkingContentStreamSplitter:
         self._orphan_span_buffer = ""
         self._orphan_span_search_from = 0
         self._orphan_in_span = False
+        self._orphan_span_closer = None
         return remainder
 
     def _filter_orphan_tool_markup(self, text: str) -> str:
@@ -27691,10 +27706,12 @@ class _ThinkingContentStreamSplitter:
             fence_at = s.find(self._ORPHAN_FENCE)
             lower = s.lower()
             open_at = -1
-            for opener in self._ORPHAN_OPENERS:
+            open_closer: str | None = None
+            for opener, closer in zip(self._ORPHAN_OPENERS, self._ORPHAN_CLOSERS):
                 at = lower.find(opener)
                 if at >= 0 and (open_at < 0 or at < open_at):
                     open_at = at
+                    open_closer = closer
             if fence_at >= 0 and (open_at < 0 or fence_at < open_at):
                 out.append(s[: fence_at + len(self._ORPHAN_FENCE)])
                 self._orphan_fence_open = True
@@ -27705,6 +27722,7 @@ class _ThinkingContentStreamSplitter:
                 self._orphan_in_span = True
                 self._orphan_span_buffer = ""
                 self._orphan_span_search_from = 0
+                self._orphan_span_closer = open_closer
                 s = s[open_at:]
                 continue
             hold = self._marker_tail_hold(
@@ -27729,6 +27747,7 @@ class _ThinkingContentStreamSplitter:
             self._orphan_span_buffer = ""
             self._orphan_span_search_from = 0
             self._orphan_in_span = False
+            self._orphan_span_closer = None
             salvaged = _sanitize_orphan_span_interior(buffered)
             self.suppressed_tool_markup_chars += len(buffered) - len(salvaged)
             return salvaged
