@@ -97,7 +97,7 @@ def qsa_indexer_select_nax_available() -> bool:
     This is the ROUTE gate (the sparse prefill producer and flash consumer,
     the MPP score kernel, the float32 selector): it honors the rehearsal
     switch ``MTPLX_FORCE_GPU_FAMILY_FALLBACK=1`` per call, so an M5 can run
-    the exact Flash-Next prefill path an M1 to M4 gets. Before 2.11.4 only
+    the exact Flash-Next prefill path an M1 to M4 gets. Before 2.12.0 only
     the 27B verify lanes honored the switch.
     """
 

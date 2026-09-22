@@ -2922,7 +2922,7 @@ def _machine_fit_for_default_window(fit_plan: Any) -> int:
     """The machine fit that shapes the DEFAULT serving window (0 = no clamp).
 
     A plan that says "model does not fit" carries the floor window as its
-    fit. Passing 0 there (the pre-2.11.4 behavior) meant "no clamp", so the
+    fit. Passing 0 there (the pre-2.12.0 behavior) meant "no clamp", so the
     worse the fit, the larger the window: the 27B on a 16 or 24 GB Mac and
     Flash-Next on 96 GB were served the full 262,144-token model maximum
     under a MODEL DOES NOT FIT banner. The floor is the honest default; an
@@ -33847,7 +33847,7 @@ def create_app(state: ServerState) -> FastAPI:
                     # to the established tool-parse fallback machinery
                     # (orphan/unclosed_tool_call), not this repair. Markup
                     # the model only QUOTES in its thinking is not an
-                    # attempt: until 2.11.4 any tool tag in the raw text
+                    # attempt: before 2.12.0 any tool tag in the raw text
                     # stood this repair down, so a turn that quoted
                     # "</parameter>" from a pasted traceback and then hit
                     # end-of-turn inside thinking reached the client empty.
