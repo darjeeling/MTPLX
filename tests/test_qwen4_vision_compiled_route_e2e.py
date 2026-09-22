@@ -339,6 +339,38 @@ def test_parity2_counts_a_round_it_has_no_reference_for(pack, monkeypatch):
     assert record["logits_max_abs_diff"] == 0.0 and record["state_max_abs_diff"] == 0.0
 
 
+def test_an_image_request_outgrows_its_first_grant_and_stays_exact(pack, monkeypatch):
+    """A capacity transition rebuilds the shadow twins and picks the trace again.
+
+    The delta lives on the real bank entries and the key carries the delta
+    flag, so the grown bank must replay the image trace at the same origin.
+    A grant of eight tokens makes a 40-token request cross several of them
+    (the product's first grant is 1,024 tokens).
+    """
+
+    monkeypatch.setenv("MTPLX_COMPILED_VERIFY_GROWTH_RESERVE", "8")
+    ids, table, delta = _image_prompt(18)
+    eager = _generate(pack, monkeypatch, mode="0", ids=ids, table=table, delta=delta)
+    compiled = _generate(pack, monkeypatch, mode="1", ids=ids, table=table, delta=delta)
+    assert compiled.tokens == eager.tokens
+    bank = _bank_report(compiled)
+    assert bank["fixed_m4_capacity_transitions"] >= 2
+    assert bank["fixed_m4"]["rope_delta_input"] is True
+    assert bank["fixed_m4"]["rope_delta"] == delta
+    assert bank["fallback_calls"] == 0
+    assert all(key.endswith(":rope_delta") for key in bank["compiled_keys"])
+
+    checked = _generate(
+        pack, monkeypatch, mode="parity2", ids=ids, table=table, delta=delta
+    )
+    assert checked.tokens == compiled.tokens
+    checked_bank = _bank_report(checked)
+    record = checked_bank["fixed_m4_parity2"]
+    assert checked_bank["fixed_m4_capacity_transitions"] >= 2
+    assert record["rounds"] == checked_bank["calls"] >= 8
+    assert record["divergent_rounds"] == 0 and record["state_max_abs_diff"] == 0.0
+
+
 def test_the_refused_shape_stays_eager_and_says_why(pack, monkeypatch):
     ids, table, delta = _image_prompt(1)  # 23 tokens: the last block starts at 20
     assert max(i for i, token in enumerate(ids) if token == PAD) == 21

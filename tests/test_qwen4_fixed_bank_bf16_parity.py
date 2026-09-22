@@ -297,6 +297,67 @@ def test_image_request_copy_block_widths_complete_several_blocks_at_once(vision_
     assert _same(bank.pooled[:, :valid], stock.pooled[:, :valid])
 
 
+@pytest.mark.parametrize("tokens", [44, 47])  # n % 4 of 0 and 3
+def test_two_images_the_bank_carries_the_delta_of_the_whole_prompt(vision_attn, tokens):
+    """Between two images the positions run at the first image's offset; past
+    the last one they run at the sum. Decode only ever sees the sum, so one
+    delta on the bank is still the eager route bit for bit."""
+
+    import mtplx.generation as generation
+
+    attn = vision_attn
+    small = 4  # a (1, 4, 4) grid: 2 x 2 rows, 2 positions
+    tail = 9
+    head = tokens - IMAGE_TOKENS - 3 - small - tail
+    ids = [1] * head + [PAD] * IMAGE_TOKENS + [3] * 3 + [PAD] * small + [2] * tail
+    built = build_mrope_positions(
+        ids,
+        image_token_id=PAD,
+        image_grids=[(1, 8, 8), (1, 4, 4)],
+        spatial_merge_size=2,
+    )
+    table, delta = mx.array(built[0]), int(built[1])
+    assert delta == (4 - IMAGE_TOKENS) + (2 - small) == -14
+    verdict = generation._qwen4_vision_compiled_verify_admission(
+        SimpleNamespace(
+            model=SimpleNamespace(args=SimpleNamespace(indexer_compress_ratio=RATIO))
+        ),
+        SimpleNamespace(
+            image_pad_token_id=PAD,
+            mrope_table=table,
+            mrope_delta=delta,
+            dense_mrope=None,
+            pad_counts=(IMAGE_TOKENS, small),
+        ),
+        ids,
+    )
+    assert verdict == {
+        "positions": "vision_delta",
+        "rope_delta": -14,
+        "images": 2,
+        "refusal": None,
+    }
+
+    x_pre = _hidden(tokens, 40)
+    stock = QSACache(compress_ratio=RATIO)
+    fixed = [QSACache(compress_ratio=RATIO)]
+    with vision_rope(table, delta):
+        attn(x_pre, stock)
+        attn(x_pre, fixed[0])
+    bank = _promote(attn, fixed)
+    bank.rope_delta = delta
+    for i, n in enumerate(STEPS):
+        x = _hidden(n, 50 + i)
+        with vision_rope(table, delta):
+            golden = attn(x, stock)
+        assert _same(attn(x, bank), golden), (tokens, i)
+    end = bank.size()
+    assert _same(bank.kv.keys[:, :, :end], stock.kv.keys[:, :, :end])
+    valid = end // RATIO
+    assert stock.pooled_len == valid
+    assert _same(bank.pooled[:, :valid], stock.pooled[:, :valid])
+
+
 def test_image_request_a_rejected_window_leaves_no_trace(vision_attn):
     attn = vision_attn
     _ids, table, delta, stock, bank = _prefilled(attn, 43, tail=11, seed=4)
