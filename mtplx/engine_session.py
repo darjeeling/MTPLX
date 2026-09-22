@@ -672,6 +672,40 @@ def _marathon_postcommit_wait_s() -> float:
     return value
 
 
+_DEFAULT_CANCELLED_HOLDER_HANDOFF_WAIT_S = 30.0
+_CANCELLED_HOLDER_HANDOFF_POLL_S = 0.02
+
+
+def _cancelled_holder_handoff_wait_s() -> float:
+    """MTPLX_SESSION_CANCEL_HANDOFF_WAIT_S: how long a request for an
+    explicitly named session waits for a generation that has ALREADY been
+    cancelled to let go of that session. Default 30 s; ``0`` restores the
+    immediate "already in flight" refusal.
+
+    Stop, then send again, is one client talking to one conversation: the
+    engine notices the cancel at its next decode round or prefill chunk
+    boundary, so for that long the old generation still holds the session
+    and a follow-up under the same id was refused. The native app used to
+    sidestep the question by giving the conversation a new session id after
+    every Stop, and a new id is a session with no committed stream and no
+    restore (2026-09-20: a 26,294 token prompt prefilled again, 24.5 s to
+    the first token). It now keeps the conversation's id, so the follow-up
+    can arrive inside that window and must be handed the session instead of
+    an error. The bound is one prefill chunk at long context with margin; a
+    holder that has not been cancelled is never waited for.
+    """
+    raw = os.environ.get("MTPLX_SESSION_CANCEL_HANDOFF_WAIT_S")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_CANCELLED_HOLDER_HANDOFF_WAIT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_CANCELLED_HOLDER_HANDOFF_WAIT_S
+    if not math.isfinite(value):
+        return _DEFAULT_CANCELLED_HOLDER_HANDOFF_WAIT_S
+    return max(0.0, value)
+
+
 _DEFAULT_POSTCOMMIT_WAIT_STALL_S = 15.0
 _DEFAULT_POSTCOMMIT_WAIT_CEILING_S = 600.0
 
@@ -935,6 +969,14 @@ class EngineSession:
         self.bytes_estimate = 0
         self.revision = 0
         self._lock = Lock()
+        # The cancel signal of the generation that holds ``_lock`` (or held
+        # it last). Written only by the thread that has just taken the lock
+        # and never cleared on release, so a waiter that failed to take the
+        # lock always reads the signal of a holder that exists. See
+        # ``wait_for_cancelled_holder``.
+        self._holder_cancel_event: Any | None = None
+        # Last handoff from a cancelled generation, for the admin view.
+        self.last_cancel_handoff: dict[str, Any] | None = None
         # Reference to the most recent postcommit work scheduled for this
         # session. The next request in this session waits briefly on this
         # before acquiring the session lock so the SessionBank entry is
@@ -1399,13 +1441,88 @@ class EngineSession:
         record.mark_finished(outcome)
         return outcome
 
-    def try_begin_generation(self) -> bool:
-        if not self._lock.acquire(blocking=False):
+    def try_begin_generation(
+        self,
+        *,
+        cancel_event: Any | None = None,
+        timeout_s: float = 0.0,
+    ) -> bool:
+        """Take the session's generation slot, or report it busy.
+
+        ``cancel_event`` is the caller's own cancel signal. The session keeps
+        it while the caller holds the slot, so a later request can tell a
+        generation that was told to stop (a handoff) from one that is still
+        wanted (a collision).
+        """
+        if timeout_s > 0.0:
+            acquired = self._lock.acquire(timeout=float(timeout_s))
+        else:
+            acquired = self._lock.acquire(blocking=False)
+        if not acquired:
             return False
+        self._holder_cancel_event = cancel_event
         self.in_flight = True
         self.in_flight_started_s = time.time()
         self.touch()
         return True
+
+    def holder_cancel_requested(self) -> bool:
+        """True when the generation holding the slot has been cancelled."""
+        event = self._holder_cancel_event
+        return event is not None and bool(event.is_set())
+
+    def wait_for_cancelled_holder(
+        self,
+        *,
+        cancel_event: Any | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Take the slot from a holder that has already been cancelled.
+
+        Returns a receipt; ``acquired`` says whether the caller now holds the
+        slot. Waits only while the CURRENT holder's cancel signal is set: a
+        holder that was never cancelled, or a third request that took the
+        slot in between, ends the wait at once and the caller refuses as
+        before. The caller's own cancel ends it too (the user pressed Stop a
+        second time while waiting).
+        """
+        budget_s = (
+            _cancelled_holder_handoff_wait_s()
+            if timeout_s is None
+            else max(0.0, float(timeout_s))
+        )
+        started = time.monotonic()
+        receipt: dict[str, Any] = {
+            "acquired": False,
+            "waited_s": 0.0,
+            "timeout_s": float(budget_s),
+            "outcome": "holder_not_cancelled",
+        }
+        if budget_s <= 0.0:
+            receipt["outcome"] = "disabled"
+            return receipt
+        deadline = started + budget_s
+        while True:
+            if not self.holder_cancel_requested():
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                receipt["outcome"] = "waiter_cancelled"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                receipt["outcome"] = "timeout"
+                break
+            if self.try_begin_generation(
+                cancel_event=cancel_event,
+                timeout_s=min(_CANCELLED_HOLDER_HANDOFF_POLL_S, remaining),
+            ):
+                receipt["acquired"] = True
+                receipt["outcome"] = "handed_off"
+                break
+        receipt["waited_s"] = round(time.monotonic() - started, 4)
+        if receipt["outcome"] != "holder_not_cancelled":
+            self.last_cancel_handoff = dict(receipt)
+        return receipt
 
     def end_generation(self) -> None:
         self.in_flight = False
@@ -1640,6 +1757,7 @@ class EngineSession:
             "last_restore_mode": self.last_restore_mode,
             "last_postcommit_wait": self.last_postcommit_wait,
             "last_postcommit_outcome": self.last_postcommit_outcome,
+            "last_cancel_handoff": self.last_cancel_handoff,
             "pending_postcommit": bool(self.pending_postcommit is not None),
             "pending_postcommit_detail": self.pending_postcommit_admin(),
             "boundaries": [
@@ -1985,17 +2103,44 @@ class EngineSessionManager:
         session: EngineSession,
         *,
         source: str | None = None,
+        cancel_event: Any | None = None,
+        handoff_out: dict[str, Any] | None = None,
     ) -> Iterator[EngineSession]:
+        """Hold ``session`` for one generation.
+
+        A busy session forks to a fresh anonymous one when the id was only
+        inferred from the prompt (#94: parallel clients without session ids).
+        A busy session the client NAMED is refused, with one exception: when
+        the generation holding it has already been cancelled, the request is
+        the same conversation coming back after a Stop, so it waits (bounded,
+        ``_cancelled_holder_handoff_wait_s``) for the old generation to let
+        go. ``cancel_event`` is this request's own cancel signal; the receipt
+        of a wait lands in ``handoff_out``.
+        """
         acquired = session
-        if not session.try_begin_generation():
+        if not session.try_begin_generation(cancel_event=cancel_event):
             if str(source or "") not in IMPLICIT_SESSION_SOURCES:
-                raise EngineSessionBusy(
-                    f"session {session.session_id} is already in flight"
+                handoff = session.wait_for_cancelled_holder(
+                    cancel_event=cancel_event
                 )
-            while True:
-                acquired = self.get_or_create(_new_anon_session_id())
-                if acquired.try_begin_generation():
-                    break
+                if handoff_out is not None and handoff.get("outcome") not in {
+                    "holder_not_cancelled",
+                    "disabled",
+                }:
+                    handoff_out.update(handoff)
+                if not handoff.get("acquired"):
+                    detail = f"session {session.session_id} is already in flight"
+                    if handoff.get("outcome") == "timeout":
+                        detail += (
+                            " (its cancelled generation did not stop within "
+                            f"{float(handoff.get('timeout_s') or 0.0):g}s)"
+                        )
+                    raise EngineSessionBusy(detail)
+            else:
+                while True:
+                    acquired = self.get_or_create(_new_anon_session_id())
+                    if acquired.try_begin_generation(cancel_event=cancel_event):
+                        break
         try:
             yield acquired
         finally:
