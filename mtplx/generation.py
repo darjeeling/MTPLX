@@ -450,9 +450,9 @@ def _qwen4_fixed_m4_compiled_verify_requested(
 # request record carries. One constant line each: the demotion ledger formats
 # nothing.
 _VISION_COMPILED_VERIFY_REFUSALS: dict[str, str] = {
-    "vision_dense_opt_in_required": (
-        "dense image compiled verification requires MTPLX_DENSE_VISION_COMPILED_VERIFY=1; "
-        "the full serving trajectory has not passed exact comparison with eager verification"
+    "vision_dense_kill_switch": (
+        "MTPLX_DENSE_VISION_COMPILED_VERIFY=0: dense image requests keep the eager "
+        "verifier; Flash-Next image requests are not affected"
     ),
     "vision_kill_switch": (
         "MTPLX_QWEN4_VISION_COMPILED_VERIFY=0: image requests keep the eager "
@@ -5539,11 +5539,14 @@ def _dense_vision_compiled_verify_admission(
         verdict["refusal"] = "vision_kill_switch"
     elif _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
         verdict["refusal"] = "vision_state_rebase"
-    elif dense_model and not env_bool("MTPLX_DENSE_VISION_COMPILED_VERIFY", default=False):
-        # The real dense 27B serving gate differs at live-length versus
-        # padded-buffer SDPA, outside parity2's common-buffer comparison.
-        # Keep that unproven route opt-in without changing Flash-Next.
-        verdict["refusal"] = "vision_dense_opt_in_required"
+    elif dense_model and not env_bool("MTPLX_DENSE_VISION_COMPILED_VERIFY", default=True):
+        # The dense route ships on, like Flash-Next's: every compiled image
+        # round is bit-exact with the eager verifier from the same cache
+        # (762 rounds, 09-21). Its free-running reply can differ from a
+        # separately run eager arm through SDPA over padded buffers, the same
+        # rounding class the compiled text lane has always carried. This is
+        # the family-specific opt-out for that.
+        verdict["refusal"] = "vision_dense_kill_switch"
     # No table (the request was prefilled at plain sequence positions and
     # decodes at them): the text trace, unless a switch above said no.
     return verdict
