@@ -8,7 +8,7 @@ One command, a pack and an image:
         --image photo.png
 
 It starts the product server (``mtplx serve``) once per arm, sends the same
-three requests to each boot, reads every request's record from the request log
+three-turn workflow to each boot, reads every request's record from the request log
 and writes one JSON report. Exit code 0 means every check below held.
 
 The arms (one boot each, one at a time):
@@ -35,7 +35,7 @@ The arms (one boot each, one at a time):
               repair, copy-round and final-commit rows without the image delta,
               so a difference there is reported and does not fail the run.
 
-The requests (identical bytes in every arm):
+The requests (the follow-up carries that arm's actual first response):
 
   image_turn1   the image and a question;
   image_turn2   a second turn with that image in the history, which restores
@@ -63,6 +63,9 @@ How to read the verdict:
                             differ by much less): look at ``first_divergence``.
   not_proven                the image route was not exercised; the reasons are
                             listed (refused shape, memory gate, no record).
+  no_compiled_dispatch      an arm claiming compiled verification never ran it.
+  no_compiled_comparisons   only eager dispatches had parity comparisons.
+  generated_state_not_restored  the follow-up did not restore generated rows.
 
 Safety: the script never stops a process it did not start, refuses to boot on a
 port that answers, and refuses to load the pack when free memory is below three
@@ -97,7 +100,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "qwen4_vision_compiled_parity/1"
 
 QUESTION = "Describe this image in detail, then list three things a careful viewer would notice."
-CANNED_REPLY = "It is a single image. I can describe any part of it more closely."
 FOLLOW_UP = "Look again at the upper left quarter of the image and describe only that part."
 TEXT_PROMPT = (
     "Explain how a suspension bridge carries its load, from the deck to the "
@@ -183,7 +185,7 @@ def request_status(entry: dict[str, Any]) -> dict[str, Any]:
         "images": admission.get("images"),
         "rope_delta_input": bool(fixed.get("rope_delta_input")),
         "bank_mode": bank.get("mode"),
-        "compiled_calls": bank.get("compiled_calls"),
+        "compiled_calls": int(bank.get("compiled_calls") or 0),
         "fallback_calls": bank.get("fallback_calls"),
     }
     if entry.get("error"):
@@ -201,6 +203,10 @@ def request_status(entry: dict[str, Any]) -> dict[str, Any]:
         divergent = int(parity.get("divergent_rounds") or 0)
         status.update(
             rounds=rounds,
+            compiled_rounds=int(parity.get("compiled_rounds") or 0),
+            compiled_exact_rounds=int(parity.get("compiled_exact_rounds") or 0),
+            eager_rounds=int(parity.get("eager_rounds") or 0),
+            eager_exact_rounds=int(parity.get("eager_exact_rounds") or 0),
             divergent_rounds=divergent,
             reference_scope_missing_rounds=int(
                 parity.get("reference_scope_missing_rounds") or 0
@@ -211,6 +217,10 @@ def request_status(entry: dict[str, Any]) -> dict[str, Any]:
         )
         if rounds == 0:
             status["state"] = "no_compared_rounds"
+        elif status["compiled_calls"] <= 0:
+            status["state"] = "no_compiled_dispatch"
+        elif status["compiled_rounds"] <= 0:
+            status["state"] = "no_compiled_comparisons"
         else:
             status["state"] = "divergent" if divergent else "exact"
     return status
@@ -229,6 +239,34 @@ def _same_sampler(left: Any, right: Any) -> bool:
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def generated_restore_status(requests: dict[str, Any]) -> dict[str, Any]:
+    """A warm hit must reach beyond turn one's prompt into its generated rows."""
+
+    first, follow = requests.get("image_turn1"), requests.get("image_turn2")
+    if not first or not follow:
+        return {"ok": False, "reason": "missing_image_turn"}
+    prompt = int(first.get("prompt_tokens") or 0)
+    generated = int(first.get("completion_tokens") or 0)
+    cached = int(follow.get("cached_tokens") or 0)
+    mode = follow.get("session_restore_mode")
+    if first.get("error") or follow.get("error"):
+        reason = "request_failed"
+    elif prompt <= 0 or generated <= 0 or "cached_tokens" not in follow:
+        reason = "missing_generated_restore_evidence"
+    elif follow.get("session_cache_hit") is not True or mode in (None, "", "cold"):
+        reason = "cold_prefill"
+    elif cached <= prompt:
+        reason = "prompt_only_restore"
+    else:
+        reason = "generated_tokens_restored"
+    return {
+        "ok": reason == "generated_tokens_restored", "reason": reason,
+        "first_prompt_tokens": prompt, "first_completion_tokens": generated,
+        "cached_tokens": cached, "session_restore_mode": mode,
+        "restored_generated_tokens": max(0, min(generated, cached - prompt)),
+    }
 
 
 def evaluate(
@@ -289,6 +327,8 @@ def evaluate(
             )
         elif status["state"] == "no_compared_rounds":
             reasons.append(f"{name}: no verify round was compared")
+        elif status["state"] in {"no_compiled_dispatch", "no_compiled_comparisons"}:
+            reasons.append(f"{name}: {status['state']}")
         elif status["positions"] != "vision_delta" or not status["rope_delta_input"]:
             reasons.append(
                 f"{name}: positions {status['positions']!r}, rope_delta_input "
@@ -298,7 +338,11 @@ def evaluate(
     image_list = list(image.values())
     text_list = [s for s in text.values() if s["state"] in {"exact", "divergent"}]
     unreferenced = sum(int(s.get("reference_scope_missing_rounds") or 0) for s in image_list)
-    if reasons:
+    if any(s["state"] == "no_compiled_dispatch" for s in image_list):
+        verdict = "no_compiled_dispatch"
+    elif any(s["state"] == "no_compiled_comparisons" for s in image_list):
+        verdict = "no_compiled_comparisons"
+    elif reasons:
         verdict = "not_proven"
     elif all(s["state"] == "exact" for s in image_list):
         verdict = "exact_on_compared_rounds" if unreferenced else "exact"
@@ -316,6 +360,8 @@ def evaluate(
         "; ".join(reasons)
         or (
             f"{sum(int(s.get('rounds') or 0) for s in image_list)} image rounds compared, "
+            f"{sum(int(s.get('compiled_rounds') or 0) for s in image_list)} compiled, "
+            f"{sum(int(s.get('eager_rounds') or 0) for s in image_list)} eager, "
             f"{sum(int(s.get('divergent_rounds') or 0) for s in image_list)} divergent, "
             f"largest logit difference {_worst(image_list, 'logits_max_abs_diff'):.3g}, "
             f"largest KL {_worst(image_list, 'logits_max_kl'):.3g}"
@@ -331,7 +377,7 @@ def evaluate(
     if text:
         check(
             "instrument_text_control_exact",
-            bool(text_list) and all(s["state"] == "exact" for s in text_list),
+            all(s["state"] == "exact" for s in text.values()),
             (
                 f"{sum(int(s.get('rounds') or 0) for s in text_list)} text rounds compared, "
                 f"{sum(int(s.get('divergent_rounds') or 0) for s in text_list)} divergent, "
@@ -371,6 +417,7 @@ def evaluate(
                 and status["positions"] == "vision_delta"
                 and status["rope_delta_input"]
                 and status["bank_mode"] == "on"
+                and status["compiled_calls"] > 0
             )
         ]
         has_image = any(kind == "image" for kind in product_kinds.values())
@@ -379,7 +426,7 @@ def evaluate(
             has_image and not off_route,
             "; ".join(off_route)
             or (
-                "every image request was admitted with its rotary delta as a trace input"
+                "every image request ran compiled verification with its rotary delta as a trace input"
                 if has_image
                 else "the product arm holds no image request"
             ),
@@ -423,6 +470,31 @@ def evaluate(
             required=eager_scope_fix_present,
         )
 
+    no_dispatch = [
+        f"{arm}/{name}"
+        for arm in ("instrument", "product") if arm in arms
+        for name, entry in requests_of(arm).items()
+        if int((entry.get("compiled_verify") or {}).get("compiled_calls") or 0) <= 0
+    ]
+    check(
+        "compiled_arms_executed_compiled_verification", not no_dispatch,
+        "no compiled dispatch: " + ", ".join(no_dispatch) if no_dispatch
+        else "every request in the compiled arms executed compiled verification",
+    )
+    restores = {arm: generated_restore_status(requests_of(arm)) for arm in arms}
+    missing_restore = [f"{arm}: {status['reason']}" for arm, status in restores.items()
+                       if not status["ok"]]
+    check(
+        "follow_up_restored_generated_tokens", bool(restores) and not missing_restore,
+        "; ".join(missing_restore) or "every arm restored past the first prompt into generated tokens",
+    )
+    if verdict in {"exact", "exact_on_compared_rounds"}:
+        if no_dispatch:
+            verdict = "no_compiled_dispatch"
+        elif any(s["state"] == "no_compiled_comparisons" for s in text.values()):
+            verdict = "no_compiled_comparisons"
+        elif missing_restore:
+            verdict = "generated_state_not_restored"
     failed = [c["name"] for c in checks if c["required"] and c["ok"] is not True]
     return {
         "verdict": verdict,
@@ -430,6 +502,7 @@ def evaluate(
         "checks": checks,
         "failed_checks": failed,
         "instrument": instrument,
+        "generated_restore": restores,
         "exit_code": 0 if verdict == "exact" and not failed else 1,
     }
 
@@ -628,10 +701,8 @@ def build_requests(image_url: str, args: argparse.Namespace) -> dict[str, dict[s
     first_turn = [
         {"role": "user", "content": [image_part, {"type": "text", "text": args.question}]}
     ]
-    second_turn = first_turn + [
-        {"role": "assistant", "content": CANNED_REPLY},
-        {"role": "user", "content": args.follow_up},
-    ]
+    # run_arm inserts the actual assistant message after turn one finishes.
+    second_turn = first_turn + [{"role": "user", "content": args.follow_up}]
 
     def body(messages: list[dict[str, Any]]) -> dict[str, Any]:
         # No temperature, top_p or top_k: the server applies the pack's native
@@ -646,7 +717,8 @@ def build_requests(image_url: str, args: argparse.Namespace) -> dict[str, dict[s
 
     return {
         "image_turn1": {"kind": "image", "body": body(first_turn)},
-        "image_turn2": {"kind": "image", "body": body(second_turn)},
+        "image_turn2": {"kind": "image", "after_response": "image_turn1",
+                        "body": body(second_turn)},
         "text_control": {
             "kind": "text",
             "body": body([{"role": "user", "content": args.text_prompt}]),
@@ -700,10 +772,19 @@ def run_arm(
             print(f"[{arm}] {name} ...", flush=True)
             entry: dict[str, Any] = {"kind": spec["kind"]}
             result["requests"][name] = entry
+            body = spec["body"]
+            if spec.get("after_response"):
+                first = result["requests"].get(spec["after_response"]) or {}
+                if first.get("error") or not first.get("response_message"):
+                    entry["error"] = "the first response is unavailable for the follow-up"
+                    continue
+                body = dict(body, messages=[
+                    *body["messages"][:-1], first["response_message"], body["messages"][-1],
+                ])
             sent_at = time.time()
             try:
                 response = _http_json(
-                    "POST", base_url + "/v1/chat/completions", spec["body"], args.request_timeout
+                    "POST", base_url + "/v1/chat/completions", body, args.request_timeout
                 )
             except urllib.error.HTTPError as error:
                 entry["error"] = f"HTTP {error.code}: {error.read().decode('utf-8', 'replace')[:2000]}"
@@ -715,6 +796,7 @@ def run_arm(
                 continue
             content, reasoning, finish = _message_text(response)
             entry.update(
+                response_message=response["choices"][0]["message"],
                 response_id=response.get("id"),
                 finish_reason=finish,
                 usage=response.get("usage") or {},
@@ -834,7 +916,8 @@ def main(argv: list[str] | None = None) -> int:
         "requests": {
             name: {
                 "kind": spec["kind"],
-                "messages": len(spec["body"]["messages"]),
+                "messages": len(spec["body"]["messages"]) + bool(spec.get("after_response")),
+                "after_response": spec.get("after_response"),
                 "max_tokens": spec["body"]["max_tokens"],
                 "seed": spec["body"]["seed"],
                 "sampler_fields_sent": [],
@@ -909,6 +992,7 @@ def main(argv: list[str] | None = None) -> int:
         checks=outcome["checks"],
         failed_checks=outcome["failed_checks"],
         instrument_summary=outcome["instrument"],
+        generated_restore=outcome["generated_restore"],
         arm_errors=arm_errors,
         arms_not_run=missing_arms,
         exit_code=outcome["exit_code"],

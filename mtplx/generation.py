@@ -578,6 +578,10 @@ def _qwen4_vision_compiled_verify_admission(
         return verdict(positions, carried, "vision_kill_switch")
     if dense:
         return verdict(positions, None, "vision_dense_mrope")
+    if _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
+        # Rebasing replaces the cache even when the image uses sequential
+        # positions, leaving an installed verifier bound to the old entries.
+        return verdict(positions, carried, "vision_state_rebase")
     if positions == "vision_sequential":
         # No table and no delta: the request was prefilled at plain sequence
         # positions and decodes at them. That is the text trace.
@@ -586,8 +590,6 @@ def _qwen4_vision_compiled_verify_admission(
 
     if not vision_qsa_enabled():
         return verdict(positions, carried, "vision_qsa_disabled")
-    if _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
-        return verdict(positions, carried, "vision_state_rebase")
     if table is not None:
         if int(table.shape[1]) != len(prompt_ids):
             return verdict(positions, carried, "vision_table_length_mismatch")
