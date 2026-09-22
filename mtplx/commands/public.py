@@ -70,6 +70,7 @@ from mtplx.kpi.runtime_kpis import (
     repo_root,
 )
 from mtplx.backends.registry import (
+    SUPPORT_QUALIFICATION_PENDING,
     TIER_ARCH_COMPATIBLE_UNVERIFIED,
     architecture_catalog,
 )
@@ -484,12 +485,9 @@ def _model_gate(
     # never block loading.
     if compatibility.get("can_run"):
         if compatibility.get("unverified_model"):
-            print(
-                "WARNING: running a family-compatible MTPLX model without a "
-                "recorded mtplx_runtime.json exactness baseline; stats will be "
-                "marked unverified until this artifact is smoke-verified.",
-                file=sys.stderr,
-            )
+            pending = compatibility.get("support_level") == SUPPORT_QUALIFICATION_PENDING
+            label = "NOTE" if pending else "WARNING"
+            print(f"{label}: {compatibility.get('message')}", file=sys.stderr)
         return inspection, None
     if unsafe_force_unverified and yes and tier == TIER_ARCH_COMPATIBLE_UNVERIFIED:
         print(

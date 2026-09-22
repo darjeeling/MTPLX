@@ -61,6 +61,7 @@ LEGACY_OPTIMIZED_MODEL_NAMES = frozenset(
 # user never has to scroll past unsupported entries to find a launchable one.
 _TIER_RANK: dict[str, int] = {
     "verified": 0,
+    "qualification-pending": 0,
     "arch-compatible": 1,
     "needs-verification": 2,
     "mtp-invalid": 3,
@@ -180,10 +181,11 @@ class ScannedModel:
     """A model directory found while walking a user-supplied folder.
 
     ``tier`` is the normalized compatibility verdict, one of
-    ``verified`` / ``arch-compatible`` / ``needs-verification`` /
-    ``mtp-invalid`` / ``mtp-missing`` / ``backend-pending`` / ``no-mtp`` /
-    ``incompatible`` / ``unknown``. The display layer turns it into a coloured
-    badge. ``arch-compatible`` means launchable, not merely recognized.
+    ``verified`` / ``qualification-pending`` / ``arch-compatible`` /
+    ``needs-verification`` / ``mtp-invalid`` / ``mtp-missing`` /
+    ``backend-pending`` / ``no-mtp`` / ``incompatible`` / ``unknown``. The
+    display layer turns it into a coloured badge. ``arch-compatible`` means
+    launchable, not merely recognized.
     """
 
     path: Path
@@ -466,7 +468,10 @@ def _classify_scanned_model(model_dir: Path) -> ScannedModel:
     stub.runtime_contract_path = str(contract_path) if contract_path.is_file() else None
 
     try:
-        from mtplx.backends.registry import compatibility_for_inspection
+        from mtplx.backends.registry import (
+            SUPPORT_QUALIFICATION_PENDING,
+            compatibility_for_inspection,
+        )
     except Exception as exc:
         return ScannedModel(
             path=model_dir,
@@ -499,6 +504,8 @@ def _classify_scanned_model(model_dir: Path) -> ScannedModel:
     artifact_missing = mtp_num_hidden_layers > 0 and not mtp_artifact_exists
     if raw_tier == "verified":
         tier = "verified"
+    elif verdict.support_level == SUPPORT_QUALIFICATION_PENDING:
+        tier = "qualification-pending"
     elif verdict.can_run or raw_tier == "family-compatible-unverified":
         tier = "arch-compatible"
     elif raw_tier == "architecture-compatible-but-unverified":
@@ -548,6 +555,8 @@ def _tier_badge(tier: str) -> tuple[str, str]:
 
     if tier == "verified":
         return ("Verified", "bold green")
+    if tier == "qualification-pending":
+        return ("Official pack, qualification pending", "green")
     if tier == "arch-compatible":
         return ("Runnable (unverified)", "yellow")
     if tier == "needs-verification":
@@ -1104,6 +1113,7 @@ def _scan_and_pick(root: Path) -> str | None:
     )
 
     verified = sum(1 for m in classified if m.tier == "verified")
+    pending = sum(1 for m in classified if m.tier == "qualification-pending")
     runnable = sum(1 for m in classified if m.tier == "arch-compatible")
     needs = sum(1 for m in classified if m.tier == "needs-verification")
     missing = sum(1 for m in classified if m.tier == "mtp-missing")
@@ -1111,6 +1121,8 @@ def _scan_and_pick(root: Path) -> str | None:
         f"Found {len(classified)} model(s) under {_pretty_path(root)}  ·  "
         f"{verified} verified, {runnable} runnable unverified"
     )
+    if pending:
+        intro += f", {pending} official pending qualification"
     if needs:
         intro += f", {needs} need verification"
     if missing:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +38,11 @@ EXIT_VERIFIED = 0
 EXIT_NO_MTP = 2
 EXIT_UNVERIFIED = 3
 EXIT_INCOMPATIBLE_ARCHITECTURE = 4
+
+# An official catalog pack whose exactness measurement has not run yet. It
+# runs as unverified; pending is not damage, so there is no Forge advice.
+SUPPORT_QUALIFICATION_PENDING = "official-pack-qualification-pending"
+
 BLOCKING_RUNTIME_STATUSES = {
     "candidate",
     "candidate_build_only_benchmark_pending",
@@ -916,6 +921,24 @@ def _runtime_contract_blocker(contract: RuntimeContract) -> str | None:
     return None
 
 
+def _official_qualification_pending(contract: RuntimeContract) -> bool:
+    """An official catalog pack whose only open item is its exactness measurement."""
+    from mtplx.model_catalog import catalog_model_matching
+
+    baseline = contract.exactness_baseline
+    status = _text(baseline.get("status"))
+    raw = contract.raw if isinstance(contract.raw, dict) else {}
+    return (
+        (status == "pending" or status.startswith("pending_"))
+        and baseline.get("public_release_blocker") is not True
+        # Nothing else in the contract blocks it.
+        and _runtime_contract_blocker(replace(contract, exactness_baseline={})) is None
+        and catalog_model_matching(
+            raw.get("public_model_id") or raw.get("served_model_id")
+        ) is not None
+    )
+
+
 def _runtime_evidence_blocker(value: Any, *, section_name: str) -> str | None:
     if not isinstance(value, dict):
         return None
@@ -1551,6 +1574,35 @@ def compatibility_for_inspection(inspection: Any) -> CompatibilityVerdict:
         arch_id = contract.arch_id
         support = architecture_support_for(arch_id)
         blocker = _runtime_contract_blocker(contract)
+        if (
+            blocker
+            and arch_id in SUPPORTED_ARCH_IDS
+            and has_mtp
+            and _passes_verified_runtime_gate(arch_id, inspection, tensor_gate)
+            and _official_qualification_pending(contract)
+        ):
+            return CompatibilityVerdict(
+                tier=TIER_FAMILY_COMPATIBLE_UNVERIFIED,
+                arch_id=arch_id,
+                supported=True,
+                recognized=True,
+                can_run=True,
+                exit_code=EXIT_VERIFIED,
+                message=(
+                    f"Official MTPLX pack, qualification pending ({blocker}). "
+                    "It runs as unverified until its exactness measurement "
+                    "is published."
+                ),
+                recommended_backend=(support.backend if support else None),
+                recommended_profile=contract.recommended_profile,
+                runtime_contract=contract,
+                runtime_contract_path=contract_path,
+                unverified_model=True,
+                mtp_supported="yes",
+                runtime_compatibility=(support.runtime_compatibility if support else "native"),
+                support_level=SUPPORT_QUALIFICATION_PENDING,
+                support_notes=(support.notes if support else None),
+            )
         if blocker:
             # Contract evidence (exactness baseline, speed verdicts) is a
             # label, never a load gate: the model is architecturally
