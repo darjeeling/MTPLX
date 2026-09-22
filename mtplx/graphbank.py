@@ -2989,7 +2989,67 @@ class CompiledVerifyBank:
             mx.eval(*leaves)
         return clone
 
+    def _fixed_m4_parity2_record(self, dispatch) -> dict[str, Any]:
+        """This request's parity receipt (``compiled_verify.fixed_m4_parity2``)."""
+
+        rope_delta = dispatch["rope_delta"]
+        return self.stats.setdefault(
+            "fixed_m4_parity2",
+            {
+                "positions": "text" if rope_delta is None else "vision_delta",
+                "rope_delta": rope_delta,
+                # Rounds compared, and how many of them differed anywhere.
+                "rounds": 0,
+                "rounds_by_width": {},
+                "divergent_rounds": 0,
+                "divergent_rounds_by_width": {},
+                # Rounds of an image request NOT compared, because their
+                # caller had no request scope open (see
+                # ``_fixed_m4_parity2_reference_ready``).
+                "reference_scope_missing_rounds": 0,
+                "reference_scope_missing_by_width": {},
+                "compared_leaves_per_round": 0,
+                "logits_max_abs_diff": 0.0,
+                "logits_max_kl": 0.0,
+                "hidden_max_abs_diff": 0.0,
+                "state_max_abs_diff": 0.0,
+                "capture_max_abs_diff": 0.0,
+                "first_divergence": None,
+            },
+        )
+
+    def _fixed_m4_parity2_reference_ready(self, dispatch, input_ids) -> bool:
+        """Whether this round has a reference it can be compared with.
+
+        The reference of an image round is the stock cache roped from the
+        REQUEST's scope, the one the generation loop opens from the splice.
+        It is read from the caller's context, here on the host in the
+        instrument (the fixed lane itself never reads it), so it cannot
+        depend on the delta under test: a wrong delta at the admission would
+        otherwise be compared with itself and pass. A caller with no scope
+        open leaves nothing independent to compare with. Its reference would
+        rotate at text positions and the round would read as divergent
+        whatever the lane did, so it is counted and not compared, and the
+        maxima below stay the maxima of real comparisons.
+        """
+
+        if dispatch["rope_delta"] is None:
+            return True
+        from .attention_context import vision_rope_state
+
+        if vision_rope_state() is not None:
+            return True
+        record = self._fixed_m4_parity2_record(dispatch)
+        width = str(_decode_length(input_ids))
+        record["reference_scope_missing_rounds"] += 1
+        record["reference_scope_missing_by_width"][width] = (
+            record["reference_scope_missing_by_width"].get(width, 0) + 1
+        )
+        return False
+
     def _fixed_m4_parity2_round(self, dispatch, cache, input_ids, **candidate) -> None:
+        if not self._fixed_m4_parity2_reference_ready(dispatch, input_ids):
+            return
         self._fixed_m4_parity2_compare(
             dispatch, self._fixed_m4_parity2_clone(cache), input_ids, **candidate
         )
@@ -3007,12 +3067,9 @@ class CompiledVerifyBank:
         candidate_state: list[Any],
         committed_count: int | None,
     ) -> None:
-        from .attention_context import vision_rope_state
-
-        rope_delta = dispatch["rope_delta"]
-        # Read here, on the host, in the instrument: the fixed lane itself
-        # never reads the request context.
-        reference_scope = vision_rope_state()
+        # The reference leg: the stock cache in the caller's ambient scope
+        # (``_fixed_m4_parity2_reference_ready`` checked that an image round
+        # has one).
         with attention_phase("decode_verify"):
             eager_logits, eager_hidden, eager_captures = self._runtime_forward(
                 input_ids,
@@ -3109,32 +3166,9 @@ class CompiledVerifyBank:
         )
 
         width = str(_decode_length(input_ids))
-        record = self.stats.setdefault(
-            "fixed_m4_parity2",
-            {
-                "positions": "text" if rope_delta is None else "vision_delta",
-                "rope_delta": rope_delta,
-                # Rounds of an image request whose caller had no request scope
-                # open: their reference ran at text positions, so they read
-                # as divergent and say nothing about the lane.
-                "reference_scope_missing_rounds": 0,
-                "rounds": 0,
-                "rounds_by_width": {},
-                "divergent_rounds": 0,
-                "divergent_rounds_by_width": {},
-                "compared_leaves_per_round": 0,
-                "logits_max_abs_diff": 0.0,
-                "logits_max_kl": 0.0,
-                "hidden_max_abs_diff": 0.0,
-                "state_max_abs_diff": 0.0,
-                "capture_max_abs_diff": 0.0,
-                "first_divergence": None,
-            },
-        )
+        record = self._fixed_m4_parity2_record(dispatch)
         record["rounds"] += 1
         record["rounds_by_width"][width] = record["rounds_by_width"].get(width, 0) + 1
-        if rope_delta is not None and reference_scope is None:
-            record["reference_scope_missing_rounds"] += 1
         record["compared_leaves_per_round"] = len(pairs) + len(offsets)
         record["logits_max_abs_diff"] = max(
             record["logits_max_abs_diff"], float(logits_diff.item())
@@ -3266,7 +3300,11 @@ class CompiledVerifyBank:
             # that forward too, against the stock cache in the request scope.
             parity2_clone = (
                 self._fixed_m4_parity2_clone(cache)
-                if self._fixed_m4_dispatch.get("parity2") and return_hidden
+                if self._fixed_m4_dispatch.get("parity2")
+                and return_hidden
+                and self._fixed_m4_parity2_reference_ready(
+                    self._fixed_m4_dispatch, input_ids
+                )
                 else None
             )
             result = self._runtime_forward(

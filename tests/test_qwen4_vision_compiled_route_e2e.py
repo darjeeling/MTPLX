@@ -236,6 +236,7 @@ def test_parity2_checks_every_round_of_an_image_request_and_finds_nothing(
     assert record["rounds"] == bank["calls"] >= 8
     assert record["rounds_by_width"].get("4", 0) >= 8
     assert record["reference_scope_missing_rounds"] == 0
+    assert record["reference_scope_missing_by_width"] == {}
     assert record["divergent_rounds"] == 0 and record["first_divergence"] is None
     # Not "close": equal. bf16 on the GPU is the exact lane.
     for name in (
@@ -291,6 +292,51 @@ def test_parity2_catches_a_delta_that_is_off_by_one(pack, monkeypatch):
     assert first["round"] == 1 and first["width"] == 4
     assert any(line.startswith("state[") for line in first["report"])
     assert bank["parity2_first_divergence"]["leaf"] == first["leaf"]
+
+
+def test_parity2_counts_a_round_it_has_no_reference_for(pack, monkeypatch):
+    """A caller with no request scope open leaves nothing to compare with.
+
+    The reference leg reads the positions from the caller's scope. Without one
+    it would rotate at text positions and the round would read as divergent
+    whatever the lane did (before the eager scope fix, a copy round routed
+    through the bank by MTPLX_CCOPY_BANK_ROUTE=1 is such a caller). The round
+    is counted, not compared, and the maxima stay the maxima of real
+    comparisons. The lane itself does not notice: it never reads the scope.
+    """
+
+    import mtplx.attention_context as attention_context
+
+    ids, table, delta = _image_prompt(18)
+    plain = _generate(pack, monkeypatch, mode="1", ids=ids, table=table, delta=delta)
+
+    real = graphbank.CompiledVerifyBank.forward_fixed_m4
+    calls = []
+
+    def third_call_without_a_scope(self, *args, **kwargs):
+        calls.append(True)
+        if len(calls) != 3:
+            return real(self, *args, **kwargs)
+        token = attention_context._VISION_ROPE.set(None)
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            attention_context._VISION_ROPE.reset(token)
+
+    monkeypatch.setattr(
+        graphbank.CompiledVerifyBank, "forward_fixed_m4", third_call_without_a_scope
+    )
+    checked = _generate(
+        pack, monkeypatch, mode="parity2", ids=ids, table=table, delta=delta
+    )
+    assert checked.tokens == plain.tokens
+    bank = _bank_report(checked)
+    record = bank["fixed_m4_parity2"]
+    assert record["reference_scope_missing_rounds"] == 1
+    assert record["reference_scope_missing_by_width"] == {"4": 1}
+    assert record["rounds"] == bank["calls"] - 1 >= 7
+    assert record["divergent_rounds"] == 0 and record["first_divergence"] is None
+    assert record["logits_max_abs_diff"] == 0.0 and record["state_max_abs_diff"] == 0.0
 
 
 def test_the_refused_shape_stays_eager_and_says_why(pack, monkeypatch):
