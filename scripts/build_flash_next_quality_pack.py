@@ -213,62 +213,101 @@ def serve_smoke(pack: Path, run: Path, *, max_tokens: int, startup_timeout: int,
 def generate_card(pack: Path) -> str:
     runtime = json.loads((pack / "mtplx_runtime.json").read_text())
     meta = runtime["quality_pack"]
+    verification = runtime["verification"]
     actual_bytes = sum(p.stat().st_size for p in pack.iterdir() if p.is_file())
     rows = [f"| {name.replace('_', ' ')} | {info['stored_precision']} | {info['bytes'] / 1e9:.6f} |"
             for name, info in sorted(meta["stored_precision"].items())]
     license = meta["license"]
     credits = meta["credits"]
+    if verification.get("full_load_verified", False):
+        load_status = "The full model was loaded and tested with chat, a tool call and an image."
+    else:
+        load_status = ("The full model has not been loaded yet, because it needs a Mac with more "
+                       "than 128 GB of memory.")
     return f"""---
 license: {license['id']}
 license_name: {license['name']}
 license_link: {license['file']}
-library_name: mlx
-pipeline_tag: image-text-to-text
+library_name: mtplx
+pipeline_tag: text-generation
 base_model: {credits['base_model']}
 base_model_relation: quantized
+tags:
+- mtplx
+- mlx
+- apple-silicon
+- macos
+- speculative-decoding
+- multi-token-prediction
+- qwen
+- qwen3.8
+- qwen3.8-flash-next
+- flash-next
+- moe
+- mtp
+- 8-bit
+- vision
+- mac-studio
 ---
 
-# {meta['name']}
+# Qwen 3.8 Flash-Next Optimized Quality
 
-> **Requires the upcoming MTPLX {meta['min_engine_version']} release.**
-> The model is published ahead of engine support, which arrives in that release.
+**The 8-bit build of Qwen 3.8 Flash-Next, for Macs with 256 GB or 512 GB. Requires MTPLX {meta['min_engine_version']} or later.**
 
-Requires MTPLX {meta['min_engine_version']} or later. Served id: `{meta['served_id']}`.
-Recipe: `{meta['recipe']['name']}`. Source revision: `{meta['source']['revision']}`
-({meta['source']['revision_kind']}).
+Qwen's 125B-A6B Flash-Next, the Qwen4-generation hybrid mixture of experts with
+Qwen Sparse Attention and a 51B-parameter n-gram table, packed for
+[MTPLX](https://mtplx.com) with its multi-token prediction head. The main model
+and the draft head are 8-bit with group size 64, the structural weights stay in
+BF16, and the n-gram table is 4-bit with group size 32. On a Mac with 128 GB or
+more, [Optimized Speed](https://huggingface.co/{credits['carried_from']}) is the
+recommended build.
 
-Verification: **{runtime['verification']['status']}**, mode `{runtime['verification']['mode']}`.
-The table below is derived from every written safetensors header, including sidecars.
-BF16 describes storage; the runtime can use a private Q8 hyper-connection copy during decode.
+## Memory
 
-| Tensor class | Stored precision | Payload GB |
+The model weights, the draft head and the vision tower need about 128.5 GiB,
+and the 32 GB n-gram table streams from SSD.
+
+- **128 GB**: Cannot load. The weights, the draft head and the vision tower alone need about 128.5 GiB.
+- **256 GB and 512 GB**: the Macs this pack is for, with about 59.5 GiB left for context and the session cache. The MTPLX app and CLI list it second there, after Optimized Speed.
+
+## Speed
+
+Speed is unmeasured. The 8-bit weights move more bytes per token than the Speed
+pack's 4-bit weights, so it is expected to decode more slowly than Optimized
+Speed.
+
+## How it was checked
+
+Every stored tensor was checked for shape and precision, and sampled values
+were compared with the BF16 source (status `{verification['status']}`).
+{load_status}
+
+| Tensor class | Stored precision | Size (GB) |
 |---|---|---:|
 {chr(10).join(rows)}
 
-Tensor payload: {meta['tensor_payload_bytes'] / 1e9:.6f} GB ({meta['tensor_payload_bytes'] / 2**30:.3f} GiB).
-Files before card/manifest generation: {actual_bytes / 1e9:.6f} GB.
-`size-checksums.json` records final file sizes and SHA-256, excluding the manifest itself.
+The download is {actual_bytes / 1e9:.2f} GB. `size-checksums.json` lists the
+size and SHA-256 of every other file.
 
-{chr(10).join(f"- **{tier}**: {text}" for tier, text in meta['ram_guidance'].items())}
+## Use it
 
-{meta['performance']}
-Full-model load verified: **{str(runtime['verification'].get('full_load_verified', False)).lower()}**.
-The streaming audit checks stored tensors and sampled dequantization against the source.
-It does not prove full-model chat, tool calling, image handling, long-context quality,
-or a Speed-pack performance comparison. Those require a run on a supported Mac.
-
-Recommended memory: **256 GB or 512 GB**. On these Macs, MTPLX's automatic memory
-policy normally keeps the n-gram table in RAM as well as the model weights.
-The SSD-backed table is used when the memory policy calls for it.
+In the Mac app, pick Qwen 3.8 Flash-Next Optimized Quality. From the command line:
 
 ```bash
+pip install mtplx
 mtplx serve --model {meta['repo']} --model-id {meta['served_id']}
 ```
 
-Base model and weights: [{credits['base_model']}](https://huggingface.co/{credits['base_model']}).
-Qwen Community License, preserved in `{license['file']}`.
-Upstream model card preserved as `{credits['upstream_card']}`.
-License and credits carried from [{credits['carried_from']}](https://huggingface.co/{credits['carried_from']}).
+MTPLX samples at the official Qwen 3.8 settings (temperature 1.0, top-p 0.95,
+top-k 20), and drafts are accepted with exact speculative sampling, so the
+output follows the model's own distribution.
+
+Built with the `{meta['recipe']['name']}` recipe from
+[{credits['base_model']}](https://huggingface.co/{credits['base_model']}) at
+revision `{meta['source']['revision']}`. Qwen Community License, preserved in
+`{license['file']}`. The upstream model card is preserved as
+`{credits['upstream_card']}`. License and credits are carried from
+[{credits['carried_from']}](https://huggingface.co/{credits['carried_from']}).
 Conversion and serving: {credits['engine']}.
 """
 

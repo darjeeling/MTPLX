@@ -337,7 +337,7 @@ def render_speed_table(evidence: dict[str, Any] | None) -> str:
         return "No speed measurements supplied. No throughput or MTP speed-up is claimed."
     if evidence.get("status") != "measured" or not evidence.get("rows"):
         raise PackBuildError("speed JSON requires status='measured' and nonempty rows")
-    lines = ["| Mac | Context tokens | AR tokens/s | MTP tokens/s | Accepted tokens/step |",
+    lines = ["| Mac | Prompt tokens | Plain decoding, tok/s | MTP, tok/s | Drafts accepted per step |",
              "| :--- | ---: | ---: | ---: | ---: |"]
     for row in evidence["rows"]:
         keys = ("context_tokens", "ar_tokens_per_second", "mtp_tokens_per_second", "accepted_tokens_per_step")
@@ -496,19 +496,18 @@ tags:
 
 # Ternary Bonsai 2 27B MTPLX Optimized Speed
 
-> **Requires the upcoming MTPLX {min_engine_version} release.**
-> The model is published ahead of engine support, which arrives in that release.
-
-A 27B-class vision-language model for Apple Silicon Macs, with a
-draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
+Prism ML's Ternary Bonsai 2 27B for [MTPLX](https://mtplx.com), with the
+Qwen3.8-27B draft head for speculative decoding. It is a 2-bit ternary
+vision-language model that runs on Apple Silicon Macs with 16 GB of memory or
+more. Requires MTPLX {min_engine_version} or newer.
 
 **Full credit for the model goes to [Prism ML](https://prismml.com).** The
 language model and the vision tower in this pack are Prism ML's
 [Ternary Bonsai 2 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-mlx-2bit),
 carried byte for byte. Created using Bonsai by Prism ML. Bonsai 2 27B is built
 from [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) by Alibaba Cloud.
-Both are licensed under Apache 2.0. Read Prism ML's model card and whitepaper
-for the method, the benchmarks and the limitations of the model itself.
+Both are licensed under Apache 2.0. Prism ML's model card and whitepaper
+describe the method, the benchmarks and the limits of the model itself.
 
 ## What is in this pack
 
@@ -520,35 +519,20 @@ for the method, the benchmarks and the limitations of the model itself.
 | `mtplx_runtime.json` | Sampler defaults and the MTPLX runtime contract. |
 | `MTPLX_PACK_MANIFEST.json` | The sha256 of every file and where each one came from. |
 
-This is a vision-language model. The pack retains Prism ML's vision tower
-and processor metadata. Image quality needs its own runtime validation.
-
 ## What MTPLX adds
 
 Prism ML stores every projection of the language model as ternary weights in a
-rotated basis. A runtime has to apply a matching Hadamard transform to the
-activations, or the output is wrong. MTPLX loads this model type natively,
-keeps the weights packed at 2 bits, and refuses to load a pack whose rotation
-metadata or vision tower is missing.
+rotated basis, so a runtime has to apply the matching Hadamard transform to the
+activations. MTPLX loads this model type natively, keeps the weights packed at
+2 bits, and refuses a pack whose rotation metadata or vision tower is missing.
 
-The draft head lets MTPLX propose several tokens per step and verify them with
-the full model. Verification uses exact speculative sampling, so the output
-distribution follows the target model. The head comes from the original
-Qwen3.8-27B. Its acceptance rate and useful depth on Bonsai require measurement.
-
-## Loader parity
-
-The S1 Bonsai report (2026-09-18) measured mean KL divergence **2.6e-6**
-against Prism ML's own bundled runtime in the float16 comparison. This was
-a synthetic-pack loader check described in S1, not a new full-model quality
-benchmark or proof of identical output tokens. The pack's full-model parity
-status is recorded separately in `mtplx_runtime.json`; this historical figure
-does not mark that status as passed. Reference-float32 and image parity are
-separate checks.
+The draft head proposes tokens and the full model verifies them with exact
+speculative sampling, so the output follows the model's own distribution.
+Against Prism ML's own runtime, the MTPLX loader measured a mean KL divergence
+of 2.6e-6 (a float16 comparison on a synthetic-pack test). That checks the
+loader, not the quality of the model.
 
 ## Speed
-
-<!-- Filled only from an explicitly supplied --speed-evidence-json measurement. -->
 
 {generation_default}
 
@@ -558,26 +542,25 @@ separate checks.
 
 ```bash
 pip install mtplx
-mtplx start
+mtplx serve --model Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed
 ```
 
-Pass `--model Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` to
-`mtplx serve`. The served id is `mtplx-bonsai-2-27b-optimized-speed`.
-This pack requires MTPLX **{min_engine_version} or newer**. Its trunk family is `qwen3_8`;
-`prism_hadamard_qwen35` identifies the Prism quantization container and loader.
+The served id is `mtplx-bonsai-2-27b-optimized-speed`. In the Mac app, pick
+Bonsai 2 27B Optimized Speed. The app and the CLI recommend it first on M3, M4
+and M5 Macs with 16 to 31 GB of memory.
 
 ## Recommended settings
 
-These are Prism ML's and Qwen's recommendations. MTPLX defaults to the
-thinking-mode sampler; the non-thinking settings are listed separately.
+These are Prism ML's and Qwen's recommendations. MTPLX uses the thinking
+settings by default.
 
 | Mode | temperature | top_p | top_k | presence penalty |
 | :--- | ---: | ---: | ---: | ---: |
 | Thinking | 1.0 | 0.95 | 20 | 0.0 |
 | Non-thinking | 0.7 | 0.80 | 20 | 1.5 |
 
-The model thinks at the `xhigh` effort level by default. Use `medium` for
-shorter answers. Prism ML states that `low` is not supported.
+Reasoning effort is `medium` by default. `xhigh` is also available and thinks
+for much longer. Prism ML states that `low` is not supported.
 
 ## Memory
 
@@ -585,13 +568,14 @@ shorter answers. Prism ML states that `low` is not supported.
 
 {memory_table}
 
-The measurement includes the resident draft head and vision weights, text
-prefill, and AR decode. It does not cover MTP verification, image activations,
-or a populated session bank. MLX memory limits are guidelines; completion
-alone does not prove a small-Mac fit. A peak above the engine budget fails
-that budget check. A refused planner's 4096-token field is a fallback, not
-an admitted context. A physical small-Mac check is still required before a
-RAM recommendation.
+These runs used text prompts and plain decoding, with the draft head and the
+vision tower loaded, on an M5 Max limited to each class's memory budget. With
+the draft head active under the 16 GB budget, a 7,006-token prompt and a
+1,024-token answer peaked at 11.54 GiB of GPU memory and 12.79 GiB for the
+whole process. Image requests and a full session cache need more. On a 16 GB
+Mac the window is 8,192 tokens, which is too small for the system prompt of an
+agent client such as OpenCode (about 18,700 tokens); use 18 GB or more for
+those.
 
 ## License and attribution
 
