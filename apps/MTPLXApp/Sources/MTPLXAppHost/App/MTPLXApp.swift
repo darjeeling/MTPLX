@@ -61,7 +61,9 @@ private final class AppMemoryPressureMonitor {
 @main
 struct MTPLXApp: App {
     @NSApplicationDelegateAdaptor(MTPLXApplicationDelegate.self) private var appDelegate
-    @StateObject private var backend: MTPLXBackendStore
+    // Retain the backend without subscribing the whole Scene to its metrics.
+    // ContentView projects shell state; live views observe their own updates.
+    @State private var backend: MTPLXBackendStore
     @StateObject private var themeStore = ThemeStore()
     /// Language choice; constructed in init() so tr() answers in the
     /// persisted language before the first body evaluation.
@@ -147,7 +149,7 @@ struct MTPLXApp: App {
                 backend.setChatTurnStreaming(streaming)
             }
         )
-        _backend = StateObject(wrappedValue: backend)
+        _backend = State(initialValue: backend)
         _languageStore = StateObject(wrappedValue: languageStore)
         _chatViewModel = StateObject(wrappedValue: viewModel)
         _hermesAgentStore = StateObject(wrappedValue: hermesAgentStore)
