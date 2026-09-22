@@ -37,7 +37,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
 from dataclasses import dataclass, field
@@ -49,8 +48,6 @@ import mlx.nn as nn
 from mlx.utils import tree_flatten
 from mlx_lm.models import qwen3_5 as _qwen3_5
 from mlx_lm.models.base import BaseModelArgs
-
-_LOG = logging.getLogger(__name__)
 
 MODEL_TYPE = "prism_hadamard_qwen35"
 SUPPORTED_SCHEMA_VERSIONS = (2,)
@@ -78,11 +75,6 @@ AUX_DTYPE_ENV = "MTPLX_PRISM_AUX_DTYPE"
 # graph). The shared transform is the same operation on the same input, so the
 # two settings are bit-identical; the switch exists to prove that on a GPU.
 SHARE_ROTATION_ENV = "MTPLX_PRISM_SHARE_ROTATION"
-# "1" arms the small-M ternary GEMV (mtplx.kernels.bonsai_ternary) for the
-# verify row counts its install probe proves bit-exact against stock on this
-# pack's shapes. Off by default: measured a wash at the row counts the pack
-# ships (see the kernel module's docstring for the numbers).
-TERNARY_KERNEL_ENV = "MTPLX_BONSAI_TERNARY_KERNEL"
 
 _ACTIVATION_DTYPES = {"float16": mx.float16}
 _AUX_DTYPES = {"float16": mx.float16, "float32": mx.float32}
@@ -202,11 +194,6 @@ class HadamardQuantizedLinear(nn.Module):
         if self.block:
             self.signs = mx.ones((input_dims,), dtype=mx.float32)
         self._rotation: _SharedRotation | None = None
-        # Armed by Model.post_weight_load when MTPLX_BONSAI_TERNARY_KERNEL is
-        # on and the install probe passed: the kernel module, and the row
-        # counts it serves for this module (None = every call is stock).
-        self._ternary: Any = None
-        self._ternary_rows: Any = None
         self.freeze()
 
     def rotate(self, x: mx.array) -> mx.array:
@@ -218,12 +205,8 @@ class HadamardQuantizedLinear(nn.Module):
         return hadamard_rotate(x, self["signs"], self.block)
 
     def __call__(self, x: mx.array) -> mx.array:
-        rotated = self.rotate(x)
-        ternary = self._ternary
-        if ternary is not None and ternary.serves(rotated, self):
-            return ternary.ternary_matmul(rotated, self)
         return mx.quantized_matmul(
-            rotated,
+            self.rotate(x),
             self["weight"],
             scales=self["scales"],
             biases=self["biases"],
@@ -565,44 +548,8 @@ class Model(_qwen3_5.Model):
         report["shared_rotation_groups"] = self._arm_shared_rotations()
         report["float_dtypes"] = self._check_float_dtypes()
         report["packed_modules"] = len(self._prism_records)
-        report["ternary_kernel"] = self._arm_ternary_kernel()
         object.__setattr__(self, "_prism_post_load_report", report)
         return report
-
-    def _arm_ternary_kernel(self) -> dict[str, Any]:
-        """Arm the small-M ternary GEMV when its switch is on.
-
-        The kernel serves a projection only for the verify row counts its
-        install probe proved bit-exact against stock on every packed shape
-        of this pack; with the switch off, or on any miss, every projection
-        stays on ``mx.quantized_matmul``. The verdict is in the post-load
-        report and in ``mtplx.kernels.bonsai_ternary.engagement()``.
-        """
-
-        from ..kernels import bonsai_ternary
-
-        linears = [
-            module
-            for _record, module in self._packed_modules()
-            if isinstance(module, HadamardQuantizedLinear)
-        ]
-        for module in linears:
-            module._ternary = None
-            module._ternary_rows = None
-        if not bonsai_ternary.enabled():
-            return {"enabled": False, "installed": False, "served_rows": []}
-        probe = bonsai_ternary.install(linears, logger=_LOG)
-        armed = bool(bonsai_ternary.installed())
-        if armed:
-            for module in linears:
-                module._ternary = bonsai_ternary
-        return {
-            "enabled": True,
-            "installed": armed,
-            "served_rows": list(probe.get("served_rows") or []),
-            "disabled_reason": bonsai_ternary.disabled_reason(),
-            "probe": probe,
-        }
 
     def _packed_modules(self) -> list[tuple[PackedModuleRecord, Any]]:
         out = []
