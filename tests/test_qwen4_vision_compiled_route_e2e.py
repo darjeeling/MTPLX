@@ -371,6 +371,105 @@ def test_an_image_request_outgrows_its_first_grant_and_stays_exact(pack, monkeyp
     assert record["divergent_rounds"] == 0 and record["state_max_abs_diff"] == 0.0
 
 
+def _parity_script():
+    path = _SMOKE.with_name("qwen4_vision_compiled_parity.py")
+    spec = importlib.util.spec_from_file_location("qwen4_vision_compiled_parity", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _as_request_entry(kind, result):
+    """One request as the real-pack script reads it from the request log."""
+
+    import hashlib
+
+    entry = {
+        "kind": kind,
+        "output_sha256": hashlib.sha256(repr(result.tokens).encode()).hexdigest(),
+        "fixed_m4_admission": result.stats.fixed_m4_admission,
+    }
+    if _bank_report(result):
+        entry["compiled_verify"] = _bank_report(result)
+    return entry
+
+
+def test_the_real_pack_script_reads_these_records_as_exact(pack, monkeypatch):
+    """The verdict of scripts/qwen4_vision_compiled_parity.py over real records.
+
+    Its three arms, run here on the tiny pack through the generation loop:
+    the instrument, the product mode, and the kill switch. Both image arms run
+    inside the corrected scope, so the eager arm is a fair reference.
+    """
+
+    script = _parity_script()
+    ids, table, delta = _image_prompt(18)
+    text_ids = [3, 5, 7, 9, 11, 13] + list(range(20, 54))
+
+    def arm(mode, *, kill=False):
+        if kill:
+            monkeypatch.setenv("MTPLX_QWEN4_VISION_COMPILED_VERIFY", "0")
+        else:
+            monkeypatch.delenv("MTPLX_QWEN4_VISION_COMPILED_VERIFY", raising=False)
+        image = _generate(pack, monkeypatch, mode=mode, ids=ids, table=table, delta=delta)
+        text = _generate(pack, monkeypatch, mode=mode, ids=text_ids)
+        return {
+            "requests": {
+                "image_turn1": _as_request_entry("image", image),
+                "text_control": _as_request_entry("text", text),
+            }
+        }
+
+    arms = {"instrument": arm("parity2"), "product": arm("1"), "eager": arm("1", kill=True)}
+    outcome = script.evaluate(arms, eager_scope_fix_present=True)
+    assert outcome["verdict"] == "exact", outcome
+    assert outcome["failed_checks"] == [] and outcome["exit_code"] == 0
+    assert outcome["instrument"]["image_turn1"]["rounds"] >= 8
+    assert outcome["instrument"]["text_control"]["state"] == "exact"
+    assert {c["name"]: c["ok"] for c in outcome["checks"]} == {
+        "instrument_image_rounds_exact": True,
+        "instrument_every_image_round_had_a_reference": True,
+        "instrument_text_control_exact": True,
+        "product_image_requests_take_the_compiled_route": True,
+        "instrument_did_not_change_the_output": True,
+        "eager_arm_ran_on_the_eager_verifier": True,
+        "compiled_output_equals_eager_output": True,
+    }
+
+
+def test_the_real_pack_script_reads_a_wrong_delta_as_the_image_routes_fault(
+    pack, monkeypatch
+):
+    script = _parity_script()
+    real = generation._qwen4_vision_compiled_verify_admission
+
+    def off_by_one(rt, vision_splice, prompt_ids):
+        verdict = real(rt, vision_splice, prompt_ids)
+        if verdict["rope_delta"] is not None:
+            verdict = dict(verdict, rope_delta=verdict["rope_delta"] + 1)
+        return verdict
+
+    ids, table, delta = _image_prompt(18)
+    text_ids = [3, 5, 7, 9, 11, 13] + list(range(20, 54))
+    text = _generate(pack, monkeypatch, mode="parity2", ids=text_ids)
+    monkeypatch.setattr(
+        generation, "_qwen4_vision_compiled_verify_admission", off_by_one
+    )
+    image = _generate(pack, monkeypatch, mode="parity2", ids=ids, table=table, delta=delta)
+    arms = {
+        "instrument": {
+            "requests": {
+                "image_turn1": _as_request_entry("image", image),
+                "text_control": _as_request_entry("text", text),
+            }
+        }
+    }
+    outcome = script.evaluate(arms, eager_scope_fix_present=True)
+    assert outcome["verdict"] == "image_route_diverges" and outcome["exit_code"] == 1
+    assert outcome["instrument"]["image_turn1"]["first_divergence"]["round"] == 1
+    assert outcome["instrument"]["text_control"]["state"] == "exact"
+
+
 def test_the_refused_shape_stays_eager_and_says_why(pack, monkeypatch):
     ids, table, delta = _image_prompt(1)  # 23 tokens: the last block starts at 20
     assert max(i for i, token in enumerate(ids) if token == PAD) == 21
