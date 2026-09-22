@@ -119,7 +119,8 @@ def test_builds_a_complete_vision_pack_with_the_trunk_byte_for_byte(tmp_path):
     assert "—" not in card  # no em dashes in public text
 
 
-def test_built_pack_inspects_as_mtp_and_vision_and_loads_with_the_head(tmp_path):
+@pytest.mark.parametrize("generation_mode", ["mtp", "ar"])
+def test_built_pack_inspects_as_mtp_and_vision_and_loads_with_the_head(tmp_path, generation_mode):
     from mtplx import runtime
     from mtplx.artifacts import inspect_model
     from mtplx.vision import vision_spec_for_model_dir
@@ -127,7 +128,8 @@ def test_built_pack_inspects_as_mtp_and_vision_and_loads_with_the_head(tmp_path)
     source = _source(tmp_path)
     head = _head_pack(tmp_path, quantized=True)
     output = tmp_path / builder.PACK_NAME
-    builder.build_pack(source, output, mtp_source=builder.resolve_mtp_source(str(head)))
+    builder.build_pack(source, output, mtp_source=builder.resolve_mtp_source(str(head)),
+                       recommended_generation_mode=generation_mode)
 
     inspection = inspect_model(output).to_dict()
     assert inspection["vision"]["capable"] is True
@@ -135,6 +137,7 @@ def test_built_pack_inspects_as_mtp_and_vision_and_loads_with_the_head(tmp_path)
     assert inspection["mtp_num_hidden_layers"] == 1
     assert inspection["compatibility"]["arch_id"] == "qwen3-next-mtp"
     assert inspection["compatibility"]["mtp_supported"] != "no"
+    assert inspection["compatibility"]["runtime_contract"]["recommended_generation_mode"] == generation_mode
     assert vision_spec_for_model_dir(output) is not None
 
     rt = runtime.load(output, mtp=True)

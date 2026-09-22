@@ -786,6 +786,49 @@ def _apply_runtime_compatibility_mode(
     return None
 
 
+def _apply_model_contract_generation_mode_default(
+    args: Any,
+    inspection: dict[str, Any],
+    *,
+    printer=print,
+) -> None:
+    """Apply an artifact's AR recommendation without unloading its draft head."""
+    explicit = getattr(args, "generation_mode", None)
+    if explicit is not None and str(explicit).strip().lower() != "auto":
+        return
+    if (
+        bool(getattr(args, "stock_ar", False))
+        or bool(getattr(args, "no_mtp", False))
+        or getattr(args, "load_mtp", True) is False
+    ):
+        return
+    if explicit is None and {"load-mtp", "mtp"} & (getattr(args, "_cli_flags", set()) or set()):
+        # Explicit --load-mtp/--mtp keep the legacy MTP choice. "auto" opts
+        # into the pack default while still honoring no-head/AR switches.
+        return
+    contract = _model_runtime_contract(inspection) or {}
+    # Like the depth default, this belongs to the artifact, independent of
+    # profile. Older inspectors omit fields from their typed serialization.
+    metadata = _artifact_runtime_metadata(inspection)
+    recommendation = {
+        **metadata,
+        **{key: value for key, value in contract.items() if value is not None},
+    }
+    if recommendation.get("recommended_generation_mode") != GENERATION_MODE_AR:
+        return
+    _set_generation_mode_on_args(args, GENERATION_MODE_AR)
+    evidence = recommendation.get("recommended_generation_mode_evidence") or {}
+    measured_at = evidence.get("measured_at") if isinstance(evidence, dict) else None
+    date = f" ({str(measured_at).split('T', 1)[0]})" if measured_at else ""
+    reason = " ".join(str(recommendation.get("recommended_generation_mode_reason") or "").split())
+    if reason:
+        reason = reason.rstrip(". ") + ". "
+    printer(
+        f"Serving plain decoding as recommended by this pack{date}. "
+        f"{reason}Pass --generation-mode mtp to use the head."
+    )
+
+
 def _fan_mode_from_args(args: Any) -> str:
     mode = fan_mode_from_args(args)
     setattr(args, "fan_mode", mode)
@@ -9838,7 +9881,12 @@ def cmd_serve_public(args: Any) -> int:
     )
     if mode_exit is not None:
         return mode_exit
-    # The missing-MTP degrade above may have flipped args to AR; the local
+    _apply_model_contract_generation_mode_default(
+        args,
+        inspection,
+        printer=(lambda line: print(line, file=sys.stderr)) if quiet_json else _print_serve_start_line,
+    )
+    # Compatibility or the pack recommendation may have flipped args to AR; the local
     # snapshot taken before model resolution would otherwise hand the child
     # a stale "--generation-mode mtp" with load_mtp already stripped.
     generation_mode = _generation_mode_from_args(args)
