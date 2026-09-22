@@ -5237,6 +5237,18 @@ _VISION_IMAGE_MAX_BYTES = 50 * 1024 * 1024
 # vision_start + image_pad + vision_end; the single pad is expanded to
 # the per-image grid count after templating.
 _VISION_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
+_VISION_CONTROL_LITERALS = ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>")
+
+
+def _escape_vision_control_text(text: str) -> str:
+    """Keep caller-authored image controls readable without creating image slots.
+
+    Only structured image parts supply pixels. Escaping an unbound literal
+    preserves its name and position; it cannot recover an omitted image.
+    """
+    for token in _VISION_CONTROL_LITERALS:
+        text = text.replace(token, token.replace("|", "\\|"))
+    return text
 
 
 def _server_vision_spec(state: Any) -> Any | None:
@@ -5280,8 +5292,8 @@ def _vision_extract_and_flatten(
     """Replace image content parts with the vision placeholder text.
 
     Returns the flattened messages plus the raw image payloads in prompt
-    order. Messages without image parts pass through untouched so the
-    text-only path stays byte-identical.
+    order. Reserved image-control literals in caller text are escaped before
+    inserting the real placeholders. Other text stays byte-identical.
     """
 
     images: list[bytes] = []
@@ -5292,24 +5304,39 @@ def _vision_extract_and_flatten(
             message.get("content") if is_mapping else getattr(message, "content", None)
         )
         if not isinstance(content, list):
+            if isinstance(content, str):
+                text = _escape_vision_control_text(content)
+                if text != content:
+                    updated = (
+                        dict(message, content=text) if is_mapping
+                        else message.model_copy(update={"content": text})
+                    )
+                    flattened.append(updated)
+                    continue
             flattened.append(message)
             continue
         parts: list[str] = []
+        text_parts: list[str] = []
         for item in content:
             if isinstance(item, str):
-                parts.append(item)
+                text_parts.append(item)
                 continue
             if not isinstance(item, dict):
-                parts.append(str(item))
+                text_parts.append(str(item))
                 continue
             item_type = str(item.get("type") or "")
             if item_type == "image_url" or "image_url" in item:
                 image_url = item.get("image_url")
                 url = image_url.get("url") if isinstance(image_url, dict) else image_url
                 images.append(_image_bytes_from_url(str(url or "")))
+                # Adjacent text parts may split a literal across their seam.
+                # Escape the joined text before adding this image's control.
+                parts.append(_escape_vision_control_text("".join(text_parts)))
+                text_parts.clear()
                 parts.append(_VISION_PLACEHOLDER)
             elif item_type == "text" or "text" in item:
-                parts.append(str(item.get("text", "")))
+                text_parts.append(str(item.get("text", "")))
+        parts.append(_escape_vision_control_text("".join(text_parts)))
         text = "".join(parts)
         if is_mapping:
             updated = dict(message)
