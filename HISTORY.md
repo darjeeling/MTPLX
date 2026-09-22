@@ -14,6 +14,8 @@ The speed records, each with its conditions. Every number was measured on a MacB
 
 | Date | Model | tok/s | Conditions | Source |
 |---|---|---|---|---|
+| 21 September 2026 | Qwen 3.8 Flash Next, Optimized Speed | 76.0 | 65,502-token prompt, 512 tokens generated, nothing cached, fans at maximum, alternating boots; 64.0 on 2.11.3 | [2.11.4 notes](https://mtplx.com/releases/2.11.4/) |
+| 21 September 2026 | Ternary Bonsai 2 27B, Optimized Speed | 46.8 to 50.6 | 512 tokens generated, the draft head at depth 1, through the daemon with the pack's sampler; 26.8 to 40.0 for plain decoding in the same runs; laptop in use, indicative | [2.11.4 notes](https://mtplx.com/releases/2.11.4/) |
 | 16 September 2026 | Qwen 3.8 Flash Next, Optimized Speed | 125.8 | one OpenCode request, 1,301 tokens generated, 18,539-token prompt with 18,364 tokens served from cache, MTP depth 3, MTPLX 2.11.3 | [2.11.3 notes](https://mtplx.com/releases/2.11.3/) |
 | 16 September 2026 | Qwen 3.8 Flash Next | 79.3 | 9k-token code prompt, 1,500 tokens generated, seeded sampler, thinking off, two alternating boots each; 62.5 on 2.11.2 | [2.11.3 notes](https://mtplx.com/releases/2.11.3/) |
 | 29 August 2026 | Qwen 3.8 27B, Optimized Speed | 87.6 | rewriting a file it just wrote, stock settings, MTPLX 2.10.0 | [2.10.0 notes](https://mtplx.com/releases/2.10.0/) |
@@ -49,6 +51,8 @@ The speed records, each with its conditions. Every number was measured on a MacB
 **4 September.** MTPLX 2.11. Flash Next decodes 68.4 tok/s at 16k context, 60.9 at 100k and 44.2 at 206k on an M5 Max, against 53.2, 47.5 and 32.2 on 2.10.2. Agent tool turns lose their dead time. [2.11 notes](https://mtplx.com/releases/2.11.1/).
 
 **17 September.** MTPLX 2.11.3. Eight exactness defects found in our own engine and fixed, each with a test that pins it. At temperature 1, top-p 0.95, top-k 20, a thousand four-token draws from the fast path match a thousand from the plain path within the plain path's own noise, on both Flash Next and the 27B Quality pack. A Flash Next OpenCode request decodes at 125.8 tok/s on an M5 Max, a 9k-token code prompt at 79.3 tok/s (62.5 on 2.11.2), a 109k-token OpenCode turn at 61.8 tok/s and a 200k-token turn at 50.3. 261,120-token prompts decode. [2.11.3 notes](https://mtplx.com/releases/2.11.3/).
+
+**21 September.** MTPLX 2.11.4. Two reports fixed the same day they were understood: a pasted traceback that quoted a tool tag no longer ends the model's thinking (10 streamed requests quoting up to 43 tags, none leaked), and Gemma 4 streamed replies finish again (#517). A 65,502-token Flash-Next prompt decodes at 76.0 tok/s on an M5 Max (64.0 on 2.11.3), is processed at 1,192 tok/s (900) and answers its first token in 55.2 s (73.0). Image requests take the compiled verify route on Flash-Next, with the image positions now consistent through the whole reply. Prism ML's Ternary Bonsai 2 27B runs natively with the draft head on (47 to 51 tok/s against 27 to 40 for plain decoding through the daemon) and fits 16 GB Macs with an 8K window; a Flash-Next Optimized-Quality recipe is recommended first from 256 GB. Stop, then resend, keeps the conversation's session; cancelling a start no longer aborts the app. [2.11.4 notes](https://mtplx.com/releases/2.11.4/).
 
 ## Used by
 

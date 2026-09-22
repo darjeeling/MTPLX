@@ -4,9 +4,74 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] (2.11.4)
+## [2.11.4] - 2026-09-21
 
 ### Added
+
+- **Dense 27B image compilation remains opt-in.** The route carries the image delta as a graph input and leaves the text trace unchanged, but it has not passed the complete serving exactness gate. In a seeded 27B image replay the first 61 output tokens agreed before the compiled and eager paths separated. Their prefill logits, hidden states, first draft inputs and rotary positions agreed exactly; the first differing operation was attention over the eager path's live-length buffers and the compiled path's padded buffers. Dense image requests therefore keep eager verification by default. `MTPLX_DENSE_VISION_COMPILED_VERIFY=1` enables the candidate route; the shared image kill switch and state-rebase refusal still take precedence. Flash-Next admission is unchanged. Two complete serving runs exercised 18 requests, nine with thinking on and nine with thinking off; every request finished with `stop`. The instrument compared 762 compiled image rounds and 511 text rounds with zero differences in logits, hidden states, cache state or captures, but none of the four full image replies matched the separately running eager arm. Both full gates exited with failure, so those per-round matches are not a claim of serving exactness.
+
+- **Ternary Bonsai 2 27B** (issue #515). MTPLX loads Prism ML's 2-bit
+  ternary Bonsai 2 27B natively (`prism_hadamard_qwen35`: the Hadamard
+  rotation is applied at run time; a pack without its rotation metadata or
+  its vision tower is refused), with image input. The MTPLX pack
+  `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` carries Prism ML's weights
+  byte for byte and adds the Qwen3.8-27B draft head; served id
+  `mtplx-bonsai-2-27b-optimized-speed`, engine floor 2.11.4. The draft head
+  is on by default at depth 1: through the daemon on an M5 Max it measured
+  47 to 51 tok/s against 27 to 40 for plain decoding on code and reasoning
+  prompts, thinking on and off, with 58 to 75 percent of drafts accepted.
+  `scripts/build_bonsai_mtplx_pack.py` builds, stamps and restamps the pack
+  from measured evidence; `scripts/bonsai_memory_table.py` measures the
+  peak memory per RAM class.
+
+- **Flash-Next Optimized-Quality recipe.** `flash-next-optimized-quality`
+  in Forge: the main model and the draft head at 8 bits, group size 64, the
+  structural weights in BF16, the n-gram table at 4 bits, group size 32 (the
+  fixed-width verifier rejects an 8-bit table). The streaming audit stamps
+  its own result into the pack and
+  `scripts/build_flash_next_quality_pack.sh` builds, verifies with a full
+  load and smoke-tests chat, a tool call and an image in one command.
+  Recommended first on Macs with 256 GB or more. The built pack follows.
+
+- **Compiled verify route for image requests on Flash-Next.** An image
+  request used to fall back to eager verification for the whole
+  conversation. The compiled verifier now owns a rotary origin per request:
+  the image position delta is an int32 graph input, the text trace is
+  unchanged, and requests with different images share one compiled
+  program. Six prompt shapes the route cannot represent exactly are refused
+  by name and stay eager; `MTPLX_QWEN4_VISION_COMPILED_VERIFY=0` turns the
+  route off; `MTPLX_COMPILED_VERIFY=parity2` compares every compiled round
+  against the eager forward and records per-leaf differences;
+  `scripts/qwen4_vision_compiled_parity.py` proves the route on a real pack
+  and refuses to say `exact` without a compiled dispatch and a warm restore
+  into generated tokens.
+
+- **An exact 2-bit kernel for Bonsai verify rows, off by default**
+  (`MTPLX_BONSAI_TERNARY_KERNEL=1`). Serves four to eight verify rows after an
+  install-time probe proves every row count bit-exact against stock on every
+  shape of the pack; a miss removes the row count with the reason in the
+  demotion ledger. Measured on an M5 Max: nothing exact beats stock at one or
+  two rows; 1.01 to 1.04x on the whole step at four rows, within a 2 percent
+  noise floor, so the switch stays off until measured through the daemon.
+
+- **Packs can declare their generation mode.** `recommended_generation_mode`
+  (`mtp` or `ar`), with a reason and the measurement behind it, in the
+  runtime contract. `mtplx serve` applies it when the mode flag is omitted or
+  `auto`; an explicit `--generation-mode` wins; the head stays loaded so the
+  daemon can switch live. No shipped pack declares `ar`.
+
+- **Use MTPLX settings for connected apps.** A switch in the inference
+  settings (`control_client_settings`, env `MTPLX_MANAGED_CLIENT_CONTROLS`)
+  that says whether MTPLX or the connected client controls the request
+  settings; on by default. Pi mirrors the live reasoning setting and
+  restores its own choice when the switch is off. Translated into all 13
+  app languages.
+
+- **One catalog for the app and the CLI.** 25 entries with the same
+  identities, sizes and recommendation rule (`BONSAI_RECOMMENDATION_MIN_GIB`
+  16, Flash-Next Optimized-Quality from 256 GiB), a shared recommendation
+  fixture both sides are tested against, and model descriptions that follow
+  the app language without a restart.
 
 - **`forge build` converts Qwen3.8-Flash-Next sources** (PR #508, Bradford
   Matthews, issue #390). Forge handed every Flash-Next fine-tune to the
@@ -36,6 +101,40 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Changed
 
+- **Speed: the decode and prompt-processing work of September 18 to 20.**
+  Measured 2.11.3 against 2.11.4 on an M5 Max, same runtime, alternating
+  boots, Flash-Next Optimized Speed, 512 generated tokens: 65,502-token
+  prompt, decode 64.0 to 76.0 tok/s, prompt processing 900 to 1,192 tok/s,
+  first token 73.0 to 55.2 s; 4,061-token prompt, decode 89.9 to 90.0,
+  prompt processing 906 to 1,234, first token 4.56 to 3.37 s. Saved
+  attention buffers grow to the size reuse needs and are reused in place
+  (at some prompt lengths all 24 key and value buffers were copied every
+  verification step, about 135 MB each at 128K); Flash-Next prepares its
+  sampled guesses together and overlaps their preparation with GPU work;
+  prompt processing uses 4,096-token chunks on the supported M5 chips and
+  begins sparse processing at 16K for wide chunks; attention selection no
+  longer compiles a new GPU program per context size; the smaller
+  lookup-table files are preferred and resident data is not reread.
+
+- **The memory planner admits a model on a tight Mac when only the
+  session-bank floor is unfunded.** When the engine budget cannot fund the
+  weights, the 3 GiB runtime transient, the 1 GiB bank floor and one KV
+  block together, but can fund the weights, the transient plus a 256 MiB
+  margin and one block at the dense KV width, the plan admits the model
+  with the bank floor at zero (restores come from the SSD tier). Measured on
+  Bonsai 2 27B: the 16 GiB class admits 8,192 tokens (peak 11.78 to
+  11.80 GiB under the 12 GiB budget). Every plan that funds the floor is
+  unchanged.
+
+- **The SSD conversation-cache default follows RAM** from both the app and
+  the CLI: 16 GB on Macs with 16 GB or less, 24 GB up to 32 GB, 32 GB up to
+  64 GB, 100 GB above. An explicit limit wins.
+
+- **Flash-Next Optimized Speed on a 96 GB Mac** has one 84 GiB engine
+  allowance: a planned 86,016-token window with sparse prompt processing,
+  20,480 without; a model classified as too large gets the 4,096-token
+  floor instead of the full 262,144-token maximum by accident.
+
 - **Request captures hold no content by default** (PR #356, Philip John
   Basile). Capture is still off unless `MTPLX_REQUEST_CAPTURE_DIR` is set.
   When it is on, a record now holds the sampler settings, the seed, token
@@ -52,6 +151,68 @@ All notable user-facing changes to MTPLX. The format is based on
   files, so it is unaffected. Records are now `capture_version` 2.
 
 ### Fixed
+
+- **Eager BF16 verification uses the attention-gate rounding already used by compiled verification.** This affects the shared gated full-attention path in BF16 Qwen3-Next, Qwen 3.5, 3.6 and 3.8 models, including their MoE variants. It applies when verification runs eagerly: dense image requests, contexts beyond the compiled route's 32,768-token limit, buffer-growth fallbacks, warm-restore rounds before compilation, and eager copy, repair or final-save forwards within an otherwise compiled request. The compiled text verify graph, prompt processing and plain decoding keep their existing numerics. Float16 and float32 gates are unchanged, including Bonsai's float16 path. Gemma 4 and Flash-Next use different attention implementations and are unchanged by this fix. Five exact gate tests cover the BF16 contract and the unchanged dtypes and phases.
+
+- **A quoted tool tag no longer ends the thinking.** A pasted traceback
+  containing `</parameter>` made the rest of the model's thinking appear in
+  the visible chat. A thinking block ends only at `</think>` or at the
+  opener of a real tool call (tools declared, line start, outside a code
+  fence, call-shaped; a bare `<function=NAME>` must name a declared tool).
+  The same rule gates the reasoning-only retry, and a retry fed a tool
+  result starts its stream clean. 117 contract cases; 10 streamed requests
+  on the release build quoting up to 43 tags in one thinking block, none
+  leaked.
+
+- **Gemma 4 streamed replies finish** (issue #517). A reply without tools
+  failed after generating with `'Gemma4ThinkingContentStreamSplitter'
+  object has no attribute 'suppressed_tool_markup_chars'`. The splitter
+  contract is stated once on the base class; 37 contract tests pass (12
+  failed before).
+
+- **Stop, then resend, no longer processes the whole prompt again.** The
+  app rotated the conversation's server session id after every Stop, so
+  the resend was a new conversation to the daemon (26,294 tokens processed
+  again, 24.5 s to the first token in the report). The app keeps the
+  session across a Stop, and the daemon lets the follow-up wait, at most
+  `MTPLX_SESSION_CANCEL_HANDOFF_WAIT_S` (30 s), while the stopped generation
+  lets go of the session instead of answering 409; the request log records
+  `request_session_cancel_handoff`.
+
+- **Cancelling an app start no longer aborts the app** ("freed pointer was
+  not the last allocation"). The daemon supervisor's health probe and
+  restart delay were asynchronous closure literals in default arguments of
+  a public initializer; copies emitted into different modules disagreed on
+  the asynchronous frame size and the closure overran its frame. The
+  defaults are named static functions. A start cancelled with Stop writes
+  no failed-start report.
+
+- **Flash-Next image positions are consistent through the whole reply**
+  (since 2.10.1 only the main verification forward ran inside the image
+  position scope; the copy-round verification, the repairs and the final
+  save used plain text positions, about 990 positions off after a
+  1,024-token image). One helper carries the positions to all eight trunk
+  forward sites. Saved image conversations carry a new cache key
+  (`qwen4_mrope_v2`), so an existing image conversation is processed again
+  from its first image once; text before it is still reused.
+
+- **Dense Qwen 3.5 and 3.8 27B models, and Bonsai, rope image tokens at
+  their grid positions**, and an image turn restores the session's text
+  history instead of processing it again (a Pi conversation reprocessed
+  154,899 tokens, 184 s, after an image was attached).
+
+- **The in-flight memory guard reads what the kernel can still hand out**
+  (issue #516: a kernel watchdog restart on a 128 GB M5 Max with the worker
+  at 118 GiB resident and `allow_swap` on). `kern.memorystatus_level` and
+  the process footprint feed the guard; abort floor 2.5 percent of RAM
+  (3.2 GiB on 128 GB, never under 1 GiB), shed floor twice that, checks
+  every 2 s under the shed floor so the sustained-pressure abort fires
+  about 6 s after the floor is crossed. `allow_swap` keeps admitting past
+  the fit; it does not switch the guard off. Kill switch
+  `MTPLX_SYSTEM_MEMORY_GUARD=0`.
+
+- **A Swift parity test read a 16 KB pipe before waiting on its child**,
+  so the suite could hang for five minutes on a long CLI dry run.
 
 - **Saving a long session to SSD no longer holds up the next request**
   (issue #505, reported by peterloron). On a 64 GB Mac with the 27B at about
