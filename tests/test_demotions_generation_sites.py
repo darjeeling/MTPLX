@@ -120,6 +120,17 @@ def test_copy_round_and_vision_sites_are_wired():
     assert 0 < note - forward < 400
     # The reason on the per-round path is a constant: no formatting per round.
     assert isinstance(generation._COPY_ROUND_EAGER_REASON, str)
-    vision = source.index('"vision_request_eager_verify"')
-    gate = source.index("if vision_splice is not None and bool(")
-    assert 0 < vision - gate < 200
+    # An image request that stays on the eager verifier is counted where it is
+    # decided: the fixed-M4 admission, which generate_mtpk calls, notes it with
+    # the reason the request record carries (the refusals themselves are
+    # exercised in tests/test_qwen4_fixed_m4_vision_admission.py).
+    assert "_qwen4_fixed_m4_admission(" in source
+    admission = inspect.getsource(generation._qwen4_fixed_m4_admission)
+    note = admission.index('"vision_request_eager_verify"')
+    refusal = admission.index("if refusal is not None:")
+    assert 0 < note - refusal < 400
+    # Every reason is a constant line: nothing is formatted per request.
+    assert all(
+        isinstance(reason, str) and reason
+        for reason in generation._VISION_COMPILED_VERIFY_REFUSALS.values()
+    )

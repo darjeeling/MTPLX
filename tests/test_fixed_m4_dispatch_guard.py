@@ -38,7 +38,7 @@ def _gdn_entry(tag: str):
     return SimpleNamespace(cache=[_Leaf(f"{tag}.conv"), _Leaf(f"{tag}.state")])
 
 
-def _bank(fn):
+def _bank(fn, *, rope_args=()):
     qsa = _qsa_entry("qsa0")
     gdn = _gdn_entry("gdn0")
     bank = object.__new__(graphbank.CompiledVerifyBank)
@@ -58,6 +58,11 @@ def _bank(fn):
         "fn": fn,
         "capture_leaves": 6,
         "capture_plan": ((gdn, 0, 6),),
+        # What install_fixed_m4 binds for the request's positions: nothing
+        # for a text request, the rotary delta for an image request.
+        "rope_args": tuple(rope_args),
+        "rope_delta": None,
+        "parity2": False,
     }
     return bank, qsa, gdn
 
@@ -199,3 +204,81 @@ def test_a_clean_first_dispatch_proves_the_lane_and_later_rounds_are_unguarded(m
     assert proved == [] and len(evals) == 1
     assert bank.stats["compiled_calls"] == 2
     assert demotions.snapshot()["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Image requests: the rotary delta is a graph input of the replay.
+# ---------------------------------------------------------------------------
+
+
+def _recording_fn(seen):
+    def fn(input_ids, *args):
+        seen.append((input_ids, args))
+        return _good_fn(input_ids, args[0], *args[-7:])
+
+    return fn
+
+
+def test_the_replay_passes_the_delta_between_the_auxiliary_and_the_state():
+    """``verify_step(input_ids, aux, rope_delta, *state)``: the trace unpacks
+    its inputs by position, so the order is the contract."""
+
+    seen = []
+    delta = _Leaf("rope_delta")
+    bank, qsa, gdn = _bank(_recording_fn(seen), rope_args=(delta,))
+    state_before = [*qsa.kv.cache, qsa.raw_keys, qsa.pooled, *gdn.cache]
+    _call(bank)
+    (input_ids, args), = seen
+    assert input_ids.shape == (1, 4)
+    assert args[0] == "aux"
+    assert args[1] is delta
+    assert len(args) == 2 + len(state_before)
+    assert all(a is b for a, b in zip(args[2:], state_before))
+
+
+def test_a_text_request_replays_with_the_inputs_it_always_had():
+    seen = []
+    bank, qsa, gdn = _bank(_recording_fn(seen))
+    state_before = [*qsa.kv.cache, qsa.raw_keys, qsa.pooled, *gdn.cache]
+    _call(bank)
+    (_input_ids, args), = seen
+    assert args[0] == "aux"
+    assert len(args) == 1 + len(state_before)
+    assert all(a is b for a, b in zip(args[1:], state_before))
+
+
+def test_the_delta_is_bound_once_as_one_int32_value():
+    import mlx.core as mx
+
+    bank = object.__new__(graphbank.CompiledVerifyBank)
+    bank._rope_delta = None
+    bank._rope_delta_value = None
+    bank._adopt_rope_delta(None)
+    assert bank._rope_args() == ()
+    assert bank._verify_key(4, None, 0) == (4, "", 0, 0)
+
+    bank._adopt_rope_delta(-990)
+    (delta,) = bank._rope_args()
+    assert delta.dtype == mx.int32 and tuple(delta.shape) == (1,)
+    assert bank._rope_delta_value == -990
+    # The key says THAT the step takes a delta, never which one: every image
+    # request of the process shares one trace.
+    assert bank._verify_key(4, None, 1) == (4, "", 1, 1)
+    bank._adopt_rope_delta(-990)  # the same request saying it again
+    assert bank._rope_args()[0] is delta
+    with pytest.raises(ValueError, match="a request has one delta"):
+        bank._adopt_rope_delta(-4)
+    # The rope kernels take one int32 value; anything else is refused where
+    # the request is admitted, not inside a trace.
+    for bad in (mx.array([1], dtype=mx.int64), mx.array([1, 2], dtype=mx.int32), 1.5):
+        with pytest.raises(TypeError):
+            graphbank.as_rope_delta(bad)
+
+
+def test_install_stays_closed_to_the_eager_authoritative_parity_mode():
+    bank = object.__new__(graphbank.CompiledVerifyBank)
+    bank.strict_no_fallback = True
+    bank.parity = True
+    bank.parity2 = False
+    with pytest.raises(ValueError, match="parity2"):
+        bank.install_fixed_m4([], prompt_ids=[1], hidden_variant=None)

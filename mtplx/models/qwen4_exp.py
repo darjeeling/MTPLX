@@ -355,6 +355,64 @@ def _vision_position_cos_sin(positions, inv_freq, axes, scaling=1.0):
     return cos * scaling, sin * scaling
 
 
+def _vision_chunk_cos_sin(
+    table: mx.array | None,
+    delta: int,
+    pos_start: int,
+    rows: int,
+    inv_freq: mx.array,
+    axes: mx.array,
+    attention_scaling: float = 1.0,
+) -> tuple[mx.array, mx.array]:
+    """Attention rope tables for rows ``[pos_start, pos_start + rows)`` of an
+    image request on a stock cache.
+
+    The rule is per row. A row inside the request's M-RoPE table rotates at
+    its (t, h, w) table position; a row past the table is equal-axes at
+    ``index + delta``, which is plain rope shifted by the delta. One forward
+    can hold both: a chunk that straddles the end of the table, which is what
+    a state rebase feeds when it re-prefills the prompt together with the
+    tokens generated so far. Choosing one rule for the whole chunk (the code
+    before this function did, by ``end <= table length``) put every table row
+    of such a chunk at ``index + delta``, the image rows included.
+
+    A chunk wholly inside the table, or wholly past it, builds exactly the
+    table it always built (same call, same operands), so nothing changes for
+    a request that never straddles. The straddling chunk is the row-wise
+    concatenation of those same two tables, a copy, so each of its rows holds
+    the bits the unstraddled forward of that row would have held. The QSA
+    indexer makes the same per-row choice (``_vision_position_cos_sin``).
+
+    The amplitude scaling of a scaled rope type applies to every row, as in
+    the reference rotary embedding and as the indexer does; the table rows
+    used to miss it. The shipped packs are ``rope_type: default`` (1.0), for
+    which the multiplication is not built at all.
+    """
+
+    table_len = int(table.shape[1]) if table is not None else 0
+    inside = max(0, min(pos_start + rows, table_len) - pos_start)
+    past = rows - inside
+    cos_in = sin_in = None
+    if inside:
+        cos_in, sin_in = _mrope_cos_sin(
+            table[:, pos_start : pos_start + inside], inv_freq, axes
+        )
+        if attention_scaling != 1.0:
+            cos_in = cos_in * float(attention_scaling)
+            sin_in = sin_in * float(attention_scaling)
+        if not past:
+            return cos_in, sin_in
+    first_past = pos_start + inside + delta
+    positions = mx.arange(first_past, first_past + past, dtype=mx.int32)
+    cos_past, sin_past = _rope_cos_sin(positions, inv_freq, attention_scaling)
+    if not inside:
+        return cos_past, sin_past
+    return (
+        mx.concatenate([cos_in, cos_past], axis=0),
+        mx.concatenate([sin_in, sin_past], axis=0),
+    )
+
+
 def _apply_partial_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
     """Rotate the first `2 * inv_freq.size` features of the last axis of
     x[..., S, H, D] with per-position tables cos/sin of shape [S, rot]."""
@@ -2762,6 +2820,13 @@ class QSAIndexer(nn.Module):
         Verify width is static at trace time.  At the production M4/ratio-4
         shape at most one block completes, so this is one gather, one pooled
         projection, and one conditional fixed-shape slice update.
+
+        A pooled key rotates at its block's FIRST token. For an image request
+        that position is the block start plus the bank's rotary delta, which
+        holds for every block that starts after the last image; a block that
+        would start on an image row is kept off this lane at admission
+        (``generation._qwen4_vision_compiled_verify_admission``). The block
+        INDEX, the gather and the slice update stay on the logical offset.
         """
         step_rows = int(getattr(cache, "_last_write_rows", 1))
         nb_old = cache.offset // self.ratio
@@ -2769,6 +2834,9 @@ class QSAIndexer(nn.Module):
         max_new = max(1, (step_rows + self.ratio - 1) // self.ratio)
         pooled = cache.pooled
         pooled_capacity = int(pooled.shape[1])
+        # (``_call_rows`` has already read ``cache.rope_offset`` strictly by
+        # the time a forward gets here.)
+        rope_delta = getattr(cache, "rope_delta", None)
         for rel in range(max_new):
             block = nb_old + rel
             safe_block = mx.minimum(
@@ -2785,6 +2853,8 @@ class QSAIndexer(nn.Module):
             candidate = mx.mean(fresh.astype(mx.float32), axis=2).astype(fresh.dtype)
             candidate = self.k_layernorm(candidate)
             starts = safe_block.reshape(1).astype(mx.int32) * self.ratio
+            if rope_delta is not None:
+                starts = starts + rope_delta
             if qwen4_opdiet_enabled("rope"):
                 cos, sin = _rope_cos_sin_half(
                     starts,
@@ -3229,15 +3299,34 @@ class QSAIndexer(nn.Module):
         )
 
     def _prepare_queries_eager(self, q: mx.array, pos_start: int) -> mx.array:
-        """Stock query preparation kept as the numeric oracle."""
+        """Stock query preparation kept as the numeric oracle.
 
-        q = self.q_layernorm(q)
+        Reads the request context: inside an image request's scope the
+        queries rotate at the request's table positions. Stock caches only;
+        the fixed lane calls ``_prepare_queries_plain`` directly.
+        """
+
         if self._uses_vision_positions():
+            q = self.q_layernorm(q)
             positions = pos_start + mx.arange(q.shape[1], dtype=mx.int32)
             cos, sin = _vision_position_cos_sin(
                 positions, self._inv_freq, self._mrope_axes, self._rope_attention_scaling,
             )
             return _apply_partial_rope(q, cos, sin)
+        return self._prepare_queries_plain(q, pos_start)
+
+    def _prepare_queries_plain(self, q: mx.array, pos_start) -> mx.array:
+        """RMSNorm and partial RoPE at ``pos_start + row``. Reads no context.
+
+        The fixed compiled-verify lane rotates at its bank's own origin
+        (``TensorOffsetQSACache.rope_offset``) and must never read
+        ``vision_rope_state()``: inside a verify trace that read would bake
+        one request's table or delta into a graph every request replays.
+        This is the text arithmetic of ``_prepare_queries_eager``, unchanged,
+        with that read left out.
+        """
+
+        q = self.q_layernorm(q)
         if qwen4_opdiet_enabled("rope"):
             cos, sin = _shared_rope_cos_sin_half(
                 pos_start,
@@ -3676,12 +3765,16 @@ class QSAIndexer(nn.Module):
         q = q.reshape(B, S, self.n_heads, self.head_dim)
         k = k.reshape(B, S, self.head_dim)
         if fixed_capacity:
+            # The bank's rotary origin: the logical offset for text (the same
+            # array object), offset + the image delta otherwise. ``pos_start``
+            # keeps driving the selection below; it is a KV index.
+            rope_start = cache.rope_offset
             if self._verify_glue_rope_idx():
                 # MTPLX_QWEN4_VERIFY_GLUE item 'qsa_rope_idx': RMSNorm and
                 # partial RoPE through the shipped fused preparation kernel.
-                q = self._prepare_queries_m4(q, pos_start)
+                q = self._prepare_queries_m4(q, rope_start)
             else:
-                q = self._prepare_queries_eager(q, pos_start)
+                q = self._prepare_queries_plain(q, rope_start)
             cache.write_raw(k)
             cache._last_write_rows = int(S)
             pooled = self._extend_pooled(cache, T)
@@ -4041,7 +4134,15 @@ class Attention(nn.Module):
     def __call__(self, x: mx.array, cache: QSACache) -> mx.array:
         B, S, _ = x.shape
         pos_start = cache.offset
-        vrope = vision_rope_state()
+        # A fixed-capacity bank (the compiled verify lane) owns its rotary
+        # origin: the logical offset for a text request, offset + the image
+        # delta otherwise. On that lane the request context is never read: a
+        # table or a delta read here would be baked into a verify trace that
+        # every request of the process replays. ``pos_start`` stays the KV
+        # index for the masks, the selection and the writes below.
+        fixed = bool(getattr(cache, "fixed_capacity", False))
+        rope_start = cache.rope_offset if fixed else pos_start
+        vrope = None if fixed else vision_rope_state()
 
         fused = getattr(self, "qkv_fused", None)
         if fused is not None:
@@ -4076,24 +4177,24 @@ class Attention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
         if vrope is not None and self._mrope_axes is not None:
-            # Vision request: image tokens rope at (t, h, w) grid positions
-            # from the request's M-RoPE table; spans past the table (decode
-            # continuation) are equal-axes at sequence_index + delta, which
-            # is plain rope shifted by delta. Table and delta are derived
-            # per request from content — nothing new rides cache state.
+            # Vision request on a stock cache: image tokens rope at (t, h, w)
+            # grid positions from the request's M-RoPE table; spans past the
+            # table (decode continuation) are equal-axes at sequence_index +
+            # delta, which is plain rope shifted by delta. Table and delta are
+            # derived per request from content, so nothing new rides banked
+            # cache state. (A fixed bank carries that same delta as its rotary
+            # origin for the life of the request and drops it at demotion.)
+            # The choice is per row: a chunk may straddle the end of the table.
             table, delta = vrope
-            end = pos_start + S
-            if table is not None and end <= int(table.shape[1]):
-                cos, sin = _mrope_cos_sin(
-                    table[:, pos_start:end], self._inv_freq, self._mrope_axes
-                )
-            else:
-                positions = mx.arange(
-                    pos_start + delta, pos_start + delta + S, dtype=mx.int32
-                )
-                cos, sin = _rope_cos_sin(
-                    positions, self._inv_freq, self._rope_attention_scaling
-                )
+            cos, sin = _vision_chunk_cos_sin(
+                table,
+                delta,
+                pos_start,
+                int(S),
+                self._inv_freq,
+                self._mrope_axes,
+                self._rope_attention_scaling,
+            )
         elif vrope is None and self._verify_glue_rope(int(S)):
             # MTPLX_QWEN4_VERIFY_GLUE item 'qsa_rope': the table build and
             # both rotations as ONE dispatch. Same arithmetic, same order --
@@ -4105,24 +4206,25 @@ class Attention(nn.Module):
                 q,
                 k,
                 self._inv_freq,
-                pos_start=pos_start,
+                pos_start=rope_start,
                 attention_scaling=self._rope_attention_scaling,
             )
             q = rotated_q
             cos = sin = None
         elif qwen4_opdiet_enabled("rope"):
-            # Text rope: one half-width table per (pos_start, S) instead of a
-            # full-width table per consumer. The indexer above already asked
-            # for this exact table, so this is a memo hit inside the layer.
+            # Text rope: one half-width table per (rope_start, S) instead of
+            # a full-width table per consumer. For a text request the indexer
+            # above already asked for this exact table, so this is a memo hit
+            # inside the layer.
             cos, sin = _shared_rope_cos_sin_half(
-                pos_start, int(S), self._inv_freq, self._rope_attention_scaling
+                rope_start, int(S), self._inv_freq, self._rope_attention_scaling
             )
             q = _apply_partial_rope_half(q, cos, sin)
             k = _apply_partial_rope_half(k, cos, sin)
             cos = sin = None
         else:
-            # ``pos_start`` may be a graph tensor (fixed compiled verify bank).
-            positions = pos_start + mx.arange(S, dtype=mx.int32)
+            # ``rope_start`` may be a graph tensor (fixed compiled verify bank).
+            positions = rope_start + mx.arange(S, dtype=mx.int32)
             cos, sin = _rope_cos_sin(
                 positions, self._inv_freq, self._rope_attention_scaling
             )

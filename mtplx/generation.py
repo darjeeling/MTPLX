@@ -385,19 +385,39 @@ def _qwen4_fixed_m4_compiled_verify_requested(
     prompt_ids: list[int] | None = None,
     receipt: dict | None = None,
 ) -> bool:
-    """Construction gate for the shape-specialized physical-M4 verifier."""
+    """Construction gate for the shape-specialized physical-M4 verifier.
+
+    ``prompt_ids`` is only ever handed to the session bank, as the entry the
+    memory gate's reclaim must not evict: pass the ids the bank KEYS this
+    prompt by (the surrogate view for an image request,
+    ``vision.splice.vision_bank_key_ids``), not the model-input ids.
+
+    On a runtime that has the lane, ``receipt`` is filled on every path.
+    """
 
     del cached_tokens
 
-    if not (
-        bool(getattr(rt, "qwen4_fixed_m4_compiled_verify", False))
-        and verify_strategy == "batched"
-        and compiled_mode != "off"
-        and int(max_tokens) > 0
-    ):
+    if not bool(getattr(rt, "qwen4_fixed_m4_compiled_verify", False)):
         return False
     if receipt is not None:
         receipt.update(requested_depth=int(speculative_depth), engaged=False)
+    not_requested = (
+        "verify_strategy_not_batched"
+        if verify_strategy != "batched"
+        else "compiled_verify_off"
+        if compiled_mode == "off"
+        else "no_decode_budget"
+        if int(max_tokens) <= 0
+        # The installed replay has no eager-authoritative double run; parity2
+        # (compiled authoritative, every round compared) is its parity mode.
+        else "compiled_verify_parity_mode"
+        if compiled_mode == "parity"
+        else None
+    )
+    if not_requested is not None:
+        if receipt is not None:
+            receipt["reason"] = not_requested
+        return False
     _retired = _fixed_m4_lane_retired_reason()
     if _retired is not None:
         # A kernel this GPU refused retired the lane for the process
@@ -423,6 +443,223 @@ def _qwen4_fixed_m4_compiled_verify_requested(
     if receipt is not None:
         receipt.update(engaged=fits, reason="admitted" if fits else "memory_gate")
     return fits
+
+
+# Why an image request is kept off the compiled verify lane, by the reason the
+# request record carries. One constant line each: the demotion ledger formats
+# nothing.
+_VISION_COMPILED_VERIFY_REFUSALS: dict[str, str] = {
+    "vision_kill_switch": (
+        "MTPLX_QWEN4_VISION_COMPILED_VERIFY=0: image requests keep the eager "
+        "verifier, as they did before the compiled image route"
+    ),
+    "vision_dense_mrope": (
+        "image requests on the dense path keep the eager verifier: the "
+        "compiled verifier carries a tensor offset and the image position "
+        "table is sliced by the host offset"
+    ),
+    "vision_qsa_disabled": (
+        "MTPLX_QWEN4_VISION_QSA=0 is a diagnostic only the eager verifier "
+        "serves (it reads the request context, which the compiled verify lane "
+        "never does), so this image request keeps the eager verifier"
+    ),
+    "vision_state_rebase": (
+        "MTPLX_STATE_REBASE_EVERY replaces the cache under an installed verify "
+        "bank, so this image request keeps the eager verifier"
+    ),
+    "vision_table_length_mismatch": (
+        "the image position table does not cover the prompt row for row, so "
+        "this image request keeps the eager verifier"
+    ),
+    "vision_tail_block_in_image": (
+        "the prompt ends less than one indexer block after an image: the "
+        "first block completed in decode starts on an image row, whose "
+        "position is not the sequence index plus the image delta, so this "
+        "request keeps the eager verifier (chat templates never produce this "
+        "shape; a raw prompt can)"
+    ),
+}
+
+
+_VISION_GENERIC_BANK_EAGER_REASON = (
+    "only the fixed-M4 verify lane hands its cache bank the image position "
+    "delta; this image request's verify strategy would have used another "
+    "compiled route, so it keeps the eager verifier"
+)
+
+
+def _vision_rope_request(vision_splice: Any | None) -> bool:
+    """True when this request's forwards rope through the request context.
+
+    The exact condition under which ``_vision_rope_scope_for`` opens a
+    ``vision_rope`` scope: an image request of a family with an M-RoPE
+    contract (qwen4_exp) whose table was built. Such a request may only reach
+    a fixed-capacity QSA bank through the admission below, which hands the
+    bank the delta; every other compiled route stays off it.
+    """
+
+    if vision_splice is None or _dense_mrope_state_of(vision_splice) is not None:
+        return False
+    return (
+        getattr(vision_splice, "mrope_table", None) is not None
+        or int(getattr(vision_splice, "mrope_delta", 0) or 0) != 0
+    )
+
+
+def _qwen4_indexer_compress_ratio(rt: Any) -> int:
+    """Tokens per pooled indexer block of the served model (0 when unreadable)."""
+
+    model = getattr(rt, "model", None)
+    text = getattr(model, "language_model", model)
+    args = getattr(text, "args", None)
+    if args is None:
+        args = getattr(getattr(text, "model", None), "args", None)
+    return max(0, int(getattr(args, "indexer_compress_ratio", 0) or 0))
+
+
+def _vision_image_count(vision_splice: Any, prompt_ids: Sequence[int]) -> int:
+    for name in ("pad_counts", "image_grids", "image_digests"):
+        value = getattr(vision_splice, name, None)
+        if value:
+            return len(value)
+    pad_id = int(vision_splice.image_pad_token_id)
+    return sum(
+        1
+        for index, token in enumerate(prompt_ids)
+        if token == pad_id and (index == 0 or prompt_ids[index - 1] != pad_id)
+    )
+
+
+def _qwen4_vision_compiled_verify_admission(
+    rt: Any, vision_splice: Any | None, prompt_ids: Sequence[int]
+) -> dict[str, object]:
+    """Can the compiled verify lane carry this request's rotary positions?
+
+    Returns ``positions`` (``text`` | ``vision_sequential`` | ``vision_delta``),
+    ``rope_delta`` (the int the verify bank must own, or None for the text
+    trace), ``images`` and ``refusal`` (a key of
+    ``_VISION_COMPILED_VERIFY_REFUSALS``, or None).
+
+    Past the last image every position of the request's table is the sequence
+    index plus one delta on all three axes, so a fixed bank that rotates at
+    ``offset + delta`` is the eager route bit for bit. One shape breaks that:
+    a pooled indexer key rotates at its block's FIRST token, and the first
+    block completed in decode starts at ``(len(prompt) // ratio) * ratio``,
+    inside the prompt. If that row is an image row its position is a grid
+    position, not index plus delta, so the request stays eager.
+    """
+
+    if vision_splice is None:
+        return {"positions": "text", "rope_delta": None, "images": 0, "refusal": None}
+    images = _vision_image_count(vision_splice, prompt_ids)
+
+    def verdict(positions: str, rope_delta: int | None, refusal: str | None):
+        return {
+            "positions": positions,
+            "rope_delta": rope_delta,
+            "images": images,
+            "refusal": refusal,
+        }
+
+    table = getattr(vision_splice, "mrope_table", None)
+    delta = int(getattr(vision_splice, "mrope_delta", 0) or 0)
+    dense = _dense_mrope_state_of(vision_splice) is not None
+    positions = (
+        "vision_delta"
+        if dense or table is not None or delta != 0
+        else "vision_sequential"
+    )
+    carried = delta if positions == "vision_delta" and not dense else None
+    if not env_bool("MTPLX_QWEN4_VISION_COMPILED_VERIFY", default=True):
+        # The kill switch is the previous behaviour: no image request at all.
+        return verdict(positions, carried, "vision_kill_switch")
+    if dense:
+        return verdict(positions, None, "vision_dense_mrope")
+    if positions == "vision_sequential":
+        # No table and no delta: the request was prefilled at plain sequence
+        # positions and decodes at them. That is the text trace.
+        return verdict(positions, None, None)
+    from mtplx.models.qwen4_exp import vision_qsa_enabled
+
+    if not vision_qsa_enabled():
+        return verdict(positions, carried, "vision_qsa_disabled")
+    if _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
+        return verdict(positions, carried, "vision_state_rebase")
+    if table is not None:
+        if int(table.shape[1]) != len(prompt_ids):
+            return verdict(positions, carried, "vision_table_length_mismatch")
+        ratio = _qwen4_indexer_compress_ratio(rt)
+        pad_id = int(vision_splice.image_pad_token_id)
+        last_pad = next(
+            (
+                index
+                for index in range(len(prompt_ids) - 1, -1, -1)
+                if prompt_ids[index] == pad_id
+            ),
+            -1,
+        )
+        if ratio <= 0 or last_pad >= (len(prompt_ids) // ratio) * ratio:
+            return verdict(positions, carried, "vision_tail_block_in_image")
+    return verdict(positions, carried, None)
+
+
+def _qwen4_fixed_m4_admission(
+    rt: Any,
+    *,
+    vision_splice: Any | None,
+    prompt_ids: Sequence[int],
+    bank_key_ids: Sequence[int],
+    verify_strategy: str,
+    compiled_mode: str,
+    max_tokens: int,
+    cached_tokens: int,
+    speculative_depth: int,
+    session_bank: Any | None,
+    receipt: dict,
+) -> tuple[bool, int | None]:
+    """Admit one request to the compiled fixed-M4 verify lane.
+
+    Returns ``(admitted, rope_delta)``. ``rope_delta`` is the rotary delta the
+    verify bank must own for an image request and None for the text trace
+    (text requests, and image requests at plain sequence positions).
+
+    The position check runs first: it is host arithmetic, while the memory
+    gate behind it may evict idle bank entries, which a request that stays
+    eager anyway should not cost. A runtime without the lane records nothing.
+    """
+
+    if not bool(getattr(rt, "qwen4_fixed_m4_compiled_verify", False)):
+        return False, None
+    vision = _qwen4_vision_compiled_verify_admission(rt, vision_splice, prompt_ids)
+    receipt.update(
+        positions=vision["positions"],
+        rope_delta=vision["rope_delta"],
+        images=vision["images"],
+    )
+    refusal = vision["refusal"]
+    if refusal is not None:
+        receipt.update(
+            requested_depth=int(speculative_depth), engaged=False, reason=refusal
+        )
+        _note_demotion(
+            "vision_request_eager_verify", _VISION_COMPILED_VERIFY_REFUSALS[refusal]
+        )
+        return False, None
+    admitted = _qwen4_fixed_m4_compiled_verify_requested(
+        rt,
+        verify_strategy=verify_strategy,
+        compiled_mode=compiled_mode,
+        max_tokens=max_tokens,
+        cached_tokens=cached_tokens,
+        prompt_tokens=len(prompt_ids),
+        speculative_depth=speculative_depth,
+        session_bank=session_bank,
+        # The session's own entry is keyed by these ids; an image entry is
+        # keyed by surrogates, so the model-input ids would protect nothing.
+        prompt_ids=list(bank_key_ids),
+        receipt=receipt,
+    )
+    return admitted, (vision["rope_delta"] if admitted else None)
 
 
 # The prefill admission line (server _PREFILL_ADMISSION_PRESSURE_FRACTION).
@@ -9594,10 +9831,17 @@ def generate_mtpk(
     # only. draft_time_s stays a decode-window bucket, matching generate_mtp1
     # and generate_mtpa (folding it here made exported stats show
     # draft > decode-elapsed at long context).
+    # An image request that ropes through the request context (Flash-Next with
+    # a position table) may only meet a fixed-capacity QSA bank through the
+    # fixed-M4 admission below, which hands the bank the request's rotary
+    # delta. Every other compiled route promotes caches without one, so it
+    # stays off such a request.
+    _context_roped_request = _vision_rope_request(vision_splice)
     graphbank = (
         SpecDecodeGraphBank(rt, capture_backend=verify_core_backend)
         if verify_strategy in {"graphbank", "graphbank_capture_commit"}
         and _dense_mrope_request is None
+        and not _context_roped_request
         else None
     )
     _compiled_verify_mode = compiled_verify_mode()
@@ -9606,32 +9850,40 @@ def generate_mtpk(
         and not exact_a3b_target_prefix
         and _env_truthy("MTPLX_COMPILED_TARGET_PREFIX")
     )
+    # Image requests take the compiled verifier too: the verify bank owns the
+    # request's rotary delta next to its logical offset, so no position table
+    # is ever sliced by a tensor offset (_qwen4_vision_compiled_verify_admission
+    # names the shapes and settings that stay eager).
     fixed_m4_admission: dict[str, object] = {}
-    qwen4_fixed_m4_compiled_verify = (
-        # M-RoPE tables slice by the host offset; the fixed bank carries a
-        # tensor offset, so vision requests keep main's verify routes.
-        vision_splice is None
-        and _qwen4_fixed_m4_compiled_verify_requested(
-            rt,
-            verify_strategy=verify_strategy,
-            compiled_mode=_compiled_verify_mode,
-            max_tokens=max_tokens,
-            cached_tokens=int(getattr(prompt_state, "cached_tokens", 0) or 0),
-            prompt_tokens=len(prompt_ids),
-            speculative_depth=speculative_depth,
-            session_bank=session_bank,
-            prompt_ids=prompt_ids,
-            receipt=fixed_m4_admission,
-        )
+    qwen4_fixed_m4_compiled_verify, fixed_m4_rope_delta = _qwen4_fixed_m4_admission(
+        rt,
+        vision_splice=vision_splice,
+        prompt_ids=prompt_ids,
+        bank_key_ids=bank_commit_ids,
+        verify_strategy=verify_strategy,
+        compiled_mode=_compiled_verify_mode,
+        max_tokens=max_tokens,
+        cached_tokens=int(getattr(prompt_state, "cached_tokens", 0) or 0),
+        speculative_depth=speculative_depth,
+        session_bank=session_bank,
+        receipt=fixed_m4_admission,
     )
-    if vision_splice is not None and bool(
-        getattr(rt, "qwen4_fixed_m4_compiled_verify", False)
+    _generic_compiled_verify = (
+        verify_strategy in {"capture_commit", "graphbank_capture_commit"}
+        or generic_compiled_target_prefix
+    )
+    if (
+        _context_roped_request
+        and (
+            (_compiled_verify_mode != "off" and _generic_compiled_verify)
+            or verify_strategy in {"graphbank", "graphbank_capture_commit"}
+        )
+        # One count per request: a refusal of the fixed-M4 lane above has
+        # already said why this image request verifies eager.
+        and fixed_m4_admission.get("reason") not in _VISION_COMPILED_VERIFY_REFUSALS
     ):
         _note_demotion(
-            "vision_request_eager_verify",
-            "image requests keep the eager verifier: the compiled verifier "
-            "carries a tensor offset and the image position tables need the "
-            "host offset",
+            "vision_request_eager_verify", _VISION_GENERIC_BANK_EAGER_REASON
         )
     compiled_verify_bank = (
         CompiledVerifyBank(
@@ -9650,8 +9902,7 @@ def generate_mtpk(
         if _compiled_verify_mode != "off"
         and _dense_mrope_request is None
         and (
-            verify_strategy in {"capture_commit", "graphbank_capture_commit"}
-            or generic_compiled_target_prefix
+            (_generic_compiled_verify and not _context_roped_request)
             or qwen4_fixed_m4_compiled_verify
         )
         else None
@@ -9680,7 +9931,9 @@ def generate_mtpk(
     if (
         qwen4_fixed_m4_compiled_verify
         and compiled_verify_bank is not None
-        and _compiled_verify_mode == "on"
+        # "on", or "parity2": the installed lane's own instrument, every round
+        # compared against the eager verifier. The admission refuses "parity".
+        and _compiled_verify_mode in ("on", "parity2")
     ):
         # The install keys and binds the shared verify trace, so it must see
         # the same kernel route the request's verify forwards run under
@@ -9690,6 +9943,9 @@ def generate_mtpk(
                 cache,
                 prompt_ids=prompt_ids,
                 hidden_variant=base_hidden_variant,
+                # An image request: every QSA bank rotates at offset + delta
+                # and the replayed trace takes the delta as an input.
+                rope_delta=fixed_m4_rope_delta,
             )
     a3b_target_prefix_route = None
     a3b_rebase_state = None  # stashed post-primary state for a deferred correction

@@ -33,14 +33,14 @@ def test_shared_compiled_trace_does_not_own_completed_bank(monkeypatch):
     runtime = Runtime()
     first = _bank(runtime, "first")
     reference = weakref.ref(first)
-    fn = first._shared_or_new_verify_step((4, "default", 8192), 4, None)
+    fn = first._shared_or_new_verify_step((4, "default", 8192, 0), 4, None)
     assert fn(SimpleNamespace(shape=(1, 4))) == ("first", "hidden")
     del first
     gc.collect()
     assert reference() is None, "process-global trace retains a completed request's shadow cache"
 
     second = _bank(runtime, "second")
-    second_fn = second._shared_or_new_verify_step((4, "default", 8192), 4, None)
+    second_fn = second._shared_or_new_verify_step((4, "default", 8192, 0), 4, None)
     assert second_fn is fn
     assert second_fn(SimpleNamespace(shape=(1, 4))) == ("second", "hidden")
     assert second.stats["traces"] == 1
@@ -51,7 +51,7 @@ def test_unshared_callable_does_not_create_a_bank_cycle(monkeypatch):
     monkeypatch.setenv("MTPLX_COMPILED_VERIFY_SHARED_TRACES", "0")
     bank = _bank(Runtime(), "unshared")
     reference = weakref.ref(bank)
-    fn = bank._shared_or_new_verify_step((4, "default", 8192), 4, None)
+    fn = bank._shared_or_new_verify_step((4, "default", 8192, 0), 4, None)
     assert fn(SimpleNamespace(shape=(1, 4))) == ("unshared", "hidden")
     del bank
     gc.collect()
@@ -64,7 +64,7 @@ def test_model_unload_releases_its_shared_programs(monkeypatch):
     monkeypatch.setenv("MTPLX_COMPILED_VERIFY_SHARED_TRACES", "1")
     runtime = Runtime()
     bank = _bank(runtime, "model")
-    fn = bank._shared_or_new_verify_step((4, "default", 8192), 4, None)
+    fn = bank._shared_or_new_verify_step((4, "default", 8192, 0), 4, None)
     program = weakref.ref(fn)
     del fn, bank
     gc.collect()

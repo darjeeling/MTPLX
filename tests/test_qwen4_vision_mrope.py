@@ -141,19 +141,142 @@ def test_attention_delta_branch_shifts_positions():
     attn = _tiny_attention()
     x = mx.random.normal((1, 4, 128)).astype(mx.bfloat16)
     # Past the table (None table, delta d) the rope positions are
-    # sequence_index + d: prove by comparing against a cache pre-advanced by
-    # d with the plain path (same absolute positions, same fresh KV).
+    # sequence_index + d. The rotated keys a forward stores are the witness:
+    # rows written at index 0..3 under delta d must be, bit for bit, the rows
+    # the plain path writes at index d..d+3 (same projections of the same
+    # rows, rotated at the same absolute positions).
     delta = 5
+    shifted_cache = QSACache(4)
     with vision_rope(None, delta):
-        shifted = attn(x, QSACache(4))
+        attn(x, shifted_cache)
     plain_cache = QSACache(4)
-    plain_cache.kv.offset = delta  # positions start at delta on plain path
-    plain = attn(x, plain_cache)
-    # Same rope positions; the plain run has an offset cache with no stored
-    # keys, so compare only the rope tables via a probe: outputs must match
-    # because S==T for the vision run while the plain run attends the same
-    # (empty-history) window despite the offset.
-    assert shifted.shape == plain.shape
+    attn(mx.random.normal((1, delta, 128)).astype(mx.bfloat16), plain_cache)
+    attn(x, plain_cache)
+    shifted_keys = shifted_cache.kv.keys[:, :, :4]
+    assert mx.array_equal(
+        shifted_keys, plain_cache.kv.keys[:, :, delta : delta + 4]
+    ).item()
+    # And the delta is really applied: without it the same rows rotate at
+    # 0..3 and come out different.
+    unshifted_cache = QSACache(4)
+    attn(x, unshifted_cache)
+    assert not mx.array_equal(shifted_keys, unshifted_cache.kv.keys[:, :, :4]).item()
+    # Values carry no position, so they are the same rows in all three runs.
+    assert mx.array_equal(
+        shifted_cache.kv.values[:, :, :4], unshifted_cache.kv.values[:, :, :4]
+    ).item()
+    assert mx.array_equal(
+        shifted_cache.kv.values[:, :, :4], plain_cache.kv.values[:, :, delta : delta + 4]
+    ).item()
+
+
+def _single_image_table():
+    # [text text | 2x2-llm image (4 pads) | text]: 7 rows, delta -2. Rows 0..5
+    # sit at positions that are NOT index + delta; row 6 is the first that is.
+    ids = [1, 2, 99, 99, 99, 99, 3]
+    table, delta = build_mrope_positions(
+        ids, image_token_id=99, image_grids=[(1, 4, 4)], spatial_merge_size=2
+    )
+    return mx.array(table), int(delta)
+
+
+@pytest.mark.parametrize(
+    ("start", "rows"),
+    [
+        (0, 7),  # the whole table
+        (2, 4),  # inside the table: the image rows
+        (7, 4),  # past the table
+        (9, 3),  # past the table, further on
+        (0, 11),  # straddles the end: every table row plus four rows past it
+        (4, 6),  # straddles the end from inside the image
+        (5, 3),  # straddles the end with one image row on the inside
+        (6, 2),  # straddles the end at the one row both rules agree on
+    ],
+)
+def test_attention_ropes_every_row_of_a_chunk_by_its_own_rule(start, rows):
+    """One forward may hold rows inside the table and rows past it.
+
+    A re-prefill of prompt plus generated tokens (MTPLX_STATE_REBASE_EVERY) is
+    such a forward. The rule is per row: a row inside the table rotates at its
+    (t, h, w) table position, a row past it at index + delta. The witness is
+    the rotated keys the forward stores, against an independent spelling of
+    the positions (one [3, S] table built row by row).
+    """
+
+    attn = _tiny_attention()
+    table, delta = _single_image_table()
+    table_len = int(table.shape[1])
+    x = mx.random.normal((1, start + rows, 128)).astype(mx.bfloat16)
+    chunk = x[:, start:]
+
+    cache = QSACache(4)
+    with vision_rope(table, delta):
+        if start:
+            # The rows before the window, in forwards that do not straddle.
+            attn(x[:, : min(start, table_len)], cache)
+            if start > table_len:
+                attn(x[:, table_len:start], cache)
+        attn(chunk, cache)
+
+    per_row = [
+        [int(v) for v in table[:, i].tolist()] if i < table_len else [i + delta] * 3
+        for i in range(start, start + rows)
+    ]
+    positions3 = mx.array(per_row, dtype=mx.int32).T
+    cos, sin = _mrope_cos_sin(positions3, attn._inv_freq, attn._mrope_axes)
+    from mtplx.models.qwen4_exp import _apply_partial_rope
+
+    keys = attn.k_norm(attn.k_proj(chunk).reshape(1, rows, attn.n_kv_heads, -1))
+    expected = _apply_partial_rope(keys, cos, sin).transpose(0, 2, 1, 3)
+    stored = cache.kv.keys[:, :, start : start + rows]
+    assert mx.array_equal(stored, expected).item()
+
+
+def test_a_straddling_chunk_stores_the_keys_of_the_same_rows_fed_in_two_chunks():
+    attn = _tiny_attention()
+    table, delta = _single_image_table()
+    x = mx.random.normal((1, 11, 128)).astype(mx.bfloat16)
+    with vision_rope(table, delta):
+        split = QSACache(4)
+        attn(x[:, :7], split)  # wholly inside the table
+        attn(x[:, 7:], split)  # wholly past it
+        straddling = QSACache(4)
+        attn(x, straddling)  # one forward over both
+    assert mx.array_equal(
+        straddling.kv.keys[:, :, :11], split.kv.keys[:, :, :11]
+    ).item()
+    assert mx.array_equal(
+        straddling.kv.values[:, :, :11], split.kv.values[:, :, :11]
+    ).item()
+
+
+def test_chunk_tables_off_the_straddle_are_the_tables_built_before():
+    from mtplx.models.qwen4_exp import _vision_chunk_cos_sin
+
+    table, delta = _single_image_table()
+    inv_freq = 1e7 ** (-mx.arange(0, 8, 2, dtype=mx.float32) / 8)
+    axes = mx.array(_build_mrope_axes([2, 1, 1], True), dtype=mx.int32)
+
+    def same(actual, expected):
+        return all(mx.array_equal(a, e).item() for a, e in zip(actual, expected))
+
+    # Wholly inside the table: the table slice, as before.
+    assert same(
+        _vision_chunk_cos_sin(table, delta, 2, 4, inv_freq, axes),
+        _mrope_cos_sin(table[:, 2:6], inv_freq, axes),
+    )
+    # Wholly past it, or no table at all (the decode scope): plain rope at
+    # index + delta, as before.
+    shifted = _rope_cos_sin(mx.arange(7 + delta, 11 + delta, dtype=mx.int32), inv_freq)
+    assert same(_vision_chunk_cos_sin(table, delta, 7, 4, inv_freq, axes), shifted)
+    assert same(_vision_chunk_cos_sin(None, delta, 7, 4, inv_freq, axes), shifted)
+    # Straddling: the rows of the first followed by the rows of the second.
+    cos, sin = _vision_chunk_cos_sin(table, delta, 2, 9, inv_freq, axes)
+    inside = _mrope_cos_sin(table[:, 2:7], inv_freq, axes)
+    assert same((cos[:5], sin[:5]), inside) and same((cos[5:], sin[5:]), shifted)
+    # A scaled rope type scales every row, the table rows included.
+    scaled = _vision_chunk_cos_sin(table, delta, 2, 9, inv_freq, axes, 1.25)
+    assert same(scaled, (cos * 1.25, sin * 1.25))
 
 
 def test_attention_vision_scope_preserves_sparse_selection():
