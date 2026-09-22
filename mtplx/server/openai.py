@@ -5251,6 +5251,20 @@ def _escape_vision_control_text(text: str) -> str:
     return text
 
 
+def _escape_vision_control_value(value: Any) -> Any:
+    """Escape image controls in every key and string of a JSON value."""
+    if isinstance(value, str):
+        return _escape_vision_control_text(value)
+    if isinstance(value, dict):
+        return {
+            _escape_vision_control_value(key): _escape_vision_control_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_escape_vision_control_value(item) for item in value]
+    return value
+
+
 def _server_vision_spec(state: Any) -> Any | None:
     cached = getattr(state, "_vision_spec_cache", "unset")
     if cached != "unset":
@@ -11149,7 +11163,9 @@ def _template_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": name,
-            "arguments": json.loads(arguments_text),
+            # The template renders these strings; image controls in them must
+            # not tokenize as image slots.
+            "arguments": _escape_vision_control_value(json.loads(arguments_text)),
         },
     }
     call_id = tool_call.get("id")
@@ -13400,7 +13416,7 @@ def _message_to_template_dict(
         for key in ("reasoning_content", "reasoning"):
             reasoning = _message_extra(message, key)
             if reasoning:
-                item["reasoning_content"] = str(reasoning)
+                item["reasoning_content"] = _escape_vision_control_text(str(reasoning))
                 break
     if allow_committed_reasoning and message.role == "assistant":
         # Server-built canonicalization only: the committed-think field is

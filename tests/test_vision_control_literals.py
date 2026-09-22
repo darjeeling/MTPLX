@@ -2,6 +2,7 @@
 
 import base64
 import copy
+import json
 from itertools import groupby
 
 import pytest
@@ -13,6 +14,7 @@ from mtplx.server.openai import (
     ChatMessage,
     _anthropic_message_to_chat_messages,
     _expand_image_pads,
+    _message_to_template_dict,
     _vision_extract_and_flatten,
 )
 
@@ -112,3 +114,45 @@ def test_plain_text_is_byte_identical_and_repeated_preparation_preserves_raw_his
     assert images == repeated_images == []
     assert first == second == messages
     assert all(prepared is original for prepared, original in zip(first, messages))
+
+
+def test_echoed_reasoning_and_tool_arguments_cannot_open_image_slots():
+    # An agent that edited code containing the placeholder echoes it back in
+    # its reasoning and tool arguments, which the chat template renders. Go
+    # clients encode < and > as \u003c and \u003e, so the escape must see the
+    # decoded strings, keys included.
+    message = ChatMessage(
+        role="assistant",
+        content="",
+        reasoning_content="The file defines <|image_pad|>.",
+        tool_calls=[
+            {"id": "edit_1", "type": "function", "function": {
+                "name": "edit",
+                "arguments": json.dumps({
+                    "newString": "PAD = '<|image_pad|>'",
+                    "edits": [{"old": "<|vision_start|>"}],
+                }),
+            }},
+            {"id": "grep_1", "type": "function", "function": {
+                "name": "grep", "arguments": r'{"pattern":"\u003c|vision_end|\u003e"}',
+            }},
+            {"id": "note_1", "type": "function", "function": {
+                "name": "note", "arguments": {"<|image_pad|>": 1},
+            }},
+        ],
+    )
+    original = copy.deepcopy(message)
+
+    item = _message_to_template_dict(
+        message,
+        strip_assistant_reasoning_history=False,
+        include_reasoning_content=True,
+    )
+
+    assert item["reasoning_content"] == "The file defines <\\|image_pad\\|>."
+    assert [call["function"]["arguments"] for call in item["tool_calls"]] == [
+        {"newString": "PAD = '<\\|image_pad\\|>'", "edits": [{"old": "<\\|vision_start\\|>"}]},
+        {"pattern": "<\\|vision_end\\|>"},
+        {"<\\|image_pad\\|>": 1},
+    ]
+    assert message == original
