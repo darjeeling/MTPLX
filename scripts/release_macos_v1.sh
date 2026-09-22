@@ -110,16 +110,29 @@ fi
 #   MTPLX_RELEASE_PILLAR_QA_URL=http://127.0.0.1:<port> \
 #   MTPLX_RELEASE_PILLAR_QA_FAN_RPM=<measured rpm>
 # Skipping prints the same not-release-ready warning as the test gates.
+# An executable lifecycle runner can own start/stop and return freshly
+# verified RPM from `start URL` and `fan-rpm`. Start happens after Swift:
+# lifecycle tests may restore the host's real fans to automatic control.
+PILLAR_QA_RUNNER="${MTPLX_RELEASE_PILLAR_QA_RUNNER:-}"
 if [[ "${MTPLX_RELEASE_SKIP_PILLAR_QA:-0}" != "1" ]]; then
   if [[ -z "${MTPLX_RELEASE_PILLAR_QA_URL:-}" ]]; then
     echo "error: pillar gate needs MTPLX_RELEASE_PILLAR_QA_URL (a serving daemon under verified max fans)" >&2
     echo "       or MTPLX_RELEASE_SKIP_PILLAR_QA=1 to skip (artifact then not release-ready)" >&2
     exit 1
   fi
+  PILLAR_FAN_RPM="${MTPLX_RELEASE_PILLAR_QA_FAN_RPM:-0}"
+  if [[ -n "$PILLAR_QA_RUNNER" ]]; then
+    if [[ ! -x "$PILLAR_QA_RUNNER" ]]; then
+      echo "error: pillar lifecycle runner is not executable: $PILLAR_QA_RUNNER" >&2
+      exit 1
+    fi
+    trap '"$PILLAR_QA_RUNNER" stop' EXIT
+    PILLAR_FAN_RPM="$("$PILLAR_QA_RUNNER" start "$MTPLX_RELEASE_PILLAR_QA_URL")"
+  fi
   echo "Release gate: pillar QA (vision cache / memory ceiling / decode decay)"
   "$ROOT/.venv/bin/python" "$ROOT/scripts/pillar_gate_qa.py" \
     --base-url "$MTPLX_RELEASE_PILLAR_QA_URL" \
-    --fan-rpm-verified "${MTPLX_RELEASE_PILLAR_QA_FAN_RPM:-0}"
+    --fan-rpm-verified "$PILLAR_FAN_RPM"
   # Agent-session gate: the coding-agent turn loop every harness drives
   # (OpenCode, Pi, Hermes, Claude Code, Cline), judged from the engine's own
   # receipts -- warm-turn dead time, bank hits after tool calls, hidden
@@ -128,10 +141,17 @@ if [[ "${MTPLX_RELEASE_SKIP_PILLAR_QA:-0}" != "1" ]]; then
   # 146 s and read as "decode 21 tok/s"; none was visible to a unit test or a
   # single-request benchmark, all fail this gate.
   echo "Release gate: agent-session QA (warm-turn dead time / bank hits / postcommit / decode floor)"
+  if [[ -n "$PILLAR_QA_RUNNER" ]]; then
+    PILLAR_FAN_RPM="$("$PILLAR_QA_RUNNER" fan-rpm)"
+  fi
   "$ROOT/.venv/bin/python" "$ROOT/scripts/agent_session_gate.py" \
     --base-url "$MTPLX_RELEASE_PILLAR_QA_URL" \
     --context-tokens "${MTPLX_RELEASE_AGENT_GATE_CONTEXT_TOKENS:-40000}" \
-    --fan-rpm-verified "${MTPLX_RELEASE_PILLAR_QA_FAN_RPM:-0}"
+    --fan-rpm-verified "$PILLAR_FAN_RPM"
+  if [[ -n "$PILLAR_QA_RUNNER" ]]; then
+    "$PILLAR_QA_RUNNER" stop
+    trap - EXIT
+  fi
 else
   echo "warning: MTPLX_RELEASE_SKIP_PILLAR_QA=1 — pillar gate skipped; this artifact is not release-ready" >&2
 fi
