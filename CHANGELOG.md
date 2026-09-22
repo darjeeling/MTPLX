@@ -53,7 +53,9 @@ All notable user-facing changes to MTPLX. The format is based on
   against the eager forward and records per-leaf differences;
   `scripts/qwen4_vision_compiled_parity.py` proves the route on a real pack
   and refuses to say `exact` without a compiled dispatch and a warm restore
-  into generated tokens.
+  into generated tokens. On 440 image rounds and 429 text rounds of the
+  same requests, the compiled and eager routes differ only by rounding, with
+  a mean KL per round of 0.0015 for images and 0.0013 for text.
 
 - **Packs can declare their generation mode.** `recommended_generation_mode`
   (`mtp` or `ar`), with a reason and the measurement behind it, in the
@@ -108,7 +110,9 @@ All notable user-facing changes to MTPLX. The format is based on
 
 - **Speed: Flash-Next prompt processing and long-context decode.** 2.11.3
   against 2.12.0 on the same M5 Max and Python runtime, alternating boots,
-  fans at maximum, seed 1731, thinking off, 512-token answers: at 65,502
+  fans at maximum, the GPU memory limit raised to 120 GiB
+  (`iogpu.wired_limit_mb=122880`; the default is about 96 GiB), seed 1731,
+  thinking off, 512-token answers: at 65,502
   tokens, first token 85.5 to 60.1 s, prompt processing 768 to 1,094 tok/s
   (+42%), decode 56.1 to 63.5 tok/s (+13%); at 4,061 tokens, first token
   5.26 to 2.88 s, prompt processing 786 to 1,453 tok/s (+85%), decode 74.4
@@ -132,11 +136,14 @@ All notable user-facing changes to MTPLX. The format is based on
   prompt prefills in 2.79 to 2.81 s instead of 3.06 to 3.10 s
   (`MTPLX_GDN_BOUNDARY_INFORWARD=0` restores the old layout).
 
-- **The Qwen 3.8 27B measured 3.9 percent lower at 4K and 2.1 percent
-  higher at 16K** than 2.11.3 (means of two pairs on the same Mac: 53.3 to
-  51.2 and 48.7 to 49.7 tok/s). The two builds sample different tokens
-  from the same seed; a verify round costs about 2 percent more at both
-  lengths.
+- **The Qwen 3.8 27B is unchanged within about 4 percent.** 2.11.3 against
+  2.12.0 on the same Mac, measured like the Flash-Next pairs: at 4,061
+  tokens, first token 6.07 s on both, prompt processing 680 and 679 tok/s,
+  decode 46.7 and 44.2 tok/s; at 16,350 tokens, first token 26.7 and
+  27.2 s, prompt processing 617 and 604 tok/s, decode 41.4 and 43.2 tok/s.
+  One decode round costs 3.6 percent more at 4K and 0.2 percent more at
+  16K; the decode speeds differ by more because the two builds accept
+  different draft tokens from the same seed.
 
 - **The n-gram table streams from SSD on every Mac.** On Macs with 160 GB
   or more earlier releases also loaded the 29.8 GiB table into GPU memory,
