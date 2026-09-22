@@ -276,6 +276,7 @@ def test_streaming_build_never_loads_or_reuses_a_verified_stamp(tmp_path, monkey
     assert meta["verification"]["status"] == "streaming-audited"
     assert meta["verification"]["full_load_verified"] is False
     assert meta["verified_on"] == {} and "speed_evidence" not in meta
+    assert meta["sampler"] == {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
     from mtplx.backends.registry import RuntimeContract, _runtime_contract_blocker
     contract = RuntimeContract.from_dict(meta)
     assert contract.arch_id == "qwen4-next"

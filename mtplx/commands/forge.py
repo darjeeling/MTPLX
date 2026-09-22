@@ -1191,6 +1191,8 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
         config["mtplx_quality"] = quality_metadata(quality_source, audit)
         atomic_write_json(destination / "config.json", config)
         if verification == "streaming":
+            from mtplx.backends.descriptors import QWEN4_EXP_SAMPLER_DEFAULTS
+
             # Do not calibrate, load the model, or reuse a source's serving stamp.
             runtime_metadata = {
                 "mtplx_version": __version__,
@@ -1199,6 +1201,8 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
                 "served_model_id": config["mtplx_quality"]["served_id"],
                 "mtp_depth_max": 3,
                 "recommended_profile": "turbo",
+                # The family law the Speed packs carry (1.0 / 0.95 / 20).
+                "sampler": QWEN4_EXP_SAMPLER_DEFAULTS.to_dict(),
                 "exactness_baseline": {
                     "status": "pending_full_load",
                     "streaming_audit": "streaming_audit.json",
