@@ -7,6 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from .attention_math import attention_gate
 from .rope_origin import (
     cache_owns_rotary_origin,
     note_unowned_rotary_origin,
@@ -623,7 +624,7 @@ def _install_split_attention_hook(attn: Any) -> bool:
                 mask=mask,
             )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.o_proj(output * mx.sigmoid(gate))
+        return self.o_proj(attention_gate(output, gate))
 
     cls.__call__ = split_call
     cls._mtplx_split_full_attention_installed = True

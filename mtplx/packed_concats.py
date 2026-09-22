@@ -40,6 +40,7 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from .attention_math import attention_gate
 from .rope_origin import rope_offset_of
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ def install_qwen3_next_packed_concats(model: Any) -> dict[str, int] | None:
                 queries, keys, values, cache=cache, scale=self.scale, mask=mask
             )
             output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-            return self.o_proj(output * mx.sigmoid(gate))
+            return self.o_proj(attention_gate(output, gate))
 
         def mlp_call_packed(self, x):
             payload = getattr(self, "_mtplx_fused_gate_up", None)
