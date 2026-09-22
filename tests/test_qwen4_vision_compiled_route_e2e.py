@@ -7,11 +7,9 @@ served device, where the compiled verify step and the eager forward agree bit
 for bit, so every comparison here is exact. Sampled at the family's native
 settings with a fixed seed: greedy-only evidence is refused in this project.
 
-THE REFERENCE is the eager verifier with the request's position scope open for
-the whole request. The eager route as shipped through 2.11.3 opens that scope
-around the main verify forward only, so its repair, copy-round and final-commit
-forwards rotate without the image delta (fixed on its own branch); a comparison
-against it would measure that defect, not this lane.
+Both arms use the production position scopes: prefill owns its scope and
+_decode_trunk_scope covers each decode trunk forward only. No fixture supplies
+an ambient scope that could hide a missing production scope or shift drafts.
 """
 
 from __future__ import annotations
@@ -19,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import importlib.util
+from functools import wraps
 from pathlib import Path
 
 import mlx.core as mx
@@ -28,7 +27,7 @@ import pytest
 import mtplx.generation as generation
 import mtplx.graphbank as graphbank
 from mtplx import demotions
-from mtplx.attention_context import vision_rope
+from mtplx.attention_context import current_attention_phase, vision_rope_state
 from mtplx.sampling import SamplerConfig
 from mtplx.vision.mrope import build_mrope_positions
 from mtplx.vision.splice import VisionSplice
@@ -155,28 +154,57 @@ def _generate(pack, monkeypatch, *, mode, ids, table=None, delta=None):
         if table is not None
         else None
     )
-    # The corrected scope: open for every forward of the request, both arms
-    # (the draft head reads it on either route, so the arms draft alike).
-    scope = vision_rope(table, delta) if table is not None else contextlib.nullcontext()
-    with scope:
-        return generation.generate_mtpk(
-            rt,
-            list(ids),
-            max_tokens=MAX_TOKENS,
-            sampler=NATIVE,
-            draft_sampler=NATIVE,
-            speculative_depth=3,
-            seed=SEED,
-            mtp_cache_policy="persistent",
-            mtp_history_policy="committed",
-            verify_strategy="batched",
-            stop_token_ids=set(),
-            vision_splice=splice,
-        )
+    return generation.generate_mtpk(
+        rt,
+        list(ids),
+        max_tokens=MAX_TOKENS,
+        sampler=NATIVE,
+        draft_sampler=NATIVE,
+        speculative_depth=3,
+        seed=SEED,
+        mtp_cache_policy="persistent",
+        mtp_history_policy="committed",
+        verify_strategy="batched",
+        stop_token_ids=set(),
+        vision_splice=splice,
+    )
 
 
 def _bank_report(result):
     return (result.stats.graphbank or {}).get("compiled_verify") or {}
+
+
+@pytest.mark.parametrize("mode", ["0", "1", "parity2"])
+def test_production_decode_scopes_cover_trunk_forwards_only(pack, monkeypatch, mode):
+    ids, table, delta = _image_prompt(18)
+    real_scope = generation._decode_trunk_scope
+    real_draft = pack[1].mtp_forward
+    trunk_scopes, draft_calls = [], []
+
+    @contextlib.contextmanager
+    def observed_scope(splice):
+        assert vision_rope_state() is None  # no fixture or leaked outer scope
+        with real_scope(splice):
+            active_table, active_delta = vision_rope_state()
+            assert active_table is table and active_delta == delta
+            assert current_attention_phase() == "decode_verify"
+            trunk_scopes.append(True)
+            yield
+        assert vision_rope_state() is None
+
+    @wraps(real_draft)
+    def observed_draft(*args, **kwargs):
+        if current_attention_phase() != "prefill":
+            assert vision_rope_state() is None
+            assert current_attention_phase() != "decode_verify"
+            draft_calls.append(True)
+        return real_draft(*args, **kwargs)
+
+    monkeypatch.setattr(generation, "_decode_trunk_scope", observed_scope)
+    monkeypatch.setattr(pack[1], "mtp_forward", observed_draft)
+    _generate(pack, monkeypatch, mode=mode, ids=ids, table=table, delta=delta)
+    assert trunk_scopes and draft_calls
+    assert vision_rope_state() is None
 
 
 @pytest.mark.parametrize("tail", [18, 17])  # prompt lengths 40 and 39: n % 4 of 0 and 3
@@ -249,6 +277,10 @@ def test_parity2_checks_every_round_of_an_image_request_and_finds_nothing(
         assert record[name] == 0.0, name
     assert bank["parity2_calls"] == record["rounds"]
     assert bank["parity2_divergent_calls"] == 0
+    assert record["compiled_rounds"] == bank["compiled_calls"] > 0
+    assert record["compiled_exact_rounds"] == record["compiled_rounds"]
+    assert record["compiled_rounds"] + record["eager_rounds"] == record["rounds"]
+    assert len(record["round_diagnostics"]) == record["rounds"]
 
 
 def test_parity2_on_a_text_request(pack, monkeypatch):
@@ -394,12 +426,13 @@ def _as_request_entry(kind, result):
     return entry
 
 
-def test_the_real_pack_script_reads_these_records_as_exact(pack, monkeypatch):
+def test_the_real_pack_script_requires_a_follow_up_after_exact_single_turns(pack, monkeypatch):
     """The verdict of scripts/qwen4_vision_compiled_parity.py over real records.
 
     Its three arms, run here on the tiny pack through the generation loop:
-    the instrument, the product mode, and the kill switch. Both image arms run
-    inside the corrected scope, so the eager arm is a fair reference.
+    the instrument, the product mode, and the kill switch. These single-turn
+    records prove per-round parity, but cannot prove restoration of generated
+    state. The script must require that additional evidence.
     """
 
     script = _parity_script()
@@ -422,8 +455,9 @@ def test_the_real_pack_script_reads_these_records_as_exact(pack, monkeypatch):
 
     arms = {"instrument": arm("parity2"), "product": arm("1"), "eager": arm("1", kill=True)}
     outcome = script.evaluate(arms, eager_scope_fix_present=True)
-    assert outcome["verdict"] == "exact", outcome
-    assert outcome["failed_checks"] == [] and outcome["exit_code"] == 0
+    assert outcome["verdict"] == "generated_state_not_restored", outcome
+    assert outcome["failed_checks"] == ["follow_up_restored_generated_tokens"]
+    assert outcome["exit_code"] == 1
     assert outcome["instrument"]["image_turn1"]["rounds"] >= 8
     assert outcome["instrument"]["text_control"]["state"] == "exact"
     assert {c["name"]: c["ok"] for c in outcome["checks"]} == {
@@ -434,6 +468,8 @@ def test_the_real_pack_script_reads_these_records_as_exact(pack, monkeypatch):
         "instrument_did_not_change_the_output": True,
         "eager_arm_ran_on_the_eager_verifier": True,
         "compiled_output_equals_eager_output": True,
+        "compiled_arms_executed_compiled_verification": True,
+        "follow_up_restored_generated_tokens": False,
     }
 
 

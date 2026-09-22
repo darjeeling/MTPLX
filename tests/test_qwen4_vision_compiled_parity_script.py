@@ -17,6 +17,7 @@ import socket
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,10 @@ def _parity_record(*, image: bool, rounds=12, divergent=0, missing=0, logits=0.0
         "positions": "vision_delta" if image else "text",
         "rope_delta": -990 if image else None,
         "rounds": rounds,
+        "compiled_rounds": rounds,
+        "compiled_exact_rounds": rounds - divergent,
+        "eager_rounds": 0,
+        "eager_exact_rounds": 0,
         "rounds_by_width": {"4": rounds},
         "divergent_rounds": divergent,
         "divergent_rounds_by_width": {"4": divergent} if divergent else {},
@@ -77,6 +82,11 @@ def _entry(*, image: bool, mode="on", engaged=True, reason="admitted", sha="a", 
         "kind": "image" if image else "text",
         "output_sha256": sha,
         "fixed_m4_admission": admission,
+        "prompt_tokens": 1200 if image else 40,
+        "completion_tokens": 48,
+        "cached_tokens": 0,
+        "session_cache_hit": False,
+        "session_restore_mode": "cold",
     }
     if engaged:
         bank = {
@@ -101,11 +111,16 @@ def _arms(**instrument_image):
             image = dict(engaged=False, reason="vision_kill_switch")
         else:
             image = dict(mode=mode, **image_kwargs)
-        return {
+        records = {
             "image_turn1": _entry(image=True, sha="one", **image),
             "image_turn2": _entry(image=True, sha="two", **image),
             "text_control": _entry(image=False, mode=mode, sha="text"),
         }
+        records["image_turn2"].update(
+            prompt_tokens=1260, cached_tokens=1248,
+            session_cache_hit=True, session_restore_mode="clone",
+        )
+        return records
 
     sampler = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
     return {
@@ -141,8 +156,76 @@ def test_every_round_equal_and_every_check_held_is_exact():
         "instrument_did_not_change_the_output",
         "eager_arm_ran_on_the_eager_verifier",
         "compiled_output_equals_eager_output",
+        "compiled_arms_executed_compiled_verification",
+        "follow_up_restored_generated_tokens",
     }
     assert outcome["instrument"]["image_turn1"]["state"] == "exact"
+    assert all(r["restored_generated_tokens"] == 48 for r in outcome["generated_restore"].values())
+
+
+@pytest.mark.parametrize("arm", ["instrument", "product"])
+@pytest.mark.parametrize("request_name", ["image_turn1", "image_turn2", "text_control"])
+def test_admission_and_eager_only_rounds_do_not_prove_a_compiled_dispatch(arm, request_name):
+    arms = _arms()
+    bank = arms[arm]["requests"][request_name]["compiled_verify"]
+    bank["compiled_calls"] = 0
+    if arm == "instrument":
+        bank["fixed_m4_parity2"].update(
+            compiled_rounds=0, compiled_exact_rounds=0,
+            eager_rounds=12, eager_exact_rounds=12, rounds_by_width={"2": 12},
+        )
+    outcome = _evaluate(arms)
+    assert outcome["verdict"] == "no_compiled_dispatch"
+    assert outcome["exit_code"] == 1
+    assert "compiled_arms_executed_compiled_verification" in outcome["failed_checks"]
+
+
+@pytest.mark.parametrize("request_name", ["image_turn1", "text_control"])
+def test_eager_width_four_comparisons_are_not_compiled_comparisons(request_name):
+    arms = _arms()
+    record = arms["instrument"]["requests"][request_name]["compiled_verify"]["fixed_m4_parity2"]
+    record.update(compiled_rounds=0, compiled_exact_rounds=0, eager_rounds=12, eager_exact_rounds=12)
+    outcome = _evaluate(arms)
+    assert outcome["verdict"] == "no_compiled_comparisons"
+    assert outcome["exit_code"] == 1
+
+
+@pytest.mark.parametrize("arm", ["instrument", "product", "eager"])
+@pytest.mark.parametrize("cached,hit,mode,reason", [
+    (0, False, "cold", "cold_prefill"),
+    (1200, True, "clone", "prompt_only_restore"),
+    (1199, True, "clone", "prompt_only_restore"),
+    (1248, False, "cold", "cold_prefill"),
+])
+def test_a_follow_up_must_restore_generated_rows_in_every_arm(arm, cached, hit, mode, reason):
+    arms = _arms()
+    arms[arm]["requests"]["image_turn2"].update(
+        cached_tokens=cached, session_cache_hit=hit, session_restore_mode=mode,
+    )
+    outcome = _evaluate(arms)
+    assert outcome["verdict"] == "generated_state_not_restored"
+    assert outcome["exit_code"] == 1
+    assert outcome["generated_restore"][arm]["reason"] == reason
+
+
+def test_the_reviewers_all_cold_records_cannot_be_exact():
+    arms = _arms()
+    for arm in arms.values():
+        for entry in arm["requests"].values():
+            entry.update(cached_tokens=0, session_cache_hit=False, session_restore_mode="cold")
+    outcome = _evaluate(arms)
+    assert outcome["verdict"] == "generated_state_not_restored" and outcome["exit_code"] == 1
+
+
+def test_one_generated_row_is_enough_but_missing_restore_evidence_is_not():
+    arms = _arms()
+    follow = arms["instrument"]["requests"]["image_turn2"]
+    follow["cached_tokens"] = 1201
+    assert _evaluate(arms)["verdict"] == "exact"
+    follow.pop("cached_tokens")
+    outcome = _evaluate(arms)
+    assert outcome["verdict"] == "generated_state_not_restored" and outcome["exit_code"] == 1
+    assert outcome["generated_restore"]["instrument"]["reason"] == "missing_generated_restore_evidence"
 
 
 def test_one_divergent_image_round_is_never_exact():
@@ -254,6 +337,46 @@ def test_the_instrument_arm_alone_is_enough_for_a_verdict():
     }
 
 
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_follow_up_uses_each_arms_actual_response_without_mutating_the_plan(
+    monkeypatch, tmp_path, first_fails
+):
+    """Exercise run_arm's request dependency without a subprocess or socket."""
+    args = parity.parse_args(["--pack", str(tmp_path), "--image", "/unused.png"])
+    plan = parity.build_requests("data:image/png;base64,cGl4ZWxz", args)
+    original = json.dumps(plan)
+    monkeypatch.setattr(parity, "memory_guard", lambda _: {"checked": False})
+    monkeypatch.setattr(parity, "_port_answers", lambda *_: False)
+    monkeypatch.setattr(parity, "_start_server", lambda *_: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(parity, "_stop_server", lambda _: None)
+    monkeypatch.setattr(parity, "_wait_for_health", lambda *_: {"profile": {"sampler": NATIVE}})
+    monkeypatch.setattr(parity, "_read_record", lambda *_: {})
+    for arm in parity.ARMS:
+        sent = []
+        message = {"role": "assistant", "content": f"actual {arm} reply",
+                   "reasoning_content": f"actual {arm} reasoning"}
+
+        def respond(method, url, body, timeout):
+            sent.append(body)
+            if len(sent) == 1 and first_fails:
+                raise RuntimeError("first response failed")
+            return {"choices": [{"message": message, "finish_reason": "length"}]}
+
+        monkeypatch.setattr(parity, "_http_json", respond)
+        result = parity.run_arm(arm, args, plan, tmp_path)
+        if first_fails:
+            assert len(sent) == 2  # first image and independent text control only
+            assert result["requests"]["image_turn2"]["error"] == (
+                "the first response is unavailable for the follow-up"
+            )
+        else:
+            assert len(sent) == 3
+            assert sent[1]["messages"][-2] == message
+            assert sent[1]["messages"][-1] == {"role": "user", "content": args.follow_up}
+            assert result["requests"]["image_turn1"]["response_message"] == message
+        assert json.dumps(plan) == original
+
+
 # ---------------------------------------------------------------------------
 # The run, against a stand-in server
 # ---------------------------------------------------------------------------
@@ -276,6 +399,7 @@ _STUB = textwrap.dedent(
     MODE = os.environ.get("MTPLX_COMPILED_VERIFY") or "1"  # the product pins 1
     KILL = os.environ.get("MTPLX_QWEN4_VISION_COMPILED_VERIFY") == "0"
     DIVERGENT = int(os.environ.get("STUB_DIVERGENT", "0"))
+    first_reply = None
 
     def log(row):
         with open(LOG, "a", encoding="utf-8") as handle:
@@ -304,6 +428,7 @@ _STUB = textwrap.dedent(
                              "sampler": {"temperature": 1.0, "top_p": 0.95, "top_k": 20}}})
 
         def do_POST(self):
+            global first_reply
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if {"temperature", "top_p", "top_k"} & set(body) or "seed" not in body or body.get("stream"):
                 return self._send(400, {"error": "native sampler, a seed and no stream expected"})
@@ -320,7 +445,14 @@ _STUB = textwrap.dedent(
                          "rope_delta": -990 if image else None, "images": 1 if image else 0}
             record = {"request_id": rid, "prompt_tokens": 1200 if image else 40,
                       "completion_tokens": body["max_tokens"], "server_seed": body["seed"],
+                      "cached_tokens": 0, "session_cache_hit": False, "session_restore_mode": "cold",
                       "fixed_m4_admission": admission}
+            if image and len(body["messages"]) > 1:
+                if body["messages"][-2] != first_reply:
+                    return self._send(400, {"error": "follow-up did not use the actual first response"})
+                record.update(prompt_tokens=1200 + body["max_tokens"] + 12,
+                              cached_tokens=1200 + body["max_tokens"],
+                              session_cache_hit=True, session_restore_mode="clone")
             if image and KILL:
                 admission.update(engaged=False, reason="vision_kill_switch")
                 record["demotions"] = {"vision_request_eager_verify": 1}
@@ -336,13 +468,17 @@ _STUB = textwrap.dedent(
                     bank["fixed_m4_parity2"] = {
                         "positions": admission["positions"], "rope_delta": admission["rope_delta"],
                         "rounds": 12, "rounds_by_width": {"4": 12}, "divergent_rounds": bad,
+                        "compiled_rounds": 12, "compiled_exact_rounds": 12 - bad,
+                        "eager_rounds": 0, "eager_exact_rounds": 0,
                         "reference_scope_missing_rounds": 0, "logits_max_abs_diff": 0.5 if bad else 0.0,
                         "logits_max_kl": 0.01 if bad else 0.0, "hidden_max_abs_diff": 0.0,
                         "state_max_abs_diff": 0.0, "capture_max_abs_diff": 0.0,
                         "first_divergence": {"round": 1, "leaf": "logits"} if bad else None}
                 record["compiled_verify"] = bank
-            self._send(200, {"id": rid, "choices": [{"finish_reason": "length", "message": {
-                "role": "assistant", "content": "echo " + digest[:16], "reasoning_content": "hm"}}],
+            reply = {"role": "assistant", "content": "echo " + digest[:16], "reasoning_content": "hm"}
+            if image and len(body["messages"]) == 1:
+                first_reply = reply
+            self._send(200, {"id": rid, "choices": [{"finish_reason": "length", "message": reply}],
                 "usage": {"completion_tokens": body["max_tokens"]}})
             time.sleep(0.3)  # the product writes its line as the request finishes
             log(record)

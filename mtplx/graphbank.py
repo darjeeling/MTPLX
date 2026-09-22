@@ -2573,6 +2573,7 @@ class CompiledVerifyBank:
                 candidate_captures=self._named_fixed_m4_captures(captures_flat),
                 candidate_state=list(state_out),
                 committed_count=committed_count,
+                dispatch_kind="compiled",
             )
 
         if not donate and boundary in ("both", "post"):
@@ -3001,6 +3002,12 @@ class CompiledVerifyBank:
                 # Rounds compared, and how many of them differed anywhere.
                 "rounds": 0,
                 "rounds_by_width": {},
+                # A width-4 call can still run eager without host inputs.
+                # Count the dispatch that actually produced the candidate.
+                "compiled_rounds": 0,
+                "eager_rounds": 0,
+                "compiled_exact_rounds": 0,
+                "eager_exact_rounds": 0,
                 "divergent_rounds": 0,
                 "divergent_rounds_by_width": {},
                 # Rounds of an image request NOT compared, because their
@@ -3014,6 +3021,9 @@ class CompiledVerifyBank:
                 "hidden_max_abs_diff": 0.0,
                 "state_max_abs_diff": 0.0,
                 "capture_max_abs_diff": 0.0,
+                "kl_scope": "logits_only",
+                "state_metrics": ["max_abs_diff", "differing_elements"],
+                "round_diagnostics": [],
                 "first_divergence": None,
             },
         )
@@ -3066,6 +3076,7 @@ class CompiledVerifyBank:
         candidate_captures: dict[str, Any],
         candidate_state: list[Any],
         committed_count: int | None,
+        dispatch_kind: str,
     ) -> None:
         # The reference leg: the stock cache in the caller's ambient scope
         # (``_fixed_m4_parity2_reference_ready`` checked that an image round
@@ -3080,7 +3091,7 @@ class CompiledVerifyBank:
             )
 
         # (name, reference leaf, candidate leaf); the two lanes may hold
-        # different capacities, the state they share is the common prefix.
+        # different capacities, but both must store and compare ALL live rows.
         pairs: list[tuple[str, Any, Any]] = [
             ("logits", eager_logits, candidate_logits),
             ("hidden", eager_hidden, candidate_hidden),
@@ -3090,7 +3101,8 @@ class CompiledVerifyBank:
             pairs.append(
                 (name, reference_captures.get(name), candidate_captures.get(name))
             )
-        offsets: list[tuple[str, int, Any]] = []
+        offsets: list[tuple[str, int, int]] = []
+        storage_shortfalls: dict[str, dict[str, Any]] = {}
         pos = 0
         for idx, kind, n_leaves in self._spec or []:
             entry = clone[idx]
@@ -3099,17 +3111,30 @@ class CompiledVerifyBank:
                 reference = (
                     entry.kv.keys, entry.kv.values, None, entry.raw_keys, entry.pooled
                 )
-                offsets.append(
-                    (f"{prefix}.2", int(entry.kv.offset), candidate_state[pos + 2])
-                )
+                reference_offset = int(entry.kv.offset)
+                candidate_offset = int(candidate_state[pos + 2].item())
+                offsets.append((f"{prefix}.2", reference_offset, candidate_offset))
                 for leaf_idx, axis in ((0, 2), (1, 2), (3, 1), (4, 1)):
                     ref = reference[leaf_idx]
                     cand = candidate_state[pos + leaf_idx]
-                    rows = min(int(ref.shape[axis]), int(cand.shape[axis]))
-                    index = [slice(None)] * ref.ndim
-                    index[axis] = slice(0, rows)
+                    name = f"{prefix}.{leaf_idx}"
+                    divisor = int(entry.ratio) if leaf_idx == 4 else 1
+                    ref_rows = reference_offset // divisor
+                    cand_rows = candidate_offset // divisor
+                    if ref.shape[axis] < ref_rows or cand.shape[axis] < cand_rows:
+                        storage_shortfalls[name] = {
+                            "reason": "live_storage_shortfall",
+                            "reference_storage_rows": int(ref.shape[axis]),
+                            "reference_live_rows": ref_rows,
+                            "candidate_storage_rows": int(cand.shape[axis]),
+                            "candidate_live_rows": cand_rows,
+                        }
+                    ref_index = [slice(None)] * ref.ndim
+                    cand_index = [slice(None)] * cand.ndim
+                    ref_index[axis] = slice(0, ref_rows)
+                    cand_index[axis] = slice(0, cand_rows)
                     pairs.append(
-                        (f"{prefix}.{leaf_idx}", ref[tuple(index)], cand[tuple(index)])
+                        (name, ref[tuple(ref_index)], cand[tuple(cand_index)])
                     )
             else:
                 for leaf_idx in range(n_leaves):
@@ -3125,60 +3150,92 @@ class CompiledVerifyBank:
         comparable = [
             (name, ref, cand)
             for name, ref, cand in pairs
-            if isinstance(ref, mx.array)
+            if name not in storage_shortfalls
+            and isinstance(ref, mx.array)
             and isinstance(cand, mx.array)
             and ref.shape == cand.shape
             and ref.dtype == cand.dtype
         ]
-        flags = [mx.array_equal(ref, cand) for _name, ref, cand in comparable]
+        # Retain scalar diagnostics for every leaf of every compared round.
+        # No cache arrays cross to the host, even when many leaves diverge.
+        measurements = {}
+        for name, ref, cand in comparable:
+            # Integer leaves must not lose differences above float32's exact
+            # integer range. The logical QSA offset is measured as a host int.
+            dtype = mx.int64 if mx.issubdtype(ref.dtype, mx.integer) else mx.float32
+            measurements[name] = (
+                mx.max(mx.abs(ref.astype(dtype) - cand.astype(dtype)))
+                if ref.size else mx.array(0.0),
+                mx.sum(ref != cand),
+            )
         ref32 = eager_logits.astype(mx.float32)
         cand32 = candidate_logits.astype(mx.float32)
         log_p = ref32 - mx.logsumexp(ref32, axis=-1, keepdims=True)
         log_q = cand32 - mx.logsumexp(cand32, axis=-1, keepdims=True)
         max_kl = mx.max(mx.sum(mx.exp(log_p) * (log_p - log_q), axis=-1))
-        logits_diff = mx.max(mx.abs(ref32 - cand32))
-        hidden_diff = mx.max(
-            mx.abs(
-                eager_hidden.astype(mx.float32) - candidate_hidden.astype(mx.float32)
-            )
-        )
-        offset_values = [value for _name, _expected, value in offsets]
-        mx.eval(flags, max_kl, logits_diff, hidden_diff, offset_values)
-
-        mismatched: list[tuple[str, Any, Any]] = [
-            (name, ref, cand)
-            for name, ref, cand in pairs
-            if not (
-                isinstance(ref, mx.array)
-                and isinstance(cand, mx.array)
-                and ref.shape == cand.shape
-                and ref.dtype == cand.dtype
-            )
-            and not (ref is None and cand is None)
-        ]
-        mismatched.extend(
-            pair for pair, flag in zip(comparable, flags) if not bool(flag.item())
-        )
-        mismatched.extend(
-            (name, expected, int(value.item()))
-            for name, expected, value in offsets
-            if int(value.item()) != expected
-        )
+        mx.eval(list(measurements.values()), max_kl)
+        leaves: dict[str, dict[str, Any]] = {}
+        for name, ref, cand in pairs:
+            if name in storage_shortfalls:
+                metric = {
+                    "max_abs_diff": None, "differing_elements": None,
+                    **storage_shortfalls[name],
+                }
+            elif name in measurements:
+                diff, count = measurements[name]
+                differing = int(count.item())
+                metric = {
+                    "max_abs_diff": float(diff.item()),
+                    "differing_elements": differing,
+                    "reason": "value_mismatch" if differing else None,
+                }
+            elif ref is None and cand is None:
+                metric = {"max_abs_diff": 0.0, "differing_elements": 0, "reason": None}
+            else:
+                if ref is None or cand is None:
+                    reason = "missing_leaf"
+                elif ref.shape != cand.shape:
+                    reason = "shape_mismatch"
+                else:
+                    reason = "dtype_mismatch"
+                metric = {
+                    "max_abs_diff": None, "differing_elements": None, "reason": reason,
+                }
+            leaves[name] = metric
+        for name, ref, cand in offsets:
+            leaves[name] = {
+                "max_abs_diff": abs(ref - cand),
+                "differing_elements": int(ref != cand),
+                "reason": "offset_mismatch" if ref != cand else None,
+            }
+        leaves["logits"]["max_kl"] = float(max_kl.item())
+        mismatched = [name for name, metric in leaves.items() if metric["reason"]]
 
         width = str(_decode_length(input_ids))
         record = self._fixed_m4_parity2_record(dispatch)
         record["rounds"] += 1
         record["rounds_by_width"][width] = record["rounds_by_width"].get(width, 0) + 1
+        record[f"{dispatch_kind}_rounds"] += 1
         record["compared_leaves_per_round"] = len(pairs) + len(offsets)
-        record["logits_max_abs_diff"] = max(
-            record["logits_max_abs_diff"], float(logits_diff.item())
+        context = (
+            int(dispatch["base_offset"]) + int(committed_count)
+            if committed_count is not None else None
         )
+        record["round_diagnostics"].append({
+            "round": int(record["rounds"]), "width": int(width),
+            "dispatch_kind": dispatch_kind, "context": context, "leaves": leaves,
+        })
+        for name, metric in leaves.items():
+            family = _artifact_kind(name)
+            if family in ("logits", "hidden", "state", "capture"):
+                diff = metric["max_abs_diff"]
+                if diff is not None:
+                    key = f"{family}_max_abs_diff"
+                    record[key] = max(record[key], diff)
         record["logits_max_kl"] = max(record["logits_max_kl"], float(max_kl.item()))
-        record["hidden_max_abs_diff"] = max(
-            record["hidden_max_abs_diff"], float(hidden_diff.item())
-        )
         self.stats["parity2_calls"] += 1
         if not mismatched:
+            record[f"{dispatch_kind}_exact_rounds"] += 1
             return
 
         record["divergent_rounds"] += 1
@@ -3186,40 +3243,15 @@ class CompiledVerifyBank:
             record["divergent_rounds_by_width"].get(width, 0) + 1
         )
         self.stats["parity2_divergent_calls"] += 1
-        # Size of every divergence, still on the device: one scalar per leaf.
-        sized = [
-            (name, mx.max(mx.abs(ref.astype(mx.float32) - cand.astype(mx.float32))))
-            for name, ref, cand in mismatched
-            if isinstance(ref, mx.array)
-            and isinstance(cand, mx.array)
-            and ref.shape == cand.shape
-        ]
-        mx.eval([diff for _name, diff in sized])
-        for name, diff in sized:
-            family = _artifact_kind(name)
-            if family in ("state", "capture"):
-                key = f"{family}_max_abs_diff"
-                record[key] = max(record[key], float(diff.item()))
         if record["first_divergence"] is None:
-            # The readable lines cross to the host, so only the first
-            # divergent round writes them and only for its first few leaves
-            # (one K bank is hundreds of megabytes at long context).
-            detailed = mismatched[:8]
-            report = compare_verify_outputs(
-                {name: ref for name, ref, _cand in detailed},
-                {name: cand for name, _ref, cand in detailed},
-                max_report_lines=len(detailed) + 2,
-            )
-            first_name = mismatched[0][0]
+            report = [f"{name}: {leaves[name]}" for name in mismatched]
+            first_name = mismatched[0]
             record["first_divergence"] = {
                 "round": int(record["rounds"]),
                 "width": int(width),
-                "context": (
-                    int(dispatch["base_offset"]) + int(committed_count)
-                    if committed_count is not None
-                    else None
-                ),
+                "context": context,
                 "leaf": first_name,
+                "reason": leaves[first_name]["reason"],
                 "artifact": _artifact_kind(first_name),
                 "mismatched_leaves": len(mismatched),
                 "report": report,
@@ -3229,15 +3261,16 @@ class CompiledVerifyBank:
                 "context": record["first_divergence"]["context"],
                 "artifact": _artifact_kind(first_name),
                 "leaf": first_name,
-                "max_abs_diff": _leaf_max_abs_diff(mismatched[0][1], mismatched[0][2]),
+                "reason": leaves[first_name]["reason"],
+                "max_abs_diff": leaves[first_name]["max_abs_diff"],
                 "mismatched_leaves": len(mismatched),
             }
         if record["divergent_rounds"] <= 10:
             print(
                 f"[parity2] fixed-M4 divergence round={record['rounds']} "
                 f"width={width} positions={record['positions']} "
-                f"leaf={mismatched[0][0]} mismatched_leaves={len(mismatched)} "
-                f"logits_max_abs_diff={float(logits_diff.item()):.3e} "
+                f"leaf={mismatched[0]} mismatched_leaves={len(mismatched)} "
+                f"logits_max_abs_diff={leaves['logits']['max_abs_diff']} "
                 f"kl={float(max_kl.item()):.3e}",
                 flush=True,
             )
@@ -3324,6 +3357,7 @@ class CompiledVerifyBank:
                     candidate_captures=self._named_eager_captures(result[2]),
                     candidate_state=self._fixed_m4_state_leaves(),
                     committed_count=committed_count,
+                    dispatch_kind="eager",
                 )
             return result
         if (

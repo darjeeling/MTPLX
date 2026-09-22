@@ -134,6 +134,20 @@ def test_an_image_request_at_sequence_positions_takes_the_text_trace():
     assert receipt["rope_delta"] is None and receipt["images"] == 1
 
 
+def test_sequential_image_positions_do_not_bypass_the_rebase_refusal(monkeypatch):
+    ids = _prompt(64, image_end=63)
+    splice = _splice(ids, delta=0, table=False)
+    monkeypatch.setenv("MTPLX_STATE_REBASE_EVERY", "64")
+    admitted, delta, receipt = _admit(_rt(), ids, splice)
+    assert (admitted, delta) == (False, None)
+    assert receipt["positions"] == "vision_sequential"
+    assert receipt["reason"] == "vision_state_rebase"
+    monkeypatch.delenv("MTPLX_STATE_REBASE_EVERY")
+    admitted, delta, receipt = _admit(_rt(), ids, splice)
+    assert (admitted, delta) == (True, None)
+    assert receipt["reason"] == "admitted"
+
+
 @pytest.mark.parametrize(
     ("tokens", "image_end", "refused"),
     [
