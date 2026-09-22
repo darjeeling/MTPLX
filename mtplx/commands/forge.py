@@ -1194,6 +1194,18 @@ def _cmd_build(args: Any, *, model_root: str | Path | None = None) -> int:
             # Do not calibrate, load the model, or reuse a source's serving stamp.
             runtime_metadata = {
                 "mtplx_version": __version__,
+                "arch_id": "qwen4-next",
+                "model_family": "qwen4_exp",
+                "served_model_id": config["mtplx_quality"]["served_id"],
+                "mtp_depth_max": 3,
+                "recommended_profile": "turbo",
+                "exactness_baseline": {
+                    "status": "pending_full_load",
+                    "streaming_audit": "streaming_audit.json",
+                },
+                # A valid, explicitly unverified contract. Empty evidence
+                # must not inherit the source model's verified-on stamp.
+                "verified_on": {},
                 "min_engine_version": config["mtplx_quality"]["min_engine_version"],
                 "quality_pack": config["mtplx_quality"],
                 "verification": {"mode": "streaming", "status": "streaming-audited",

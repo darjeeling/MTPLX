@@ -304,7 +304,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         hf_model_id="Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality",
         # Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
         # Calculated download and planner need at 128K; replace together with measured figures.
-        size_bytes=169_958_536_972, peak_memory_gib=166.2,
+        size_bytes=169_958_537_278, peak_memory_gib=166.2,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
             "mtplx-flash-next-optimized-quality",

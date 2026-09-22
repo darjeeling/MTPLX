@@ -5,7 +5,7 @@ The manifest is the bless-list `mtplx models --check` and the app consult:
 for each official pack it pins the exact HF commit users should update
 into, the minimum engine version that can load it, and a one-line note
 shown next to the update button. Run AFTER the pack uploads so the pinned
-revisions are the post-upload commits. Before the two 2.11.4 uploads, repeat
+revisions are the post-upload commits. Before the two 2.12.0 uploads, repeat
 ``--not-yet-published REPO`` for each unavailable new repo. Every other lookup
 failure is an error; an unresolved marked repo is recorded separately, never
 published with a fabricated revision. audit_catalog_sizes.py uses the same flag.

@@ -1,4 +1,4 @@
-"""Explicit exceptions for staging the two 2.11.4 packs before upload."""
+"""Explicit staging markers for the two model packs introduced in 2.12.0."""
 from __future__ import annotations
 
 import argparse
@@ -18,5 +18,5 @@ def add_not_yet_published_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--not-yet-published", action="append", default=[],
         choices=sorted(NOT_YET_PUBLISHED_REPOS), metavar="REPO",
-        help="Explicitly mark a new 2.11.4 repo as not yet published; repeat per repo. Remove after upload.",
+        help="Explicitly mark a new 2.12.0 repo as not yet published; repeat per repo. Omit after upload.",
     )

@@ -746,7 +746,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             ],
             // Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
             // Calculated download and planner need at 128K; replace together with measured figures.
-            sizeBytes: 169_958_536_972, peakMemoryGiB: 166.2,
+            sizeBytes: 169_958_537_278, peakMemoryGiB: 166.2,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(

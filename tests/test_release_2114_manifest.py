@@ -30,17 +30,17 @@ def run_script(module, monkeypatch, hub, args):
     module.main()
 
 
-def test_manifest_requires_2114_for_new_packs(tmp_path, monkeypatch):
+def test_manifest_requires_2120_for_new_packs(tmp_path, monkeypatch):
     out = tmp_path / "models.json"
     run_script(manifest, monkeypatch, Hub(), ["--out", str(out)])
     data = json.loads(out.read_text())
     assert len(data["models"]) == len(manifest.BLESSED)
     for repo in NOT_YET_PUBLISHED_REPOS:
         entry = data["models"][repo]
-        assert entry["min_engine_version"] == "2.11.4"
-        monkeypatch.setattr(model_updates, "ENGINE_VERSION", "2.11.3")
-        assert not model_updates.engine_satisfies(entry["min_engine_version"])
+        assert entry["min_engine_version"] == "2.12.0"
         monkeypatch.setattr(model_updates, "ENGINE_VERSION", "2.11.4")
+        assert not model_updates.engine_satisfies(entry["min_engine_version"])
+        monkeypatch.setattr(model_updates, "ENGINE_VERSION", "2.12.0")
         assert model_updates.engine_satisfies(entry["min_engine_version"])
         assert entry["revision"] == "a" * 40
         assert entry["note"] == next(m.detail for m in OFFICIAL_CATALOG if m.hf_model_id == repo)

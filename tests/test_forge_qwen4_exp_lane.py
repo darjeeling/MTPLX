@@ -84,7 +84,8 @@ def test_mtp_layout_splits_packed_experts_like_sanitize() -> None:
 
 
 def test_mtp_rules_mirror_trunk_recipe() -> None:
-    rule = lambda k, **kw: mtp_module_rule(k, mtp_bits=4, mtp_group=32, **kw)
+    def rule(key, **kwargs):
+        return mtp_module_rule(key, mtp_bits=4, mtp_group=32, **kwargs)
     assert rule("layers.0.mlp.switch_mlp.gate_proj.weight") == (4, 32)
     assert rule("layers.0.mlp.gate.weight") == (8, 64)
     assert rule("layers.0.mlp.shared_expert.down_proj.weight") == (8, 64)
@@ -274,7 +275,12 @@ def test_streaming_build_never_loads_or_reuses_a_verified_stamp(tmp_path, monkey
     meta = json.loads((tmp_path / "models/Quality/mtplx_runtime.json").read_text())
     assert meta["verification"]["status"] == "streaming-audited"
     assert meta["verification"]["full_load_verified"] is False
-    assert "verified_on" not in meta and "speed_evidence" not in meta
+    assert meta["verified_on"] == {} and "speed_evidence" not in meta
+    from mtplx.backends.registry import RuntimeContract, _runtime_contract_blocker
+    contract = RuntimeContract.from_dict(meta)
+    assert contract.arch_id == "qwen4-next"
+    assert _runtime_contract_blocker(contract) == "exactness_baseline status is pending_full_load"
+    assert meta["served_model_id"] == meta["quality_pack"]["served_id"]
     assert meta["quality_pack"]["min_engine_version"] == "2.12.0"
     assert meta["quality_pack"]["source"]["revision"].startswith("sha256:")
     assert meta["forge_provenance"]["forge_recipe"]["name"] == QUALITY_RECIPE

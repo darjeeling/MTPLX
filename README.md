@@ -116,7 +116,7 @@ The catalog lists MTPLX packs under [Youssofal](https://huggingface.co/Youssofal
 |---|---|---|---|
 | `Qwen3.5-4B-MTPLX-Optimized-Speed` | 8 GB and up, peaks at 2.9 GiB | 4-bit. The fastest fit for smaller Macs. | Sustained, depth 3 |
 | `Qwen3.5-4B-MTPLX-Optimized-Quality` | 8 GB and up, peaks at 4.8 GiB | 8-bit. The highest-fidelity 4B. | Sustained, depth 3 |
-| `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` | 16 GB tier, 8K window; 11.80 GiB peak under a restricted engine allowance | Prism ML ternary 27B with vision and MTP; physical small-Mac validation pending. | MTP, depth 1 |
+| `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` | 16 GB tier, 8K window; AR peaks at 11.80 GiB under a restricted engine allowance | Prism ML ternary 27B with vision and MTP; physical small-Mac and MTP memory validation pending. | MTP, depth 1 |
 | `Qwen3.5-9B-MTPLX-Optimized-Speed` | 16 GB and up, peaks at 10.0 GiB | 6-bit. The strong small-Mac speed pick. | Turbo. Tuning this one on a 16 GB M4 Mac mini lands on depth 1 |
 | `Qwen3.8-27B-MTPLX-Bare-Speed` | 32 GB and up, peaks at 20.0 GiB | Quickest burst chat speeds. Lower quality and slower on long coding tasks. | Turbo, depth 3 |
 | `Qwen3.8-27B-MTPLX-Optimized-Speed` | 32 GB and up, peaks at 25.0 GiB | 4-bit dynamic quant. Great coding speeds and good quality. The recommended coding model. | Turbo, depth 3 |
