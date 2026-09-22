@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import functools
 import os
 from dataclasses import dataclass
 from typing import Callable
@@ -52,11 +53,15 @@ def system_memory_guard_enabled() -> bool:
     return raw not in {"0", "off", "false", "no"}
 
 
+@functools.cache
+def _libc() -> ctypes.CDLL:
+    return ctypes.CDLL(ctypes.util.find_library("c"))
+
+
 def _sysctl_int(name: bytes, width: int) -> int | None:
-    libc = ctypes.CDLL(ctypes.util.find_library("c"))
     value = ctypes.c_uint64(0) if width == 8 else ctypes.c_int32(0)
     size = ctypes.c_size_t(ctypes.sizeof(value))
-    rc = libc.sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0)
+    rc = _libc().sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0)
     if rc != 0:
         return None
     return int(value.value)
