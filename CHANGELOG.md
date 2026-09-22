@@ -183,11 +183,14 @@ All notable user-facing changes to MTPLX. The format is based on
   block together, but can fund the weights, the transient plus a 256 MiB
   margin and one block at the dense KV width, the plan admits the model
   with the bank floor at zero (restores come from the SSD tier). The rule
-  applies only to a pack that stamps its own measured memory table
-  (`memory_evidence` in its runtime contract), as the Bonsai pack does; any
-  other pack is refused as before. Measured on Bonsai 2 27B: the 16 GiB class
-  admits 8,192 tokens (peak 11.78 to 11.80 GiB under the 12 GiB budget).
-  Every plan that funds the floor is unchanged.
+  applies to a pack whose weights are no larger than the Bonsai pack's
+  8,834,412,216 bytes, the pack the margin was measured on (Qwen 3.5 9B
+  Optimized Speed gets 20,480 tokens on 16 GiB), and to a larger pack only
+  when it stamps its own measured memory table for those weights
+  (`memory_evidence` in its runtime contract); any other pack is refused as
+  before. Measured on Bonsai 2 27B: the 16 GiB class admits 8,192 tokens
+  (peak 11.78 to 11.80 GiB under the 12 GiB budget). Every plan that funds
+  the floor is unchanged.
 
 - **The SSD conversation-cache size follows RAM from the terminal too.**
   `mtplx serve` defaulted to a flat 100 GB, so a 16 GB Mac got a 100 GB
@@ -471,6 +474,18 @@ All notable user-facing changes to MTPLX. The format is based on
   continues.** Its first dispatch runs under a guard; on a GPU that refuses
   the kernel, the path is retired with one log line and the same round runs
   eagerly, with unchanged output.
+- **Flash-Next's sparse prefill kernel for M1 to M4 checks its numbers
+  before it is used.** The app builds the kernel against MLX's macOS 15
+  release and runs MLX's macOS 26 release, which the version check cannot
+  tell apart. Before its first use in a process the kernel runs one small
+  call on random inputs against the pure MLX path and is used only when the
+  largest difference is within 0.005; otherwise prefill runs on the pure MLX
+  path and `/health` gives the reason.
+- **The app's setup error on macOS 26.0 and 26.1 names the cause.** MLX
+  0.32.2 for macOS 26 needs macOS 26.2 or later, so the engine's import
+  check fails on 26.0 and 26.1 whatever the network does. Setup asked users
+  to check their network access to PyPI; it now says the engine needs macOS
+  26.2 or later and asks them to update macOS.
 - **Performance reports explain a slow response.** `/health`, the request
   log and `mtplx doctor --explain` count every fallback from the fast path
   with its reason, and Pi traces include compaction requests and the image

@@ -34,10 +34,12 @@ Bonsai on 16 GB misses by the cache floor alone. That floor limits the warm
 cache; it is not a physical need. When it is the only thing left unfunded, the
 planner now admits the model with the cache floor at zero, a 256 MiB margin
 over the runtime reserve, and the KV cache counted at its full width, and
-restores come from the SSD cache. The rule applies only to a pack whose runtime
-contract carries its own measured memory table (`memory_evidence`), which is
-why the measured table is stamped into the published pack. Every plan that funds
-the floor is unchanged.
+restores come from the SSD cache. The rule applies to a pack whose weights are
+no larger than this pack's 8,834,412,216 bytes (`TIGHT_MACHINE_MAX_WEIGHTS_BYTES`),
+and to a larger pack only when its runtime contract carries its own measured
+memory table (`memory_evidence`) for those exact weights, with a completed run
+inside the budget that the rule admitted. The published Bonsai pack carries its
+table as well. Every plan that funds the floor is unchanged.
 
 ## Running the memory table
 
@@ -76,7 +78,7 @@ restamps an existing pack into a new directory, or records measured results in
 a built pack:
 
 ```sh
-# Copy an existing pack into a new directory and fill its card's memory table.
+# Copy an existing pack into a new directory and stamp the measured memory table.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" "$PY" scripts/build_bonsai_mtplx_pack.py \
   --restamp "$HOME/.mtplx/models/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed" \
   --out outputs/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed \
@@ -111,4 +113,7 @@ The `mtplx_version` field records the MTPLX version that first built the pack.
 Its exactness record stays open until a measured parity result is stamped with
 `--exactness-json` and `--exactness-status`. The loader parity against Prism
 ML's own runtime, a mean KL divergence of 2.6e-6 in a float16 comparison on a
-synthetic pack, is quoted on the card with that scope.
+synthetic pack, tests the loader rather than the model and is not quoted on the
+card. The card's memory section shows one row per RAM class: the planner's
+context window, with the 8-bit KV cache window when it differs, and the highest
+peak among the runs that completed inside the budget.

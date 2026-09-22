@@ -98,10 +98,10 @@ Move the exact artifact to a larger Mac, then explicitly promote it with:
 mtplx forge verify /data/models/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality --stamp
 ```
 
-The generated card reads the artifact's metadata, including all observed
-tensor classes, license/credits, source revision and verification mode. It
-gives the memory guidance by Mac size, including why a 128 GB Mac cannot load
-the pack, and it makes no speed claim. `size-checksums.json`
+The generated card reads the artifact's metadata: every observed tensor class
+with its stored precision, the license and credits, and the source revision.
+It gives the memory guidance by Mac size, including why a 128 GB Mac cannot
+load the pack, and says that its speed is not measured yet. `size-checksums.json`
 lists all final files except itself, with actual sizes and SHA-256s.
 
 ## Local validation and component parity
