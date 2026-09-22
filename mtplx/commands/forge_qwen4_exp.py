@@ -29,6 +29,7 @@ Vision graft, MTP sidecar validation, verify and stamping are the ordinary
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -45,6 +46,33 @@ NGRAM_KEY = "model.language_model.layers.{layer}.ple.ple_embedding.ngram_embeddi
 #: sidecar layout to 4-bit / 32-group; other widths load but are refused at the
 #: first request. Kept as data so the guard and this lane cannot disagree.
 NGRAM_PRODUCTION_LAYOUT = (4, 32)
+
+QUALITY_RECIPE = "flash-next-optimized-quality"
+SPEED_RECIPE = "flash-next-optimized-speed"
+QUALITY_NAME = "Qwen3.8-Flash-Next-MTPLX-Optimized-Quality"
+QUALITY_REPO = f"Youssofal/{QUALITY_NAME}"
+QUALITY_SERVED_ID = "mtplx-flash-next-optimized-quality"
+QUALITY_ENGINE_FLOOR = "2.11.4"
+OFFICIAL_SOURCE_REPO = "Qwen/Qwen3.8-Flash-Next"
+
+# Family-qualified names follow the standalone converter's speed recipe.
+# Quality deliberately retains the production Q4 table, independently of body bits.
+NAMED_RECIPES = {
+    SPEED_RECIPE: {
+        "body_bits": 4, "body_group_size": 32, "body_mode": "affine",
+        "ngram": {"bits": 4, "group_size": 32},
+        "qwen4_mtp_bits": 4, "qwen4_qsa_8bit": True,
+    },
+    QUALITY_RECIPE: {
+        "body_bits": 8, "body_group_size": 64, "body_mode": "affine",
+        "ngram": {"bits": 4, "group_size": 32},
+        "qwen4_mtp_bits": 8, "qwen4_qsa_8bit": True,
+    },
+}
+
+
+def named_recipe(name: str) -> dict[str, Any]:
+    return {"name": name, **copy.deepcopy(NAMED_RECIPES[name])}
 
 #: ``Model.quant_predicate`` ("Optimized Speed"), mirrored for the MTP head,
 #: whose modules never pass through mlx-lm's quantize_model.
@@ -108,6 +136,21 @@ def recipe_params(recipe: dict[str, Any]) -> dict[str, int]:
     ngram = recipe.get("ngram") if isinstance(recipe.get("ngram"), dict) else {}
     ngram_bits = int(NGRAM_PRODUCTION_LAYOUT[0] if ngram.get("bits") is None else ngram.get("bits"))
     ngram_group = int(ngram.get("group_size") or NGRAM_PRODUCTION_LAYOUT[1])
+    if recipe.get("name") == QUALITY_RECIPE:
+        # The published Quality pack must run the fixed-M4 verify lane, which
+        # serves the 4-bit/g32 table only. Refuse here, before any byte of the
+        # 360 GB source is read. A custom recipe may still choose another
+        # table layout; it is warned below that the lane will decline it.
+        if (ngram_bits, ngram_group) != NGRAM_PRODUCTION_LAYOUT:
+            raise Qwen4ForgeError(
+                "The Quality pack requires a 4-bit/g32 n-gram table: the fixed-M4 verifier "
+                f"cannot serve {ngram_bits}-bit/g{ngram_group}. Build refused before conversion."
+            )
+        expected = NAMED_RECIPES[QUALITY_RECIPE]
+        if any(recipe.get(k) != v for k, v in expected.items()) or recipe.get("module_overrides"):
+            raise Qwen4ForgeError("The named Quality recipe cannot be overridden; use its Q8/g64 contract")
+        if recipe.get("body_dtype", "bf16") not in ("bf16", "bfloat16"):
+            raise Qwen4ForgeError("The named Quality recipe requires BF16 structural tensors")
     mtp_bits = recipe.get("qwen4_mtp_bits")
     mtp_bits = body_bits if mtp_bits is None else int(mtp_bits)
     return {
@@ -174,6 +217,10 @@ def write_ngram_sidecar(
     dim = 0
     for key, path in shards:
         header, _ = read_safetensors_header(path)
+        if header[key]["dtype"] != "BF16" or len(header[key]["shape"]) != 2:
+            raise Qwen4ForgeError(f"n-gram source must be a BF16 matrix: {key}")
+        if dim and dim != int(header[key]["shape"][1]):
+            raise Qwen4ForgeError(f"n-gram source shard widths disagree: {key}")
         rows_per.append(int(header[key]["shape"][0]))
         dim = int(header[key]["shape"][1])
     rows = sum(rows_per)
@@ -264,7 +311,11 @@ def convert_body(
     weight_map = _load_json(source / "model.safetensors.index.json")["weight_map"]
     weights: dict[str, Any] = {}
     for filename in sorted(set(weight_map.values())):
-        weights.update(mx.load(str(source / filename)))
+        # Exclude sidecars before sanitize: concatenating the 95 GiB BF16
+        # table even lazily is unnecessary and retains the source graph.
+        weights.update({k: v for k, v in mx.load(str(source / filename)).items()
+                        if ".ngram_embedding.shard_" not in k
+                        and not k.startswith(("mtp.", "model.visual.", "vision_tower."))})
     weights = model.sanitize(weights)
     dtype_name = config.get("torch_dtype") or _text_config(config).get("dtype")
     if dtype_name in ("float16", "bfloat16", "float32"):
@@ -340,7 +391,9 @@ def convert_body(
     config = dict(sorted(config.items()))
     (destination / "config.json").write_text(json.dumps(config, indent=4), encoding="utf-8")
     for item in source.iterdir():
-        if item.name.startswith(".") or item.name.startswith("model") or item.name == "config.json":
+        if item.name.startswith(".") or item.name.startswith("model") or item.name in {
+            "config.json", "mtplx_runtime.json", "streaming_audit.json", "size-checksums.json",
+        }:
             continue
         if item.suffix in {".json", ".jinja", ".txt", ".md"} and item.is_file():
             shutil.copy2(item, destination / item.name)
@@ -454,6 +507,10 @@ def run_lane(
     """Body + n-gram sidecar + MTP sidecar. Vision, validation, verify and
     stamping are the caller's ordinary steps."""
     params = recipe_params(recipe)
+    if recipe.get("name") == QUALITY_RECIPE:
+        from mtplx.commands.forge_qwen4_audit import validate_bf16_source
+
+        validate_bf16_source(source)
     qsa_8bit = bool(recipe.get("qwen4_qsa_8bit", False))
     report: dict[str, Any] = {"recipe": params}
     progress("convert", 0.0, "ngram_sidecar", False)
@@ -484,6 +541,7 @@ def run_lane(
         extra["mtp_file"] = MTP_FILE
     config["mlx_lm_extra_tensors"] = extra
     config["mtplx_recipe"] = {
+        "name": recipe.get("name"),
         "base": {"bits": params["body_bits"], "group_size": params["body_group"]},
         "ngram": {"bits": params["ngram_bits"], "group_size": params["ngram_group"]},
         "mtp": {"bits": params["mtp_bits"], "group_size": params["mtp_group"]},

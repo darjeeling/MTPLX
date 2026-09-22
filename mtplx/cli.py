@@ -3301,7 +3301,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     forge_build_p.add_argument("--out", required=True, help="Progress output root")
     forge_build_p.add_argument("--run-id", required=True, help="Run id under --out")
-    forge_build_p.add_argument("--recipe", required=True, help="Forge recipe JSON")
+    forge_build_p.add_argument("--recipe", required=True, help="Forge recipe JSON or flash-next-optimized-speed / flash-next-optimized-quality")
+    forge_build_p.add_argument(
+        "--verification", choices=("full-load", "streaming"), default="full-load",
+        help="full-load verifies serving before stamping (default); streaming audits Flash-Next Quality on disk and does not grant a verified stamp",
+    )
     forge_build_p.add_argument(
         "--branded-name", required=True, help="Local MTPLX artifact name"
     )
