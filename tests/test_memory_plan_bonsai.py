@@ -12,7 +12,9 @@ weights + dense KV + 3.056 to 3.075 GiB in every completed row, so on the
 not lower any of those peaks (the 16K peaks were byte-identical). The
 tight-machine rule therefore admits 8192 tokens on 16 GiB with the bank
 floor at zero and the KV counted at its dense width. Every other class is
-unchanged.
+unchanged. The rule is offered to packs no heavier than this one and to a
+pack that stamps its own measurement (``memory_evidence`` in its runtime
+contract).
 
 Actual pack bytes (including the MTP sidecar) are read by the measurement
 script; these deliberately pin the requested round-number 8.2 GiB baseline.
@@ -25,8 +27,10 @@ from mtplx.memory_plan import (
     GIB,
     RUNTIME_TRANSIENTS_BYTES,
     TIGHT_MACHINE_MARGIN_BYTES,
+    TIGHT_MACHINE_MAX_WEIGHTS_BYTES,
     bank_dynamic_ceiling,
     describe_plan,
+    measured_on_tight_machine,
     plan_memory,
 )
 
@@ -34,15 +38,29 @@ BONSAI_WEIGHTS = 8_804_682_956  # floor(8.2 * GiB), including all weights
 BONSAI_KV_PER_TOKEN = 65_536  # 16 full-attention layers, K+V, 4 heads, dim 256, fp16
 
 
-def _plan(ram: int, quant: str = "off", **kw):
+def _plan(ram: int, quant: str = "off", *, tight_machine_measured: bool = True, **kw):
+    # The published pack stamps its measured memory table.
     return plan_memory(
         total_ram_bytes=ram * GIB,
         model_weights_bytes=BONSAI_WEIGHTS,
         kv_bytes_per_token=BONSAI_KV_PER_TOKEN,
         kv_quantization=quant,
         model_max_context=262_144,
+        tight_machine_measured=tight_machine_measured,
         **kw,
     )
+
+
+def _evidence(weights: int = BONSAI_WEIGHTS, **row) -> dict:
+    """The shape scripts/bonsai_memory_table.py stamps into the contract."""
+
+    measured = {
+        "completed": True,
+        "within_engine_budget": True,
+        "planner": {"tight_machine": True},
+        **row,
+    }
+    return {"memory_evidence": {"pack": {"weights_bytes": weights}, "rows": [measured]}}
 
 
 @pytest.mark.parametrize("ram,budget,admitted,off_context,q8_context", [
@@ -119,6 +137,7 @@ def test_tight_machine_still_refuses_what_the_margin_cannot_fund():
         model_weights_bytes=int(9.5 * GIB),
         kv_bytes_per_token=BONSAI_KV_PER_TOKEN,
         model_max_context=262_144,
+        tight_machine_measured=True,
     )
     assert plan.model_fits is False
     assert plan.tight_machine is False
@@ -138,3 +157,55 @@ def test_a_machine_that_funds_the_bank_floor_is_not_tight():
     assert plan.model_fits and not plan.tight_machine
     assert plan.bank_floor_bytes == BANK_FLOOR_BYTES
     assert plan.bank_steady_bytes >= BANK_FLOOR_BYTES
+
+
+def test_packs_inside_the_measured_envelope_are_admitted_tight():
+    # Qwen3.5-9B Optimized Speed: 8.08 GiB of weights (MTP and vision
+    # included) and 8 attention layers at 32 KiB per token. 12 - 8.08 - 3.25
+    # leaves 0.67 GiB of KV: 21.9K tokens, block-aligned to 20,480.
+    nine_b = plan_memory(
+        total_ram_bytes=16 * GIB,
+        model_weights_bytes=8_674_988_799,
+        kv_bytes_per_token=32_768,
+        model_max_context=262_144,
+    )
+    assert nine_b.model_fits and nine_b.tight_machine
+    assert nine_b.context_window_resolved == 20_480
+    # The published Bonsai 2 pack sits exactly at the envelope.
+    bonsai = plan_memory(
+        total_ram_bytes=16 * GIB,
+        model_weights_bytes=TIGHT_MACHINE_MAX_WEIGHTS_BYTES,
+        kv_bytes_per_token=BONSAI_KV_PER_TOKEN,
+        model_max_context=262_144,
+    )
+    assert bonsai.model_fits and bonsai.tight_machine
+    assert bonsai.context_window_resolved == 8192
+
+
+def test_a_pack_heavier_than_bonsai_is_admitted_tight_only_with_its_own_table():
+    # A 16 GB pack on the one budget where only the tight arithmetic fits it
+    # (18.75 GiB: 0.6 GiB of KV after weights and the tight transient).
+    heavy = dict(
+        total_ram_bytes=25 * GIB,
+        model_weights_bytes=16_000_000_000,
+        kv_bytes_per_token=BONSAI_KV_PER_TOKEN,
+        model_max_context=262_144,
+    )
+    plan = plan_memory(**heavy)
+    assert plan.model_fits is False
+    assert plan.tight_machine is False
+    assert plan.context_window_resolved == 4096  # fallback, not an admission
+    measured = plan_memory(**heavy, tight_machine_measured=True)
+    assert measured.model_fits and measured.tight_machine
+    assert measured.context_window_resolved == 8192
+
+
+def test_measured_on_tight_machine_reads_the_stamped_memory_table():
+    assert measured_on_tight_machine(_evidence(), BONSAI_WEIGHTS) is True
+    # Another pack's table, a row over its budget, a row the rule did not
+    # admit, and no table at all never count.
+    assert measured_on_tight_machine(_evidence(weights=1), BONSAI_WEIGHTS) is False
+    assert measured_on_tight_machine(_evidence(within_engine_budget=False), BONSAI_WEIGHTS) is False
+    assert measured_on_tight_machine(_evidence(planner={"tight_machine": False}), BONSAI_WEIGHTS) is False
+    assert measured_on_tight_machine({}, BONSAI_WEIGHTS) is False
+    assert measured_on_tight_machine(None, BONSAI_WEIGHTS) is False

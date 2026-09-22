@@ -70,8 +70,13 @@ BANK_CAP_BYTES = 48 * GIB
 # under the 16, 18 and 24 GiB class budgets: the text-decode peak sat 3.056
 # to 3.075 GiB above weights plus dense KV in every completed row (4K, 8K
 # and 16K prompts, with and without a 1K decode), i.e. the 3 GiB constant
-# plus at most 77 MiB. 256 MiB is a bit over three times that excess.
+# plus at most 77 MiB. 256 MiB is a bit over three times that excess. One
+# pack's text decode is the whole evidence, so the admission is offered only
+# to packs no heavier than that one, or to a pack that stamps its own
+# measurement (``measured_on_tight_machine``).
 TIGHT_MACHINE_MARGIN_BYTES = 256 * 1024 * 1024
+# Bonsai 2 27B's resident weights (model + MTP files), the measured pack.
+TIGHT_MACHINE_MAX_WEIGHTS_BYTES = 8_834_412_216
 
 # Context windows resolve on 4096-token blocks (the cold tier's restore
 # granularity); the floor is one block. Below one block the model simply
@@ -302,6 +307,30 @@ def engine_envelope_bytes(
     return min(total, max(floor, total - system_reserve_bytes(total)))
 
 
+def measured_on_tight_machine(contract: Any, model_weights_bytes: int | None) -> bool:
+    """Whether a pack's runtime contract carries its own tight-machine peaks.
+
+    ``memory_evidence`` is the measured memory table the pack builder stamps
+    (scripts/bonsai_memory_table.py; today only the Bonsai 2 pack has one).
+    It counts when it measured these exact weights and holds a row the
+    tight-machine rule admitted that completed inside its engine budget.
+    """
+    evidence = contract.get("memory_evidence") if isinstance(contract, dict) else None
+    if not isinstance(evidence, dict):
+        return False
+    pack = evidence.get("pack")
+    if not isinstance(pack, dict) or pack.get("weights_bytes") != model_weights_bytes:
+        return False
+    return any(
+        isinstance(row, dict)
+        and row.get("completed") is True
+        and row.get("within_engine_budget") is True
+        and isinstance(row.get("planner"), dict)
+        and row["planner"].get("tight_machine") is True
+        for row in evidence.get("rows") or ()
+    )
+
+
 def _align_down(tokens: int) -> int:
     return (int(tokens) // CONTEXT_ALIGN_TOKENS) * CONTEXT_ALIGN_TOKENS
 
@@ -436,6 +465,7 @@ def plan_memory(
     prefill_transient_bytes_per_token: int = 0,
     usable_bytes_explicit: bool = False,
     resident_floor_bytes: int | None = None,
+    tight_machine_measured: bool = False,
 ) -> MemoryPlan:
     """Solve the machine's memory geometry.
 
@@ -451,7 +481,10 @@ def plan_memory(
     plus working margin); when it exceeds the 75% rule the envelope is
     everything outside the system reserve (``engine_envelope_bytes``), the
     same number the Metal caps configure, on a real seat and on a seat
-    simulated with --memory-budget alike.
+    simulated with --memory-budget alike. A machine that cannot fund the
+    bank floor still runs a pack no heavier than the measured one
+    (``TIGHT_MACHINE_MAX_WEIGHTS_BYTES``), or a pack that stamps its own
+    tight-machine peaks (``tight_machine_measured``).
     """
     if total_ram_bytes is None or int(total_ram_bytes) <= 0:
         return _unavailable("total_ram_unknown")
@@ -514,7 +547,9 @@ def plan_memory(
     transients = RUNTIME_TRANSIENTS_BYTES
     bank_floor = BANK_FLOOR_BYTES
     tight_machine = False
-    if not model_fits:
+    if not model_fits and (
+        tight_machine_measured or weights <= TIGHT_MACHINE_MAX_WEIGHTS_BYTES
+    ):
         # Tight machine: the resident session bank yields. The refusal
         # above charges the 1 GiB bank floor as if it were a physical need;
         # it is a clamp on the warm cache, and a machine that cannot fund

@@ -3514,6 +3514,7 @@ class ServerState:
         from mtplx.memory_plan import (
             describe_plan as _describe_memory_plan,
             detect_total_ram_bytes as _plan_detect_total_ram,
+            measured_on_tight_machine as _plan_measured_on_tight_machine,
             plan_memory as _plan_memory,
         )
 
@@ -3546,6 +3547,11 @@ class ServerState:
                 )
             except (OSError, ValueError):
                 _plan_model_config = None
+        _plan_contract = (
+            load_runtime_contract(_plan_model_path)[0]
+            if _plan_model_path is not None
+            else None
+        )
         if _plan_kv_bytes_per_token <= 0:
             from mtplx.memory_plan import (
                 dense_kv_bytes_per_token_from_config as _plan_kv_from_config,
@@ -3610,6 +3616,11 @@ class ServerState:
                 _caps.get("minimum_resident_bytes")
                 if isinstance(_caps, dict)
                 else None
+            ),
+            # A pack heavier than the one the tight-machine margin was
+            # measured on is admitted tight only with its own measured peaks.
+            "tight_machine_measured": _plan_measured_on_tight_machine(
+                getattr(_plan_contract, "raw", None), _plan_weights_bytes
             ),
         }
         _fit_plan = _plan_memory(**_plan_inputs)

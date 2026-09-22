@@ -95,6 +95,9 @@ def make_report(metadata: dict[str, Any], classes: list[int], contexts: list[int
             kv_bytes_per_token=metadata["kv_bytes_per_token"],
             kv_quantization=quant,
             model_max_context=metadata["model_max_context"],
+            # This table is the measurement the tight-machine rule requires,
+            # so its verdicts show what the rule admits once it is stamped.
+            tight_machine_measured=True,
         )
         rows.append({
             "ram_gib": ram, "prompt_tokens": context, "kv_quantization": quant,
