@@ -70,6 +70,7 @@ from mtplx.kpi.runtime_kpis import (
     repo_root,
 )
 from mtplx.backends.registry import (
+    ENGINE_UPDATE_REQUIRED,
     SUPPORT_QUALIFICATION_PENDING,
     TIER_ARCH_COMPATIBLE_UNVERIFIED,
     architecture_catalog,
@@ -537,6 +538,8 @@ def _compact_model_summary(inspection: dict[str, Any]) -> dict[str, Any]:
 
 def _model_gate_error_lines(inspection: dict[str, Any]) -> list[str]:
     compatibility = inspection.get("compatibility") or {}
+    if compatibility.get("runtime_compatibility") == ENGINE_UPDATE_REQUIRED:
+        return [f"error: {compatibility.get('message')}"]
     mtp = inspection.get("mtp") or {}
     lines = [
         "error: model cannot run with MTPLX",

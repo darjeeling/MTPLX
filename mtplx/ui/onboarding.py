@@ -67,6 +67,7 @@ _TIER_RANK: dict[str, int] = {
     "mtp-invalid": 3,
     "mtp-missing": 4,
     "backend-pending": 5,
+    "engine-update": 5,
     "no-mtp": 6,
     "incompatible": 7,
     "unknown": 8,
@@ -183,9 +184,9 @@ class ScannedModel:
     ``tier`` is the normalized compatibility verdict, one of
     ``verified`` / ``qualification-pending`` / ``arch-compatible`` /
     ``needs-verification`` / ``mtp-invalid`` / ``mtp-missing`` /
-    ``backend-pending`` / ``no-mtp`` / ``incompatible`` / ``unknown``. The
-    display layer turns it into a coloured badge. ``arch-compatible`` means
-    launchable, not merely recognized.
+    ``backend-pending`` / ``engine-update`` / ``no-mtp`` / ``incompatible`` /
+    ``unknown``. The display layer turns it into a coloured badge.
+    ``arch-compatible`` means launchable, not merely recognized.
     """
 
     path: Path
@@ -469,6 +470,7 @@ def _classify_scanned_model(model_dir: Path) -> ScannedModel:
 
     try:
         from mtplx.backends.registry import (
+            ENGINE_UPDATE_REQUIRED,
             SUPPORT_QUALIFICATION_PENDING,
             compatibility_for_inspection,
         )
@@ -537,6 +539,8 @@ def _classify_scanned_model(model_dir: Path) -> ScannedModel:
             tier = "needs-verification"
     elif raw_tier == "no-MTP":
         tier = "no-mtp"
+    elif runtime_status == ENGINE_UPDATE_REQUIRED:
+        tier = "engine-update"
     elif raw_tier == "incompatible-architecture":
         tier = "backend-pending" if runtime_status == "recognized-backend-pending" else "incompatible"
     else:
@@ -567,6 +571,8 @@ def _tier_badge(tier: str) -> tuple[str, str]:
         return ("MTP weights missing", "yellow")
     if tier == "backend-pending":
         return ("Backend not runnable yet", "dim")
+    if tier == "engine-update":
+        return ("Needs a newer MTPLX", "yellow")
     if tier == "no-mtp":
         return ("No MTP head", "dim")
     if tier == "incompatible":

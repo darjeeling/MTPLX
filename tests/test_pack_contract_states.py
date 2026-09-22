@@ -1,19 +1,22 @@
 """What a pack's mtplx_runtime.json says reaches the user as the real reason.
 
 An official pack whose exactness measurement is still pending is neither
-verified nor broken.
+verified nor broken, and a pack that needs a newer engine is refused before
+any weight is read.
 """
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
 
-from mtplx import artifacts
+from mtplx import artifacts, runtime
 from mtplx.artifacts import MTPInspection, inspect_model
 from mtplx.backends import registry
 from mtplx.commands import public
 from mtplx.ui import onboarding
+from mtplx.version import __version__
 
 BONSAI_ID = "mtplx-bonsai-2-27b-optimized-speed"
 
@@ -112,3 +115,40 @@ def test_serve_gate_prints_the_verdicts_own_reason(monkeypatch, capsys):
 
     gate({"message": "Runtime contract is not verified: y."})
     assert capsys.readouterr().err == "WARNING: Runtime contract is not verified: y.\n"
+
+
+@pytest.mark.parametrize("floor", [None, "", __version__, "2.12", "2.11.9"])
+def test_an_engine_floor_at_or_below_this_engine_passes(monkeypatch, tmp_path, floor):
+    fields = {} if floor is None else {"min_engine_version": floor}
+
+    verdict = _qwen_pack(tmp_path, monkeypatch, **fields)
+
+    assert (verdict["tier"], verdict["can_run"]) == ("verified", True)
+
+
+def test_a_pack_that_needs_a_newer_engine_is_refused_before_any_weight_is_read(monkeypatch, tmp_path):
+    message = (
+        f"This model needs MTPLX 99.0 or later (you have {__version__}). "
+        "Update MTPLX, then try again."
+    )
+
+    verdict = _qwen_pack(tmp_path, monkeypatch, min_engine_version="99.0")
+
+    assert verdict["message"] == message
+    assert (verdict["can_run"], verdict["exit_code"]) == (False, 4)
+    # No unsafe-force flag starts it, and the refusal is one plain line.
+    inspection, exit_code = public._model_gate(str(tmp_path), unsafe_force_unverified=True, yes=True)
+    assert exit_code == 4
+    assert public._model_gate_error_lines(inspection) == [f"error: {message}"]
+    # The loader refuses too, before it reads the config.
+    monkeypatch.setattr(runtime, "load_config", lambda *_a: pytest.fail("the loader read the pack"))
+    with pytest.raises(registry.ModelCompatibilityError, match="needs MTPLX 99.0"):
+        runtime.load(tmp_path)
+
+
+def test_a_malformed_engine_floor_is_ignored_with_a_warning(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="mtplx.backends.registry"):
+        verdict = _qwen_pack(tmp_path, monkeypatch, min_engine_version="2.12.x")
+
+    assert (verdict["tier"], verdict["can_run"]) == ("verified", True)
+    assert "malformed min_engine_version '2.12.x'" in caplog.text

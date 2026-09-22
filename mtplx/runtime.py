@@ -21,7 +21,11 @@ from .artifacts import (
     mtp_weights_present_on_disk,
     text_config,
 )
-from .backends.registry import ARCHITECTURE_DECLARED_MODULES
+from .backends.registry import (
+    ARCHITECTURE_DECLARED_MODULES,
+    ModelCompatibilityError,
+    engine_version_blocker,
+)
 from .mtp_adapters import (
     install_saved_mtp_lora_adapter,
     merge_installed_mtp_lora_adapters,
@@ -619,6 +623,9 @@ def load(
     never reduced.
     """
     path = Path(model_path)
+    engine_blocker = engine_version_blocker(_load_runtime_metadata(path))
+    if engine_blocker:
+        raise ModelCompatibilityError(engine_blocker)
     from .gemma4_pair import resolve_gemma4_pair_paths
 
     gemma4_pair = resolve_gemma4_pair_paths(path)

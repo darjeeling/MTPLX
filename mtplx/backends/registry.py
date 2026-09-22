@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from mtplx.profiles import DEFAULT_PROFILE_NAME, PROFILE_CHOICES, resolve_profile_name
+from mtplx.version import __version__
+
+_LOG = logging.getLogger(__name__)
 
 
 RUNTIME_CONTRACT_FILE = "mtplx_runtime.json"
@@ -42,6 +47,8 @@ EXIT_INCOMPATIBLE_ARCHITECTURE = 4
 # An official catalog pack whose exactness measurement has not run yet. It
 # runs as unverified; pending is not damage, so there is no Forge advice.
 SUPPORT_QUALIFICATION_PENDING = "official-pack-qualification-pending"
+# The pack's contract declares a min_engine_version newer than this build.
+ENGINE_UPDATE_REQUIRED = "engine-update-required"
 
 BLOCKING_RUNTIME_STATUSES = {
     "candidate",
@@ -939,6 +946,37 @@ def _official_qualification_pending(contract: RuntimeContract) -> bool:
     )
 
 
+def _version_key(text: str) -> tuple[int, ...] | None:
+    if not re.fullmatch(r"\d+(?:\.\d+)*", text):
+        return None
+    parts = [int(part) for part in text.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()  # 2.12 and 2.12.0 are the same release
+    return tuple(parts)
+
+
+def engine_version_blocker(contract_data: Any) -> str | None:
+    """The refusal line when a contract needs a newer MTPLX than this one."""
+    if not isinstance(contract_data, dict):
+        return None
+    floor = str(contract_data.get("min_engine_version") or "").strip()
+    if not floor:
+        return None
+    required = _version_key(floor)
+    if required is None:
+        _LOG.warning(
+            "ignoring malformed min_engine_version %r in %s", floor, RUNTIME_CONTRACT_FILE
+        )
+        return None
+    engine = _version_key(__version__)
+    if engine is None or engine >= required:
+        return None
+    return (
+        f"This model needs MTPLX {floor} or later (you have {__version__}). "
+        "Update MTPLX, then try again."
+    )
+
+
 def _runtime_evidence_blocker(value: Any, *, section_name: str) -> str | None:
     if not isinstance(value, dict):
         return None
@@ -1443,6 +1481,26 @@ def compatibility_for_inspection(inspection: Any) -> CompatibilityVerdict:
     contract_path = getattr(inspection, "runtime_contract_path", None)
     if not contract_path:
         contract_path = str(_contract_path(model_dir)) if _contract_path(model_dir).exists() else None
+    engine_blocker = engine_version_blocker(
+        contract_data if contract_data is not None else getattr(contract, "raw", None)
+    )
+    if engine_blocker:
+        # A capability gap of this build, not a verification label: no
+        # unsafe-force flag may start a pack that needs a newer engine.
+        engine_arch_id = contract.arch_id if contract is not None else detected_arch_id
+        return CompatibilityVerdict(
+            tier=TIER_INCOMPATIBLE_ARCHITECTURE,
+            arch_id=engine_arch_id,
+            supported=False,
+            recognized=architecture_support_for(engine_arch_id) is not None,
+            can_run=False,
+            exit_code=EXIT_INCOMPATIBLE_ARCHITECTURE,
+            message=engine_blocker,
+            runtime_contract=contract,
+            runtime_contract_path=contract_path,
+            runtime_compatibility=ENGINE_UPDATE_REQUIRED,
+            support_level=ENGINE_UPDATE_REQUIRED,
+        )
     # One question decides runnability throughout this function: can this
     # build construct the trunk from code it ships. MTP, contracts, and
     # verification tiers are labels and speed levers on top of that answer,
