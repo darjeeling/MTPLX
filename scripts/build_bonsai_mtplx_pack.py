@@ -352,6 +352,80 @@ def render_speed_table(evidence: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+MEMORY_GUIDANCE_PENDING = (
+    "RAM recommendations are pending measured evidence. Generate the table with\n"
+    "`scripts/bonsai_memory_table.py` and pass its `memory.json` to the builder's\n"
+    "`--memory-json` option. GiB means 1,073,741,824 bytes."
+)
+
+
+def render_memory_guidance(evidence: dict[str, Any] | None) -> str:
+    """The plain-language reading of the measured table, one line per RAM class.
+
+    Every figure comes from the rows: the planner's context fit for the
+    class, the largest prompt whose runs all completed under the engine
+    budget, the peak range of those runs, and the smallest prompt that ran
+    over the budget. Nothing is extrapolated to classes or contexts that
+    were not measured.
+    """
+    if evidence is None:
+        return MEMORY_GUIDANCE_PENDING
+    rows = [r for r in evidence.get("rows", []) if isinstance(r, dict)]
+    if not rows:
+        return MEMORY_GUIDANCE_PENDING
+    gib = 1024 ** 3
+    lines = [
+        "Measured with `scripts/bonsai_memory_table.py` (the full table follows; "
+        "GiB means 1,073,741,824 bytes). What each RAM class can do, from the rows:",
+        "",
+    ]
+    for ram in sorted({int(r["ram_gib"]) for r in rows}):
+        cls = [r for r in rows if int(r["ram_gib"]) == ram]
+        budget = cls[0].get("engine_budget_bytes")
+        fits = {}
+        for r in cls:
+            plan = r.get("planner") or {}
+            fits[r.get("kv_quantization")] = (r.get("planner_verdict"), plan.get("context_window_fit"), plan.get("tight_machine"))
+        done = [r for r in cls if r.get("status") == "completed" and r.get("peak_memory_bytes")]
+        under = [r for r in done if budget and int(r["peak_memory_bytes"]) <= int(budget)]
+        over = [r for r in done if budget and int(r["peak_memory_bytes"]) > int(budget)]
+        parts = [f"**{ram} GiB** (engine budget {int(budget) / gib:.1f} GiB):" if budget else f"**{ram} GiB**:"]
+        admitted, refused = [], []
+        for quant in ("off", "q8"):
+            if quant in fits:
+                verdict, fit, tight = fits[quant]
+                if verdict == "admit":
+                    admitted.append(f"{fit} tokens (KV {quant}{', no resident session bank' if tight else ''})")
+                else:
+                    refused.append(f"KV {quant}")
+        if admitted:
+            parts.append("the planner admits " + " or ".join(admitted) + ".")
+        if refused:
+            parts.append("The planner refuses the pack with " + " and ".join(refused) + ".")
+        if under:
+            prompts = sorted({int(r["prompt_tokens"]) for r in under})
+            fully_under = [p for p in prompts if all(int(r["peak_memory_bytes"]) <= int(budget) for r in done if int(r["prompt_tokens"]) == p)]
+            if fully_under:
+                top = max(fully_under)
+                peaks = [int(r["peak_memory_bytes"]) / gib for r in done if int(r["prompt_tokens"]) <= top]
+                parts.append(
+                    f"Measured prompts up to {top} tokens, with and without a 1K decode, "
+                    f"peaked at {min(peaks):.2f} to {max(peaks):.2f} GiB, under the budget."
+                )
+        if over:
+            smallest = min(int(r["prompt_tokens"]) for r in over)
+            peak = max(int(r["peak_memory_bytes"]) / gib for r in over if int(r["prompt_tokens"]) == smallest)
+            parts.append(f"A {smallest}-token prompt peaked at {peak:.2f} GiB, over the budget.")
+        failed = [r for r in cls if r.get("allocation_failure")]
+        if failed:
+            parts.append(f"{len(failed)} run(s) hit an allocation failure.")
+        not_run = [r for r in cls if r.get("status") == "not_run"]
+        if not_run:
+            parts.append(f"{len(not_run)} configuration(s) were not run.")
+        lines.append("- " + " ".join(parts))
+    return "\n".join(lines)
+
+
 def render_memory_table(evidence: dict[str, Any] | None) -> str:
     if evidence is None:
         return (
@@ -389,6 +463,7 @@ def render_card(*, source_sha: str, head_note: str,
         source_sha=source_sha, head_note=head_note,
         generation_default=generation_default,
         speed_table=render_speed_table(speed_evidence),
+        memory_guidance=render_memory_guidance(memory_evidence),
         memory_table=render_memory_table(memory_evidence),
     )
 
@@ -500,9 +575,7 @@ shorter answers. Prism ML states that `low` is not supported.
 
 ## Memory
 
-RAM recommendations are pending measured evidence. Generate the table with
-`scripts/bonsai_memory_table.py` and pass its `memory.json` to the builder's
-`--memory-json` option. GiB means 1,073,741,824 bytes.
+{memory_guidance}
 
 {memory_table}
 

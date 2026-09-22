@@ -311,3 +311,35 @@ def test_invalid_generation_mode_refused_before_metadata_changes(pack, tmp_path)
         builder.restamp_pack(pack, tmp_path / "invalid-mode", recommended_generation_mode="auto")
     assert digests(pack) == before
     assert not (tmp_path / "invalid-mode").exists()
+
+
+def test_memory_guidance_reads_the_measured_rows_and_never_extrapolates():
+    from scripts.build_bonsai_mtplx_pack import MEMORY_GUIDANCE_PENDING, render_memory_guidance
+
+    gib = 1024 ** 3
+    assert render_memory_guidance(None) == MEMORY_GUIDANCE_PENDING
+    assert render_memory_guidance({"rows": []}) == MEMORY_GUIDANCE_PENDING
+
+    def row(ram, prompt, decode, quant, peak_gib, verdict="admit", fit=8192, tight=True, status="completed"):
+        return {
+            "ram_gib": ram, "prompt_tokens": prompt, "decode_tokens": decode, "kv_quantization": quant,
+            "engine_budget_bytes": 12 * gib, "planner_verdict": verdict,
+            "planner": {"context_window_fit": fit, "tight_machine": tight},
+            "status": status, "peak_memory_bytes": int(peak_gib * gib) if status == "completed" else None,
+            "allocation_failure": False,
+        }
+
+    rows = [
+        row(16, 4096, 0, "off", 11.55), row(16, 4096, 1024, "off", 11.55),
+        row(16, 8192, 0, "off", 11.78), row(16, 8192, 1024, "q8", 11.80),
+        row(16, 16384, 0, "off", 12.11), row(16, 16384, 1024, "q8", 12.11),
+        row(16, 4096, 0, "q8", 11.55, status="not_run"),
+    ]
+    text = render_memory_guidance({"rows": rows})
+    assert "**16 GiB** (engine budget 12.0 GiB)" in text
+    assert "the planner admits 8192 tokens (KV off, no resident session bank) or 8192 tokens (KV q8, no resident session bank)." in text
+    assert "Measured prompts up to 8192 tokens, with and without a 1K decode, peaked at 11.55 to 11.80 GiB, under the budget." in text
+    assert "A 16384-token prompt peaked at 12.11 GiB, over the budget." in text
+    assert "1 configuration(s) were not run." in text
+    refused = [row(16, 4096, 0, "off", 11.55, verdict="refuse", fit=4096, tight=False)]
+    assert "The planner refuses the pack with KV off." in render_memory_guidance({"rows": refused})
