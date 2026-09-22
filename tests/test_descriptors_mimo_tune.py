@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from mtplx.backends.descriptors import (
     model_family_from_inspection,
+    reasoning_policy_for_model,
     tune_policy_for_model,
 )
 
@@ -47,3 +48,35 @@ def test_the_family_is_read_from_the_artifact_not_the_folder_name():
     # recognised even when its directory has been renamed.
     assert model_family_from_inspection({"model_type": "mimo"}) == "mimo"
     assert model_family_from_inspection({"mtp_arch": "mimo-mtp"}) == "mimo"
+
+
+# XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B is a Qwen3.5-9B fine-tune: "MiMo" is in
+# its name, not in its architecture, so it keeps the Qwen 3.5 contract.
+DISTILL_REF = "XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B"
+DISTILL_INSPECTION = {
+    "model_dir": "/Users/example/.mtplx/models/XiaomiMiMo--MiMo-V2.6-Distill-Qwen-9B",
+    "runtime_model": DISTILL_REF,
+    "model_type": "qwen3_5",
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "num_hidden_layers": 32,
+    "mtp_num_hidden_layers": 1,
+}
+
+
+def test_a_qwen35_checkpoint_named_mimo_resolves_to_qwen35():
+    assert model_family_from_inspection(DISTILL_INSPECTION) == "qwen3_5"
+    assert model_family_from_inspection(DISTILL_INSPECTION, model_ref=DISTILL_REF) == "qwen3_5"
+
+
+def test_a_qwen35_checkpoint_named_mimo_keeps_depth_and_reasoning():
+    assert tune_policy_for_model(DISTILL_REF, DISTILL_INSPECTION).candidates == ("AR", "D1", "D2", "D3")
+    assert reasoning_policy_for_model(DISTILL_REF, DISTILL_INSPECTION).supported is True
+
+
+def test_a_mimo_checkpoint_in_a_mimo_named_folder_still_resolves_to_mimo():
+    inspection = dict(
+        MIMO_INSPECTION,
+        model_dir="/Users/example/.mtplx/models/XiaomiMiMo--MiMo-7B-RL",
+        runtime_model="XiaomiMiMo/MiMo-7B-RL",
+    )
+    assert model_family_from_inspection(inspection, model_ref="XiaomiMiMo/MiMo-7B-RL") == "mimo"

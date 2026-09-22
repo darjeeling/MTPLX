@@ -1134,6 +1134,17 @@ def _text_markers(model_ref: str | None, inspection: dict[str, Any] | None) -> s
     return " ".join(str(part or "") for part in parts).lower()
 
 
+def _architecture_markers(inspection: dict[str, Any] | None) -> str:
+    """The identity fields a checkpoint declares about itself (config and
+    backend ids), without the folder or repo name ``_text_markers`` adds."""
+    data = {
+        key: value
+        for key, value in _inspection_dict(inspection).items()
+        if key not in ("model_dir", "runtime_model")
+    }
+    return _text_markers(None, data)
+
+
 # Stock Qwen3 sizes collide with the 3.8 version token: in "qwen3-8b" or
 # "qwen3-80b" the digit-run ending in "b" right after the token is a
 # parameter count, not a version, and must not claim the qwen3_8 family.
@@ -1252,13 +1263,15 @@ def model_family_from_inspection(
         return "deepseek"
     if backend_id == GLM_MTP_DESCRIPTOR.backend_id or "glm" in text:
         return "glm"
-    if "mimo" in text:
+    if "mimo" in _architecture_markers(inspection):
         # mimo-mtp has shipped a native backend with can_run_verified since
         # before this function existed, but no branch here ever returned its
         # family, so every MiMo artifact resolved to "unknown" and forge build
         # exited 1 at the tune gate after a successful convert and calibrate.
-        # The marker text carries model_type and arch_id, not just the folder
-        # name, so this reads the artifact rather than guessing from a path.
+        # Only the checkpoint's own model_type, architecture and arch ids
+        # count: Xiaomi also ships Qwen-architecture distills named MiMo
+        # (MiMo-V2.6-Distill-Qwen-9B), and a folder-name match served those
+        # on the MiMo contract, depth 1 only with reasoning off.
         return "mimo"
     if "lfm2" in text:
         return "lfm2"
