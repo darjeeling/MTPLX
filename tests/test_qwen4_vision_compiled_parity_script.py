@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import socket
 import sys
 import textwrap
@@ -527,7 +528,7 @@ def stand_in(tmp_path, monkeypatch):
         out = tmp_path / "run" / "report.json"
         argv = [
             "--pack", str(pack), "--image", str(image), "--out", str(out),
-            "--port", str(port), "--serve-command", f"{sys.executable} {stub}",
+            "--port", str(port), "--serve-command", shlex.join([sys.executable, str(stub)]),
             "--boot-timeout", "60", "--record-timeout", "20", *extra,
         ]
         code = parity.main(argv)
