@@ -788,8 +788,9 @@ public struct LifetimeSnapshot: Codable, Equatable, Sendable {
     }
 }
 
-public struct SessionBankPrefix: Codable, Equatable, Sendable {
+public struct SessionBankPrefix: Codable, Equatable, Identifiable, Sendable {
     public var sessionId: String
+    public var tokenHash: String?
     public var prefixLen: Int
     public var hits: Int
     public var nbytes: Int
@@ -798,8 +799,18 @@ public struct SessionBankPrefix: Codable, Equatable, Sendable {
     public var policyFingerprint: String?
     public var hasLiveRef: Bool?
 
+    // One conversation can retain several distinct prefix snapshots.
+    // Keep each tile stable as its hit count and access time change.
+    public var id: String {
+        if let tokenHash, !tokenHash.isEmpty {
+            return "\(sessionId):\(tokenHash)"
+        }
+        return "\(sessionId):\(prefixLen):\(createdAtS):\(policyFingerprint ?? "")"
+    }
+
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
+        case tokenHash = "token_hash"
         case prefixLen = "prefix_len"
         case hits
         case nbytes

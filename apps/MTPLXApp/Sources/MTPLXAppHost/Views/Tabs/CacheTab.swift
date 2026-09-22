@@ -108,7 +108,7 @@ struct CacheTab: View {
                     ],
                     spacing: 12
                 ) {
-                    ForEach(prefixes, id: \.sessionId) { prefix in
+                    ForEach(prefixes) { prefix in
                         prefixTile(prefix: prefix)
                     }
                 }
