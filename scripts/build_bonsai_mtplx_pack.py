@@ -359,14 +359,17 @@ MEMORY_GUIDANCE_PENDING = (
 )
 
 
-def render_memory_guidance(evidence: dict[str, Any] | None) -> str:
-    """The plain-language reading of the measured table, one line per RAM class.
+# OpenCode's system prompt with its tool list, about 18,700 tokens.
+AGENT_PROMPT_TOKENS = 18_700
 
-    Every figure comes from the rows: the planner's context fit for the
-    class, the largest prompt whose runs all completed under the engine
-    budget, the peak range of those runs, and the smallest prompt that ran
-    over the budget. Nothing is extrapolated to classes or contexts that
-    were not measured.
+
+def render_memory_guidance(evidence: dict[str, Any] | None) -> str:
+    """The measured memory table reduced to one row per RAM class.
+
+    Each row gives the planner's context window, with the 8-bit KV cache
+    window when it differs, and the highest peak among the runs that
+    completed inside the class's engine budget. Nothing is extrapolated to
+    classes or runs that were not measured.
     """
     if evidence is None:
         return MEMORY_GUIDANCE_PENDING
@@ -374,55 +377,39 @@ def render_memory_guidance(evidence: dict[str, Any] | None) -> str:
     if not rows:
         return MEMORY_GUIDANCE_PENDING
     gib = 1024 ** 3
-    lines = [
-        "Measured with `scripts/bonsai_memory_table.py` (the full table follows; "
-        "GiB means 1,073,741,824 bytes). What each RAM class can do, from the rows:",
-        "",
-    ]
+    lines = ["| Mac memory | Context window | Measured peak |", "| :--- | :--- | ---: |"]
+    default_windows: dict[int, int] = {}
     for ram in sorted({int(r["ram_gib"]) for r in rows}):
         cls = [r for r in rows if int(r["ram_gib"]) == ram]
+        fits = {
+            r.get("kv_quantization"): int((r.get("planner") or {}).get("context_window_fit") or 0)
+            for r in cls if r.get("planner_verdict") == "admit"
+        }
+        off, q8 = fits.get("off"), fits.get("q8")
+        if off:
+            window = f"{off:,} tokens" + (f" ({q8:,} with 8-bit KV cache)" if q8 and q8 != off else "")
+        elif q8:
+            window = f"{q8:,} tokens with 8-bit KV cache"
+        else:
+            window = "Does not fit"
+        default_windows[ram] = off or q8 or 0
         budget = cls[0].get("engine_budget_bytes")
-        fits = {}
-        for r in cls:
-            plan = r.get("planner") or {}
-            fits[r.get("kv_quantization")] = (r.get("planner_verdict"), plan.get("context_window_fit"), plan.get("tight_machine"))
-        done = [r for r in cls if r.get("status") == "completed" and r.get("peak_memory_bytes")]
-        under = [r for r in done if budget and int(r["peak_memory_bytes"]) <= int(budget)]
-        over = [r for r in done if budget and int(r["peak_memory_bytes"]) > int(budget)]
-        parts = [f"**{ram} GiB** (engine budget {int(budget) / gib:.1f} GiB):" if budget else f"**{ram} GiB**:"]
-        admitted, refused = [], []
-        for quant in ("off", "q8"):
-            if quant in fits:
-                verdict, fit, tight = fits[quant]
-                if verdict == "admit":
-                    admitted.append(f"{fit} tokens (KV {quant}{', no resident session bank' if tight else ''})")
-                else:
-                    refused.append(f"KV {quant}")
-        if admitted:
-            parts.append("the planner admits " + " or ".join(admitted) + ".")
-        if refused:
-            parts.append("The planner refuses the pack with " + " and ".join(refused) + ".")
-        if under:
-            prompts = sorted({int(r["prompt_tokens"]) for r in under})
-            fully_under = [p for p in prompts if all(int(r["peak_memory_bytes"]) <= int(budget) for r in done if int(r["prompt_tokens"]) == p)]
-            if fully_under:
-                top = max(fully_under)
-                peaks = [int(r["peak_memory_bytes"]) / gib for r in done if int(r["prompt_tokens"]) <= top]
-                parts.append(
-                    f"Measured prompts up to {top} tokens, with and without a 1K decode, "
-                    f"peaked at {min(peaks):.2f} to {max(peaks):.2f} GiB, under the budget."
-                )
-        if over:
-            smallest = min(int(r["prompt_tokens"]) for r in over)
-            peak = max(int(r["peak_memory_bytes"]) / gib for r in over if int(r["prompt_tokens"]) == smallest)
-            parts.append(f"A {smallest}-token prompt peaked at {peak:.2f} GiB, over the budget.")
-        failed = [r for r in cls if r.get("allocation_failure")]
-        if failed:
-            parts.append(f"{len(failed)} run(s) hit an allocation failure.")
-        not_run = [r for r in cls if r.get("status") == "not_run"]
-        if not_run:
-            parts.append(f"{len(not_run)} configuration(s) were not run.")
-        lines.append("- " + " ".join(parts))
+        under = [int(r["peak_memory_bytes"]) for r in cls
+                 if r.get("status") == "completed" and r.get("peak_memory_bytes")
+                 and budget and int(r["peak_memory_bytes"]) <= int(budget)]
+        peak = f"{max(under) / gib:.1f} GiB" if under else "Not measured"
+        lines.append(f"| {ram} GB | {window} | {peak} |")
+    small = [ram for ram, window in default_windows.items() if window < AGENT_PROMPT_TOKENS]
+    large = [ram for ram, window in default_windows.items() if window >= AGENT_PROMPT_TOKENS]
+    if small and large:
+        if len(small) == 1:
+            where = f"On a {small[0]} GB Mac"
+        else:
+            names = [f"{ram} GB" for ram in small]
+            where = "On " + ", ".join(names[:-1]) + " and " + names[-1] + " Macs"
+        lines += ["", (f"{where} the window is too small for the system prompt of an agent "
+                       f"client such as OpenCode (about {AGENT_PROMPT_TOKENS:,} tokens); "
+                       f"use {min(large)} GB or more for those.")]
     return "\n".join(lines)
 
 
@@ -466,7 +453,6 @@ def render_card(*, source_sha: str, head_note: str,
         generation_default=generation_default,
         speed_table=render_speed_table(speed_evidence),
         memory_guidance=render_memory_guidance(memory_evidence),
-        memory_table=render_memory_table(memory_evidence),
         min_engine_version=MIN_ENGINE_VERSION,
     )
 
@@ -528,9 +514,6 @@ activations. MTPLX loads this model type natively, keeps the weights packed at
 
 The draft head proposes tokens and the full model verifies them with exact
 speculative sampling, so the output follows the model's own distribution.
-Against Prism ML's own runtime, the MTPLX loader measured a mean KL divergence
-of 2.6e-6 (a float16 comparison on a synthetic-pack test). That checks the
-loader, not the quality of the model.
 
 ## Speed
 
@@ -565,17 +548,6 @@ for much longer. Prism ML states that `low` is not supported.
 ## Memory
 
 {memory_guidance}
-
-{memory_table}
-
-These runs used text prompts and plain decoding, with the draft head and the
-vision tower loaded, on an M5 Max limited to each class's memory budget. With
-the draft head active under the 16 GB budget, a 7,006-token prompt and a
-1,024-token answer peaked at 11.54 GiB of GPU memory and 12.79 GiB for the
-whole process. Image requests and a full session cache need more. On a 16 GB
-Mac the window is 8,192 tokens, which is too small for the system prompt of an
-agent client such as OpenCode (about 18,700 tokens); use 18 GB or more for
-those.
 
 ## License and attribution
 

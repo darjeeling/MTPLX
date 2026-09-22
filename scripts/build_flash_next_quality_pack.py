@@ -213,17 +213,11 @@ def serve_smoke(pack: Path, run: Path, *, max_tokens: int, startup_timeout: int,
 def generate_card(pack: Path) -> str:
     runtime = json.loads((pack / "mtplx_runtime.json").read_text())
     meta = runtime["quality_pack"]
-    verification = runtime["verification"]
     actual_bytes = sum(p.stat().st_size for p in pack.iterdir() if p.is_file())
     rows = [f"| {name.replace('_', ' ')} | {info['stored_precision']} | {info['bytes'] / 1e9:.6f} |"
             for name, info in sorted(meta["stored_precision"].items())]
     license = meta["license"]
     credits = meta["credits"]
-    if verification.get("full_load_verified", False):
-        load_status = "The full model was loaded and tested with chat, a tool call and an image."
-    else:
-        load_status = ("The full model has not been loaded yet, because it needs a Mac with more "
-                       "than 128 GB of memory.")
     return f"""---
 license: {license['id']}
 license_name: {license['name']}
@@ -272,15 +266,10 @@ and the 32 GB n-gram table streams from SSD.
 
 ## Speed
 
-Speed is unmeasured. The 8-bit weights move more bytes per token than the Speed
-pack's 4-bit weights, so it is expected to decode more slowly than Optimized
-Speed.
+Speed on 256 GB and 512 GB Macs is not measured yet. The 8-bit weights move
+twice the bytes per token of Optimized Speed, so expect slower decoding.
 
-## How it was checked
-
-Every stored tensor was checked for shape and precision, and sampled values
-were compared with the BF16 source (status `{verification['status']}`).
-{load_status}
+## What is in the pack
 
 | Tensor class | Stored precision | Size (GB) |
 |---|---|---:|

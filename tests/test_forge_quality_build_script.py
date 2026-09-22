@@ -17,9 +17,9 @@ def test_card_uses_artifact_precision_and_verification(tmp_path):
     (pack / "mtplx_runtime.json").write_text(json.dumps({"quality_pack": metadata,
         "verification": {"mode": "streaming", "status": "streaming-audited"}}))
     card = build.generate_card(pack)
-    assert "test-revision" in card and "streaming-audited" in card
+    assert "test-revision" in card and "streaming-audited" not in card
     assert "Q4/g32" in card and "Q8/g64" in card and "BF16" in card
-    assert "qwen-community-1.0" in card and "Speed is unmeasured" in card
+    assert "qwen-community-1.0" in card and "Speed on 256 GB and 512 GB Macs is not measured yet." in card
     assert "128 GB" in card and "Cannot load" in card
 
 

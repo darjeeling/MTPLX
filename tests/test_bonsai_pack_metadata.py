@@ -122,7 +122,7 @@ def test_default_card_has_credit_historical_parity_and_no_unmeasured_ram_or_spee
     card = (pack / "README.md").read_text()
     assert "Full credit for the model goes to [Prism ML]" in card
     assert "verbatim" in card and "[LICENSE](LICENSE)" in card and "[NOTICE.txt](NOTICE.txt)" in card
-    assert "2.6e-6" in card and "synthetic-pack" in card and "float16 comparison" in card
+    assert "follows the model's own distribution" in card and "2.6e-6" not in card
     assert "No speed measurements supplied" in card
     assert "RAM recommendations are pending" in card
     assert "32K tokens or lower" not in card and "16 to 24 GB" not in card
@@ -140,7 +140,7 @@ def test_measurement_table_and_explicit_speed_json_fill_new_card(pack, tmp_path)
     output = tmp_path / "with-evidence"
     builder.restamp_pack(pack, output, memory_evidence=report, speed_evidence=speed_evidence())
     card = (output / "README.md").read_text()
-    assert "10737418240" in card and "10.0000" in card
+    assert "| 16 GB |" in card and "| 10.0 GiB |" in card
     assert "unit test fixture | 4096 | 30.0 | 31.0 | 1.2" in card
     assert "No speed measurements supplied" not in card
     assert "No speed measurements supplied" in (pack / "README.md").read_text()
@@ -273,7 +273,7 @@ def test_generation_only_update_preserves_recorded_speed_memory_and_depth(pack, 
     assert updated["speed_evidence"] == evidence
     assert updated["recommended_generation_mode_evidence"]["rows"] == evidence["rows"]
     card = (output / "README.md").read_text()
-    assert reason in card and "unit test fixture" in card and "10737418240" in card
+    assert reason in card and "unit test fixture" in card and "| 10.0 GiB |" in card
     # Restamping without new options retains both the recommendation and its receipts.
     preserved = tmp_path / "preserved"
     builder.restamp_pack(output, preserved)
@@ -336,13 +336,15 @@ def test_memory_guidance_reads_the_measured_rows_and_never_extrapolates():
         row(16, 4096, 0, "q8", 11.55, status="not_run"),
     ]
     text = render_memory_guidance({"rows": rows})
-    assert "**16 GiB** (engine budget 12.0 GiB)" in text
-    assert "the planner admits 8192 tokens (KV off, no resident session bank) or 8192 tokens (KV q8, no resident session bank)." in text
-    assert "Measured prompts up to 8192 tokens, with and without a 1K decode, peaked at 11.55 to 11.80 GiB, under the budget." in text
-    assert "A 16384-token prompt peaked at 12.11 GiB, over the budget." in text
-    assert "1 configuration(s) were not run." in text
+    # The 16K runs peaked over the 12 GiB budget, so they are not the class peak.
+    assert "| 16 GB | 8,192 tokens | 11.8 GiB |" in text and "12.1" not in text
+    assert "OpenCode" not in text
     refused = [row(16, 4096, 0, "off", 11.55, verdict="refuse", fit=4096, tight=False)]
-    assert "The planner refuses the pack with KV off." in render_memory_guidance({"rows": refused})
+    assert "| 16 GB | Does not fit |" in render_memory_guidance({"rows": refused})
+    larger = rows + [row(18, 4096, 0, "off", 11.62, fit=20480), row(18, 4096, 0, "q8", 11.62, fit=36864)]
+    text = render_memory_guidance({"rows": larger})
+    assert "| 18 GB | 20,480 tokens (36,864 with 8-bit KV cache) | 11.6 GiB |" in text
+    assert "On a 16 GB Mac the window is too small" in text and "use 18 GB or more for those." in text
 
 
 def test_card_carries_the_measured_reason_for_an_mtp_default_too():
