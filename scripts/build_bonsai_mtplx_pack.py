@@ -292,6 +292,7 @@ def build_runtime_contract(
         "sampler": dict(SAMPLER),
         "recommended_draft_sampler": dict(SAMPLER),
         "recommended_profile": "turbo",
+        "recommended_generation_mode": "mtp",
         # Placeholder. The measured acceptance by depth decides the default;
         # the main GPU session fills mtp_depth_default and speed_evidence in.
         "mtp_depth_default": 2,
@@ -369,9 +370,24 @@ def render_memory_table(evidence: dict[str, Any] | None) -> str:
 
 def render_card(*, source_sha: str, head_note: str,
                 speed_evidence: dict[str, Any] | None = None,
-                memory_evidence: dict[str, Any] | None = None) -> str:
+                memory_evidence: dict[str, Any] | None = None,
+                recommended_generation_mode: str | None = None,
+                recommended_generation_mode_reason: str | None = None) -> str:
+    if recommended_generation_mode == "ar":
+        generation_default = (
+            "Speculative decoding with the draft head is off by default; this pack "
+            "serves plain autoregressive decoding. The head is still shipped and loaded. "
+            "Pass `--generation-mode mtp` to use it at the pack's configured MTP depth."
+        )
+        if recommended_generation_mode_reason:
+            generation_default += "\n\n" + recommended_generation_mode_reason
+        else:
+            generation_default += "\n\nNo measured reason was supplied for this recommendation."
+    else:
+        generation_default = "The draft head is on by default (MTP speculative decoding)."
     return CARD_TEMPLATE.format(
         source_sha=source_sha, head_note=head_note,
+        generation_default=generation_default,
         speed_table=render_speed_table(speed_evidence),
         memory_table=render_memory_table(memory_evidence),
     )
@@ -453,6 +469,8 @@ separate checks.
 
 <!-- Filled only from an explicitly supplied --speed-evidence-json measurement. -->
 
+{generation_default}
+
 {speed_table}
 
 ## How to run it
@@ -526,6 +544,8 @@ def build_pack(
     verify_source_hash: bool = True,
     speed_evidence: dict[str, Any] | None = None,
     memory_evidence: dict[str, Any] | None = None,
+    recommended_generation_mode: str | None = None,
+    recommended_generation_mode_reason: str | None = None,
 ) -> dict[str, Any]:
     source = source.expanduser().resolve()
     output = output.expanduser().resolve()
@@ -533,6 +553,10 @@ def build_pack(
     _separate_output(mtp_source.expanduser().resolve().parent, output)
     render_speed_table(speed_evidence)
     render_memory_table(memory_evidence)
+    recommendation: dict[str, Any] = {}
+    _record_generation_recommendation(
+        recommendation, recommended_generation_mode, recommended_generation_mode_reason
+    )
     checked = check_source(source)
 
     source_sha = None
@@ -610,14 +634,18 @@ def build_pack(
     runtime_contract = build_runtime_contract(
         mtplx_version=_mtplx_version(), provenance=provenance, head=head_quant
     )
+    runtime_contract.update(recommendation)
     _record_card_evidence(output, runtime_contract, speed_evidence, memory_evidence)
+    _record_generation_recommendation(runtime_contract)
     (output / "mtplx_runtime.json").write_text(
         json.dumps(runtime_contract, indent=2) + "\n", encoding="utf-8"
     )
     (output / "README.md").write_text(
         render_card(source_sha=source_sha or published or "see the manifest",
                     head_note=_head_note(output), speed_evidence=speed_evidence,
-                    memory_evidence=memory_evidence),
+                    memory_evidence=memory_evidence,
+                    recommended_generation_mode=runtime_contract.get("recommended_generation_mode"),
+                    recommended_generation_mode_reason=runtime_contract.get("recommended_generation_mode_reason")),
         encoding="utf-8",
     )
 
@@ -672,6 +700,30 @@ def _record_card_evidence(pack: Path, contract: dict[str, Any],
         contract["memory_evidence"] = memory
 
 
+def _record_generation_recommendation(
+    contract: dict[str, Any],
+    mode: str | None = None,
+    reason: str | None = None,
+) -> None:
+    if mode is not None and mode not in ("mtp", "ar"):
+        raise PackBuildError("recommended generation mode must be 'mtp' or 'ar'")
+    if reason is not None and not isinstance(reason, str):
+        raise PackBuildError("recommended generation mode reason must be text")
+    if mode is not None:
+        if mode != contract.get("recommended_generation_mode"):
+            # A new policy must not inherit the previous policy's rationale.
+            contract.pop("recommended_generation_mode_reason", None)
+        contract["recommended_generation_mode"] = mode
+    if reason is not None:
+        contract["recommended_generation_mode_reason"] = reason
+    speed = contract.get("speed_evidence")
+    if speed is not None and contract.get("recommended_generation_mode") is not None:
+        render_speed_table(speed)
+        contract["recommended_generation_mode_evidence"] = {
+            key: speed[key] for key in ("measured_at", "rows") if key in speed
+        }
+
+
 def _refresh_metadata_manifest(pack: Path, manifest: dict[str, Any]) -> None:
     manifest.update(identity_stamps(), pack=PACK_NAME)
     for name in ("config.json", "mtplx_runtime.json", "README.md"):
@@ -684,7 +736,9 @@ def _refresh_metadata_manifest(pack: Path, manifest: dict[str, Any]) -> None:
 
 def restamp_pack(source: Path, output: Path, *, link_mode: str = "hardlink",
                  speed_evidence: dict[str, Any] | None = None,
-                 memory_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+                 memory_evidence: dict[str, Any] | None = None,
+                 recommended_generation_mode: str | None = None,
+                 recommended_generation_mode_reason: str | None = None) -> dict[str, Any]:
     """Publishable identity in a NEW directory; source metadata is never linked.
 
     All weight files are byte-for-byte hard links or copies. Other carried
@@ -700,6 +754,9 @@ def restamp_pack(source: Path, output: Path, *, link_mode: str = "hardlink",
     manifest = json.loads((source / "MTPLX_PACK_MANIFEST.json").read_text(encoding="utf-8"))
     contract = json.loads((source / "mtplx_runtime.json").read_text(encoding="utf-8"))
     _record_card_evidence(source, contract, speed_evidence, memory_evidence)
+    _record_generation_recommendation(
+        contract, recommended_generation_mode, recommended_generation_mode_reason
+    )
     # Refuse symlinked directory trees, whose contents might escape this pack.
     paths = sorted(source.rglob("*"))
     if any(path.is_dir() and path.is_symlink() for path in paths):
@@ -735,7 +792,9 @@ def restamp_pack(source: Path, output: Path, *, link_mode: str = "hardlink",
     (output / "mtplx_runtime.json").write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
     (output / "README.md").write_text(render_card(
         source_sha=new_files["model.safetensors"]["sha256"], head_note=_head_note(output),
-        speed_evidence=speed_evidence, memory_evidence=memory_evidence,
+        speed_evidence=contract.get("speed_evidence"), memory_evidence=contract.get("memory_evidence"),
+        recommended_generation_mode=contract.get("recommended_generation_mode"),
+        recommended_generation_mode_reason=contract.get("recommended_generation_mode_reason"),
     ), encoding="utf-8")
     manifest["files"] = new_files
     _refresh_metadata_manifest(output, manifest)
@@ -772,6 +831,8 @@ def stamp_pack(
     speed_evidence: dict[str, Any] | None = None,
     verified_on: dict[str, Any] | None = None,
     memory_evidence: dict[str, Any] | None = None,
+    recommended_generation_mode: str | None = None,
+    recommended_generation_mode_reason: str | None = None,
 ) -> dict[str, Any]:
     """Record measured results in mtplx_runtime.json after the GPU runs.
 
@@ -786,6 +847,9 @@ def stamp_pack(
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     contract.update(identity_stamps())
     _record_card_evidence(pack, contract, speed_evidence, memory_evidence)
+    _record_generation_recommendation(
+        contract, recommended_generation_mode, recommended_generation_mode_reason
+    )
     if exactness is not None or exactness_status is not None:
         baseline = dict(contract.get("exactness_baseline") or {})
         if exactness is not None:
@@ -809,10 +873,15 @@ def stamp_pack(
     manifest_path = pack / "MTPLX_PACK_MANIFEST.json"
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if speed_evidence is not None or memory_evidence is not None:
+        if any(value is not None for value in (
+            speed_evidence, memory_evidence, recommended_generation_mode,
+            recommended_generation_mode_reason,
+        )):
             card = render_card(source_sha=manifest["files"]["model.safetensors"]["sha256"],
-                               head_note=_head_note(pack), speed_evidence=speed_evidence,
-                               memory_evidence=memory_evidence)
+                               head_note=_head_note(pack), speed_evidence=contract.get("speed_evidence"),
+                               memory_evidence=contract.get("memory_evidence"),
+                               recommended_generation_mode=contract.get("recommended_generation_mode"),
+                               recommended_generation_mode_reason=contract.get("recommended_generation_mode_reason"))
             (pack / "README.md").write_text(card, encoding="utf-8")
         _refresh_metadata_manifest(pack, manifest)
     return contract
@@ -847,6 +916,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exactness-json", default=None)
     parser.add_argument("--exactness-status", default=None, help="for example: passed")
     parser.add_argument("--mtp-depth-default", type=int, default=None)
+    parser.add_argument("--recommended-generation-mode", choices=("mtp", "ar"), default=None)
+    parser.add_argument("--recommended-generation-mode-reason", metavar="TEXT", default=None)
     parser.add_argument("--speed-evidence-json", default=None)
     parser.add_argument("--memory-json", default=None, help="memory.json from bonsai_memory_table.py")
     parser.add_argument("--source", default=str(DEFAULT_SOURCE))
@@ -868,7 +939,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             manifest = restamp_pack(Path(args.restamp), Path(args.output), link_mode=args.link_mode,
                                     speed_evidence=_read_json_arg(args.speed_evidence_json),
-                                    memory_evidence=_read_json_arg(args.memory_json))
+                                    memory_evidence=_read_json_arg(args.memory_json),
+                                    recommended_generation_mode=args.recommended_generation_mode,
+                                    recommended_generation_mode_reason=args.recommended_generation_mode_reason)
         except (PackBuildError, OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -884,6 +957,8 @@ def main(argv: list[str] | None = None) -> int:
                 mtp_depth_default=args.mtp_depth_default,
                 speed_evidence=_read_json_arg(args.speed_evidence_json),
                 memory_evidence=_read_json_arg(args.memory_json),
+                recommended_generation_mode=args.recommended_generation_mode,
+                recommended_generation_mode_reason=args.recommended_generation_mode_reason,
                 verified_on={
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "hardware": __import__("platform").platform(),
@@ -904,6 +979,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_source_hash=not args.skip_source_hash,
             speed_evidence=_read_json_arg(args.speed_evidence_json),
             memory_evidence=_read_json_arg(args.memory_json),
+            recommended_generation_mode=args.recommended_generation_mode,
+            recommended_generation_mode_reason=args.recommended_generation_mode_reason,
         )
     except (PackBuildError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

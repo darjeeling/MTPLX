@@ -51,7 +51,7 @@ def digests(pack):
 
 
 def speed_evidence():
-    return {"status": "measured", "rows": [{
+    return {"status": "measured", "measured_at": "2026-09-21T17:09-07:00", "rows": [{
         "hardware": "unit test fixture", "context_tokens": 4096,
         "ar_tokens_per_second": 30.0, "mtp_tokens_per_second": 31.0,
         "accepted_tokens_per_step": 1.2,
@@ -196,3 +196,118 @@ def test_restamp_cli_requires_out_and_never_resolves_a_new_mtp_source(pack, tmp_
     output = tmp_path / builder.PACK_NAME
     assert builder.main(["--restamp", str(pack), "--out", str(output)]) == 0
     assert (output / "model.safetensors").stat().st_ino == (pack / "model.safetensors").stat().st_ino
+
+
+@pytest.mark.parametrize("operation", ["build", "stamp", "restamp"])
+@pytest.mark.parametrize("mode", ["ar", "mtp"])
+def test_generation_recommendation_cli_writes_contract_card_and_manifest(pack, tmp_path, operation, mode):
+    evidence = speed_evidence()
+    evidence_path = tmp_path / "speed.json"
+    evidence_path.write_text(json.dumps(evidence))
+    runtime_path = pack / "mtplx_runtime.json"
+    original = json.loads(runtime_path.read_text())
+    original["mtp_depth_default"] = 1
+    runtime_path.write_text(json.dumps(original))
+    before = digests(pack)
+    output = pack if operation == "stamp" else tmp_path / "recommended-pack"
+    if operation == "build":
+        argv = ["--source", str(tmp_path / "prism"), "--out", str(output),
+                "--mtp-source", str(tmp_path / "head")]
+    elif operation == "stamp":
+        argv = ["--stamp", str(pack), "--mtp-depth-default", "1"]
+    else:
+        argv = ["--restamp", str(pack), "--out", str(output)]
+    reason = "The measured native-sampler results determine this default."
+    assert builder.main([
+        *argv, "--recommended-generation-mode", mode,
+        "--recommended-generation-mode-reason", reason,
+        "--speed-evidence-json", str(evidence_path),
+    ]) == 0
+    contract = json.loads((output / "mtplx_runtime.json").read_text())
+    assert contract["recommended_generation_mode"] == mode
+    assert contract["recommended_generation_mode_reason"] == reason
+    assert contract["recommended_generation_mode_evidence"] == {
+        "measured_at": evidence["measured_at"], "rows": evidence["rows"],
+    }
+    assert contract["mtp_depth_default"] == (2 if operation == "build" else 1)
+    assert contract["capabilities"]["mtp"] is True
+    after = digests(output)
+    assert after["model.safetensors"] == before["model.safetensors"]
+    assert after["mtp.safetensors"] == before["mtp.safetensors"]
+    card = (output / "README.md").read_text()
+    if mode == "ar":
+        assert "off by default" in card and reason in card
+        assert "--generation-mode mtp" in card
+    else:
+        assert "on by default" in card and "off by default" not in card
+    assert "unit test fixture | 4096 | 30.0 | 31.0 | 1.2" in card
+    manifest = json.loads((output / "MTPLX_PACK_MANIFEST.json").read_text())
+    for name in ("README.md", "mtplx_runtime.json"):
+        assert manifest["files"][name]["sha256"] == after[name]
+    if operation != "stamp":
+        assert digests(pack) == before
+
+
+@pytest.mark.parametrize("operation", ["stamp", "restamp"])
+def test_generation_only_update_preserves_recorded_speed_memory_and_depth(pack, tmp_path, operation):
+    evidence = speed_evidence()
+    report = memory.make_report(memory.pack_metadata(pack), [16], [4096])
+    report["rows"][0] = memory.summarize_case(report["rows"][0], {
+        "status": "completed", "completed": True, "request_peak_memory_bytes": 10 * memory.GIB,
+    }, 9 * memory.GIB)
+    path = pack / "mtplx_runtime.json"
+    contract = json.loads(path.read_text())
+    contract.update(mtp_depth_default=1, speed_evidence=evidence, memory_evidence=report)
+    path.write_text(json.dumps(contract))
+    reason = "No consistent speed-up measured."
+    options = {"recommended_generation_mode": "ar", "recommended_generation_mode_reason": reason}
+    if operation == "stamp":
+        builder.stamp_pack(pack, **options)
+        output = pack
+    else:
+        output = tmp_path / "generation-only"
+        builder.restamp_pack(pack, output, **options)
+    updated = json.loads((output / "mtplx_runtime.json").read_text())
+    assert updated["mtp_depth_default"] == 1
+    assert updated["memory_evidence"] == report
+    assert updated["speed_evidence"] == evidence
+    assert updated["recommended_generation_mode_evidence"]["rows"] == evidence["rows"]
+    card = (output / "README.md").read_text()
+    assert reason in card and "unit test fixture" in card and "10737418240" in card
+    # Restamping without new options retains both the recommendation and its receipts.
+    preserved = tmp_path / "preserved"
+    builder.restamp_pack(output, preserved)
+    assert (preserved / "README.md").read_text() == card
+    final = json.loads((preserved / "mtplx_runtime.json").read_text())
+    for key in ("recommended_generation_mode", "recommended_generation_mode_reason",
+                "recommended_generation_mode_evidence", "mtp_depth_default"):
+        assert final[key] == updated[key]
+
+
+def test_generation_recommendation_without_measurements_does_not_invent_evidence(pack):
+    contract = builder.stamp_pack(pack, recommended_generation_mode="ar", mtp_depth_default=1)
+    assert "recommended_generation_mode_evidence" not in contract
+    card = (pack / "README.md").read_text()
+    assert "off by default" in card
+    assert "No measured reason was supplied" in card
+    assert "No speed measurements supplied" in card
+
+
+def test_switching_recommendation_drops_the_previous_modes_reason(pack, tmp_path):
+    builder.stamp_pack(pack, recommended_generation_mode="ar",
+                       recommended_generation_mode_reason="Old AR rationale.")
+    output = tmp_path / "mtp-default"
+    builder.restamp_pack(pack, output, recommended_generation_mode="mtp")
+    contract = json.loads((output / "mtplx_runtime.json").read_text())
+    assert "recommended_generation_mode_reason" not in contract
+    assert "Old AR rationale" not in (output / "README.md").read_text()
+
+
+def test_invalid_generation_mode_refused_before_metadata_changes(pack, tmp_path):
+    before = digests(pack)
+    with pytest.raises(builder.PackBuildError, match="generation mode"):
+        builder.stamp_pack(pack, recommended_generation_mode="auto")
+    with pytest.raises(builder.PackBuildError, match="generation mode"):
+        builder.restamp_pack(pack, tmp_path / "invalid-mode", recommended_generation_mode="auto")
+    assert digests(pack) == before
+    assert not (tmp_path / "invalid-mode").exists()

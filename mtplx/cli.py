@@ -701,7 +701,7 @@ def _add_mtp_toggle_args(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         dest="no_mtp",
         default=False,
-        help="Use native-MTP speculative generation. This is the default.",
+        help="Use native-MTP speculative generation.",
     )
     parser.add_argument(
         "--no-mtp",
@@ -3658,8 +3658,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Daemon decode mode. AR is target-only generation; MTP is native "
-            "speculative decode. auto means the engine default and exists "
-            "for configs written by older app builds."
+            "speculative decode. Omitted or auto honors the pack's "
+            "recommended generation mode, falling back to MTP."
         ),
     )
     serve_p.add_argument(

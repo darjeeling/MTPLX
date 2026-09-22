@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mtplx.profiles import DEFAULT_PROFILE_NAME, PROFILE_CHOICES, resolve_profile_name
 
@@ -648,6 +648,9 @@ class RuntimeContract:
     mtp_contract: dict[str, Any] | None = None
     runtime_env_overrides: dict[str, str] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    recommended_generation_mode: Literal["mtp", "ar"] | None = None
+    recommended_generation_mode_reason: str | None = None
+    recommended_generation_mode_evidence: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RuntimeContract":
@@ -672,6 +675,15 @@ class RuntimeContract:
         depth = int(data["mtp_depth_max"])
         if depth <= 0:
             raise ValueError("runtime contract mtp_depth_max must be positive")
+        generation_mode = data.get("recommended_generation_mode")
+        if generation_mode is not None and generation_mode not in ("mtp", "ar"):
+            raise ValueError("runtime contract recommended_generation_mode must be 'mtp' or 'ar'")
+        generation_reason = data.get("recommended_generation_mode_reason")
+        if generation_reason is not None and not isinstance(generation_reason, str):
+            raise ValueError("runtime contract recommended_generation_mode_reason must be text")
+        generation_evidence = data.get("recommended_generation_mode_evidence")
+        if generation_evidence is not None and not isinstance(generation_evidence, dict):
+            raise ValueError("runtime contract recommended_generation_mode_evidence must be an object")
         recommended_draft_lm_head = None
         if data.get("recommended_draft_lm_head") is not None:
             from mtplx.draft_lm_head import normalize_draft_lm_head_spec
@@ -713,6 +725,11 @@ class RuntimeContract:
             mtp_contract=mtp_contract,
             runtime_env_overrides=runtime_env_overrides,
             raw=dict(data),
+            recommended_generation_mode=generation_mode,
+            recommended_generation_mode_reason=generation_reason,
+            recommended_generation_mode_evidence=(
+                dict(generation_evidence) if generation_evidence is not None else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -732,6 +749,12 @@ class RuntimeContract:
             out["mtp_contract"] = dict(self.mtp_contract)
         if self.runtime_env_overrides is not None:
             out["runtime_env_overrides"] = dict(self.runtime_env_overrides)
+        if self.recommended_generation_mode is not None:
+            out["recommended_generation_mode"] = self.recommended_generation_mode
+        if self.recommended_generation_mode_reason is not None:
+            out["recommended_generation_mode_reason"] = self.recommended_generation_mode_reason
+        if self.recommended_generation_mode_evidence is not None:
+            out["recommended_generation_mode_evidence"] = dict(self.recommended_generation_mode_evidence)
         return out
 
 
