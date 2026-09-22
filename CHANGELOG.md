@@ -136,14 +136,15 @@ All notable user-facing changes to MTPLX. The format is based on
   prompt prefills in 2.79 to 2.81 s instead of 3.06 to 3.10 s
   (`MTPLX_GDN_BOUNDARY_INFORWARD=0` restores the old layout).
 
-- **The Qwen 3.8 27B is unchanged within about 4 percent.** 2.11.3 against
-  2.12.0 on the same Mac, measured like the Flash-Next pairs: at 4,061
-  tokens, first token 6.07 s on both, prompt processing 680 and 679 tok/s,
-  decode 46.7 and 44.2 tok/s; at 16,350 tokens, first token 26.7 and
-  27.2 s, prompt processing 617 and 604 tok/s, decode 41.4 and 43.2 tok/s.
-  One decode round costs 3.6 percent more at 4K and 0.2 percent more at
-  16K; the decode speeds differ by more because the two builds accept
-  different draft tokens from the same seed.
+- **The Qwen 3.8 27B is unchanged.** 2.11.3 against 2.12.0 on the same Mac,
+  measured like the Flash-Next pairs: at 4,061 tokens, first token 6.07 s on
+  both, prompt processing 680 and 679 tok/s, decode 46.7 and 44.2 tok/s; at
+  16,350 tokens, first token 26.7 and 27.2 s, prompt processing 617 and 604
+  tok/s, decode 41.4 and 43.2 tok/s. Prompt processing and the first token
+  are within 2.1 percent, and one decode round costs 3.6 percent more at 4K
+  and 0.2 percent more at 16K. Decode moved 5.4 percent down at 4K and 4.3
+  percent up at 16K because the two builds accept different draft tokens
+  from the same seed.
 
 - **The n-gram table streams from SSD on every Mac.** On Macs with 160 GB
   or more earlier releases also loaded the 29.8 GiB table into GPU memory,
