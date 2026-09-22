@@ -381,11 +381,17 @@ def per_session_play_ceiling_bytes(memory_plan: Any | None) -> int | None:
 
         usable = int(getattr(memory_plan, "usable_bytes", 0) or 0)
         weights = int(getattr(memory_plan, "model_weights_bytes", 0) or 0)
+        # A tight-machine plan carries its measured margin here; every
+        # other plan carries the constant, so nothing else moves.
+        transients = int(
+            getattr(memory_plan, "runtime_transients_bytes", RUNTIME_TRANSIENTS_BYTES)
+            or RUNTIME_TRANSIENTS_BYTES
+        )
     except (ImportError, TypeError, ValueError):
         return None
     if usable <= 0 or weights <= 0:
         return None
-    play = usable - weights - int(RUNTIME_TRANSIENTS_BYTES)
+    play = usable - weights - transients
     return max(_AUTO_BUDGET_FLOOR_BYTES, play // 2)
 
 

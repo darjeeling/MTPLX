@@ -64,6 +64,15 @@ TRANSIENT_RESERVE_CAP_BYTES = 16 * GIB
 BANK_FLOOR_BYTES = 1 * GIB
 BANK_CAP_BYTES = 48 * GIB
 
+# Margin over RUNTIME_TRANSIENTS_BYTES that the tight-machine admission
+# (below) charges instead of the bank floor. Measured 2026-09-21 on the
+# Bonsai 2 27B pack (8.23 GiB weights, MTP head and vision weights resident)
+# under the 16, 18 and 24 GiB class budgets: the text-decode peak sat 3.056
+# to 3.075 GiB above weights plus dense KV in every completed row (4K, 8K
+# and 16K prompts, with and without a 1K decode), i.e. the 3 GiB constant
+# plus at most 77 MiB. 256 MiB is a bit over three times that excess.
+TIGHT_MACHINE_MARGIN_BYTES = 256 * 1024 * 1024
+
 # Context windows resolve on 4096-token blocks (the cold tier's restore
 # granularity); the floor is one block. Below one block the model simply
 # does not fit the machine and the plan says so instead of inventing a
@@ -382,6 +391,16 @@ class MemoryPlan:
     bank_idle_max_bytes: int = BANK_FLOOR_BYTES
     bank_steady_bytes: int = BANK_FLOOR_BYTES
 
+    # The runtime transient and the bank floor this plan was solved with.
+    # Both equal the module constants on every machine that funds the
+    # bank floor (the 128 GB resolution does not move by a byte); on a
+    # tight machine (``tight_machine``) the transient carries the measured
+    # margin and the floor is zero: the warm cache yields fully to live KV
+    # and restores come from the SSD tier.
+    runtime_transients_bytes: int = RUNTIME_TRANSIENTS_BYTES
+    bank_floor_bytes: int = BANK_FLOOR_BYTES
+    tight_machine: bool = False
+
     headroom_bytes: int = 0
     # "formula" (the 75% envelope on the planning RAM), "metal_limit" (the
     # Metal cap the server configured decided the engine budget) or
@@ -419,7 +438,9 @@ class MemoryPlan:
             "kv_reserve_bytes": int(self.kv_reserve_bytes),
             "bank_idle_max_bytes": int(self.bank_idle_max_bytes),
             "bank_steady_bytes": int(self.bank_steady_bytes),
-            "runtime_transients_bytes": int(RUNTIME_TRANSIENTS_BYTES),
+            "runtime_transients_bytes": int(self.runtime_transients_bytes),
+            "bank_floor_bytes": int(self.bank_floor_bytes),
+            "tight_machine": bool(self.tight_machine),
             "headroom_bytes": int(self.headroom_bytes),
             "notes": list(self.notes),
         }
@@ -520,6 +541,43 @@ def plan_memory(
     kv_budget = usable - weights - RUNTIME_TRANSIENTS_BYTES - BANK_FLOOR_BYTES
     fit_raw = _align_down(max(0, kv_budget) // per_token)
     model_fits = fit_raw >= CONTEXT_FLOOR_TOKENS
+    transients = RUNTIME_TRANSIENTS_BYTES
+    bank_floor = BANK_FLOOR_BYTES
+    tight_machine = False
+    if not model_fits:
+        # Tight machine: the resident session bank yields. The refusal
+        # above charges the 1 GiB bank floor as if it were a physical need;
+        # it is a clamp on the warm cache, and a machine that cannot fund
+        # it can still run the model. Measured 2026-09-21 (Bonsai 2 27B,
+        # 8.23 GiB weights, 16 GiB class at the 12 GiB budget): the peak
+        # with no resident bank is weights + dense KV + 3.06 to 3.08 GiB
+        # (4K 11.55 GiB, 8K 11.78 to 11.80 GiB under the budget; 16K 12.11
+        # GiB over it). The q8 KV setting did not lower that peak (below
+        # the paged ceiling the dense lane holds KV at full width: the 16K
+        # peaks were byte-identical for off and q8), so this fit counts KV
+        # at its dense width. Admit with the bank floor at zero and the
+        # measured margin; the SSD tier keeps restores working.
+        tight_transients = RUNTIME_TRANSIENTS_BYTES + TIGHT_MACHINE_MARGIN_BYTES
+        tight_per_token = kv_per_token + aux_pt + transient_pt
+        tight_budget = usable - weights - tight_transients
+        tight_fit = _align_down(max(0, tight_budget) // tight_per_token)
+        if tight_fit >= CONTEXT_FLOOR_TOKENS:
+            model_fits = True
+            tight_machine = True
+            fit_raw = tight_fit
+            transients = tight_transients
+            bank_floor = 0
+            # The reserve and the server's admission arithmetic read this
+            # rate; under the paged ceiling the measured KV is dense.
+            kv_effective = kv_per_token
+            notes.append(
+                "tight machine: the session bank has no floor (the warm "
+                "cache yields fully to live KV; restores come from SSD) and "
+                f"KV is counted at its dense width; weights {weights / GIB:.1f}"
+                f" GiB + runtime {tight_transients / GIB:.2f} GiB leave "
+                f"{tight_budget / GIB:.2f} GiB for KV under the "
+                f"{usable / GIB:.1f} GiB engine budget"
+            )
     if not model_fits:
         notes.append(
             "model does not fit: weights + minimum runtime need "
@@ -567,13 +625,11 @@ def plan_memory(
         resolved, int(dense_decode_ceiling) if dense_decode_ceiling else resolved
     )
     kv_reserve = reserve_tokens * kv_effective
-    bank_idle = usable - weights - RUNTIME_TRANSIENTS_BYTES
-    bank_idle = max(BANK_FLOOR_BYTES, min(BANK_CAP_BYTES, bank_idle))
-    bank_steady = usable - weights - RUNTIME_TRANSIENTS_BYTES - kv_reserve
-    bank_steady = max(BANK_FLOOR_BYTES, min(BANK_CAP_BYTES, bank_steady))
-    headroom = max(
-        0, usable - weights - RUNTIME_TRANSIENTS_BYTES - kv_reserve - bank_steady
-    )
+    bank_idle = usable - weights - transients
+    bank_idle = max(bank_floor, min(BANK_CAP_BYTES, bank_idle))
+    bank_steady = usable - weights - transients - kv_reserve
+    bank_steady = max(bank_floor, min(BANK_CAP_BYTES, bank_steady))
+    headroom = max(0, usable - weights - transients - kv_reserve - bank_steady)
 
     return MemoryPlan(
         available=True,
@@ -596,6 +652,9 @@ def plan_memory(
         kv_reserve_bytes=kv_reserve,
         bank_idle_max_bytes=bank_idle,
         bank_steady_bytes=bank_steady,
+        runtime_transients_bytes=transients,
+        bank_floor_bytes=bank_floor,
+        tight_machine=tight_machine,
         headroom_bytes=headroom,
         usable_source=usable_source,
         notes=tuple(notes),
@@ -658,18 +717,16 @@ def bank_dynamic_ceiling(
     """
     if not plan.available:
         return BANK_CAP_BYTES
-    reserve = (
-        RUNTIME_TRANSIENTS_BYTES
-        if transient_bytes is None
-        else max(RUNTIME_TRANSIENTS_BYTES, int(transient_bytes))
-    )
+    static = int(getattr(plan, "runtime_transients_bytes", RUNTIME_TRANSIENTS_BYTES))
+    reserve = static if transient_bytes is None else max(static, int(transient_bytes))
     ceiling = (
         plan.usable_bytes
         - plan.model_weights_bytes
         - reserve
         - max(0, int(working_set_bytes))
     )
-    return max(BANK_FLOOR_BYTES, min(int(plan.bank_idle_max_bytes), ceiling))
+    floor = int(getattr(plan, "bank_floor_bytes", BANK_FLOOR_BYTES))
+    return max(floor, min(int(plan.bank_idle_max_bytes), ceiling))
 
 
 def describe_plan(plan: MemoryPlan) -> str:
@@ -708,6 +765,8 @@ def describe_plan(plan: MemoryPlan) -> str:
             f", n-gram table {plan.ngram_table_streamed_bytes / GIB:.1f}G "
             "streamed from SSD (not wired)"
         )
+    if plan.tight_machine:
+        line += " (tight machine: no bank floor, restores from SSD)"
     if not plan.model_fits:
         line += " — MODEL DOES NOT FIT"
     return line

@@ -31,15 +31,29 @@ def report():
                              [16, 18, 24], [4096, 8192, 16384])
 
 
-def test_matrix_includes_refused_cases_and_no_truncated_requests():
+def test_matrix_includes_the_tight_class_and_no_truncated_requests():
     rows = report()["rows"]
     assert len(rows) == 36
     assert {r["decode_tokens"] for r in rows} == {0, 1024}
     assert {r["kv_quantization"] for r in rows} == {"off", "q8"}
-    refused = [r for r in rows if r["ram_gib"] == 16]
-    assert len(refused) == 12
-    assert all(r["planner_verdict"] == "refuse" and not r["request_fits_planner"] for r in refused)
-    assert max(r["total_tokens"] for r in refused) == 17408
+    tight = [r for r in rows if r["ram_gib"] == 16]
+    assert len(tight) == 12
+    # Before the 2026-09-21 measurement every 16 GiB row was refused; the
+    # tight-machine rule now admits 8192 tokens there, so the 4K rows fit
+    # the plan and the 8K-plus-decode and 16K rows are measured past it.
+    assert all(r["planner_verdict"] == "admit" and r["planner"]["tight_machine"] for r in tight)
+    assert all(r["planner"]["context_window_fit"] == 8192 for r in tight)
+    assert [r["request_fits_planner"] for r in tight] == [
+        r["total_tokens"] <= 8192 for r in tight
+    ]
+    assert max(r["total_tokens"] for r in tight) == 17408
+
+
+def test_matrix_refuses_a_pack_the_margin_cannot_fund():
+    rows = table.make_report({"weights_bytes": int(9.5 * table.GIB),
+                              "kv_bytes_per_token": 65536, "model_max_context": 262144},
+                             [16], [4096])["rows"]
+    assert all(r["planner_verdict"] == "refuse" and not r["request_fits_planner"] for r in rows)
 
 
 def test_dry_run_reads_real_file_sizes_and_cannot_import_mlx(pack, tmp_path, monkeypatch, capsys):
@@ -76,7 +90,9 @@ def test_peak_includes_loading_and_reports_a_completed_over_budget_case():
     assert result["peak_memory_bytes"] == 13 * table.GIB
     assert result["peak_memory_gib"] == 13
     assert not result["within_engine_budget"]
-    assert result["planner_verdict"] == "refuse"
+    # The plan admits the 16 GiB class (tight machine); the measured peak,
+    # not the verdict, is what says this case ran over the budget.
+    assert result["planner_verdict"] == "admit"
 
 
 def test_class_loads_once_and_runs_each_uncapped_case():
