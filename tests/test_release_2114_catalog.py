@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mtplx.artifacts import _hf_repo_id_from_ref
-from mtplx.backends.descriptors import model_family_from_inspection
+from mtplx.backends.descriptors import model_family_from_inspection, reasoning_policy_for_model
 from mtplx.commands.public import _model_ref_from_public_model_id
 from mtplx.default_models import public_model_id_for_ref
 from mtplx.model_catalog import catalog_model_matching, catalog_model_with_id
@@ -50,6 +50,26 @@ def test_legacy_bonsai_runtime_identity_and_family(tmp_path):
     }))
     assert public_model_id_for_ref(pack) == "mtplx-bonsai-2-27b-optimized-speed"
     assert model_family_from_inspection(model_ref=str(pack)) == "qwen3_8"
+    codec = reasoning_policy_for_model(model_ref=str(pack))
+    assert codec.effort_levels == ("xhigh", "medium")
+    assert codec.default_effort == "xhigh"
+    assert codec.agent_effort == "medium"
+
+
+@pytest.mark.parametrize("ref", [
+    "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
+    "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+    "mtplx-bonsai-2-27b-optimized-speed",
+    "Bonsai-3.8-27B-MTPLX-Optimized-Speed",
+])
+def test_bonsai_reasoning_excludes_unsupported_low(ref):
+    from mtplx.backends.descriptors import model_controls_for_descriptor, QWEN3_NEXT_DESCRIPTOR
+
+    codec = reasoning_policy_for_model(ref)
+    assert codec.effort_levels == ("xhigh", "medium")
+    assert codec.default_effort == "xhigh"
+    controls = model_controls_for_descriptor(QWEN3_NEXT_DESCRIPTOR, model_ref=ref)
+    assert controls["reasoning"]["effort_levels"] == ["xhigh", "medium"]
 
 MATRIX = json.loads((Path(__file__).parent / "fixtures/release_2114_recommendations.json").read_text())
 

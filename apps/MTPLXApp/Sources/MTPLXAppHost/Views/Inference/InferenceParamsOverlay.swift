@@ -716,8 +716,8 @@ struct InferenceParamsOverlay: View, Equatable {
                 parser: "qwen3",
                 defaultMode: "auto",
                 historyPolicy: "preserve_when_enabled",
-                effortLevels: ["xhigh", "medium", "low"],
-                defaultEffort: "medium"
+                effortLevels: OpenCodeIntegration.reasoningEffortLevels(forModelID: snapshot.configuration.model) ?? [],
+                defaultEffort: MTPLXModelOption.isBonsai2Model(snapshot.configuration.model) ? "xhigh" : "medium"
             )
         case "qwen4_exp":
             // Same think-tag codec as the 27B lane; the Flash-Next family

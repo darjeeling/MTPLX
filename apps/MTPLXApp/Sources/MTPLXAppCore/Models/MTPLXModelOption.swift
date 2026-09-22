@@ -1603,6 +1603,19 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
     }
 
+    public static func isBonsai2Model(_ model: String) -> Bool {
+        if isBonsaiFamilyHint(model.lowercased()) { return true }
+        let path = URL(fileURLWithPath: NSString(string: model).expandingTildeInPath)
+            .resolvingSymlinksInPath()
+        if isBonsaiFamilyHint(path.path.lowercased()) { return true }
+        guard let runtime = MTPLXRuntimeMetadata.read(
+            at: path.appendingPathComponent("mtplx_runtime.json").path
+        ) else { return false }
+        return [runtime.publicModelID, runtime.forgeProvenance?.sourceRepo,
+                stringValue(runtime.rawJSON["base_trunk"])]
+            .compactMap { $0 }.contains { isBonsaiFamilyHint($0.lowercased()) }
+    }
+
     private static func modelFamilyFromHint(_ raw: String) -> String {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("gemma") { return "gemma4" }

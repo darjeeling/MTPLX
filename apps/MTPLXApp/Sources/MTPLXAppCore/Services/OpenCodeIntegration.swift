@@ -547,6 +547,9 @@ public struct OpenCodeIntegration: Sendable {
     /// family effort dial.
     public static func reasoningEffortLevels(forModelID modelID: String) -> [String]? {
         let lower = modelID.lowercased()
+        if MTPLXModelOption.isBonsai2Model(modelID) {
+            return ["xhigh", "medium"]
+        }
         // Flash-Next (qwen4_exp) before the 3.8 markers: the pack names
         // carry "Qwen3.8-Flash-Next" and would otherwise be claimed by the
         // 27B codec below (engine twin: descriptors._QWEN4_PREVIEW_MARKER

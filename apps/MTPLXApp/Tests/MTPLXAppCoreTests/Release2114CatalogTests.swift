@@ -61,7 +61,8 @@ final class Release2114CatalogTests: XCTestCase {
         let metadata = ["public_model_id": "mtplx-bonsai-38-27b-optimized-speed", "arch_id": "qwen3-next-mtp"]
         try JSONSerialization.data(withJSONObject: metadata).write(to: directory.appendingPathComponent("mtplx_runtime.json"))
         XCTAssertEqual(MTPLXModelOption.modelFamily(for: directory.path), "qwen3_8")
-        XCTAssertEqual(OpenCodeIntegration.reasoningEffortLevels(forModelID: "mtplx-bonsai-2-27b-optimized-speed"), ["xhigh", "medium", "low"])
+        XCTAssertEqual(OpenCodeIntegration.reasoningEffortLevels(forModelID: "mtplx-bonsai-2-27b-optimized-speed"), ["xhigh", "medium"])
+        XCTAssertEqual(OpenCodeIntegration.reasoningEffortLevels(forModelID: directory.path), ["xhigh", "medium"])
     }
 
     func testNewCuratedChoicesResolveAndCanAdvance() throws {
@@ -79,9 +80,9 @@ final class Release2114CatalogTests: XCTestCase {
 
     func testNewPackFeasibilityAndUnchangedBadgeBoundaries() throws {
         let evaluator = ModelFeasibility()
-        for (id, ram) in [("flash-next-optimized-quality", 256.0), ("bonsai-2-27b-optimized-speed", 16.0)] {
+        for (id, ram, verdict) in [("flash-next-optimized-quality", 256.0, ModelFeasibilityVerdict.recommended), ("bonsai-2-27b-optimized-speed", 16.0, .tightFit), ("bonsai-2-27b-optimized-speed", 24.0, .recommended)] {
             let model = try XCTUnwrap(MTPLXModelOption.officialCatalog.first { $0.id == id })
-            XCTAssertEqual(evaluator.evaluate(model: model, chipTier: .modernApple, ramGiB: ram, diskFreeGiB: 1000), .recommended)
+            XCTAssertEqual(evaluator.evaluate(model: model, chipTier: .modernApple, ramGiB: ram, diskFreeGiB: 1000), verdict)
             if case .insufficientDisk = evaluator.evaluate(model: model, chipTier: .modernApple, ramGiB: ram, diskFreeGiB: 1) {} else { XCTFail("Disk gate must apply") }
         }
         var model = try XCTUnwrap(MTPLXModelOption.officialCatalog.first)

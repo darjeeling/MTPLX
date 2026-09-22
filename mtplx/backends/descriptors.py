@@ -486,6 +486,14 @@ QWEN3_8_REASONING_CODEC = ReasoningCodec(
     effort_levels=("xhigh", "medium", "low"),
     default_effort="medium",
 )
+# Prism's Bonsai 2 card explicitly excludes low: the model behaves near
+# xhigh at that setting. Keep medium available for coding clients.
+BONSAI2_REASONING_CODEC = replace(
+    QWEN3_8_REASONING_CODEC,
+    effort_levels=("xhigh", "medium"),
+    default_effort="xhigh",
+    default_agent_effort="medium",
+)
 # Families whose reasoning codec overrides a shared/generic lane
 # descriptor, keyed to the ONLY lanes they ride. Both conditions must
 # hold — family AND active backend — because the family sniff falls back
@@ -1137,14 +1145,13 @@ _QWEN3_8_MARKER = re.compile(r"qwen3[._-]?8(?!\d*b)")
 # contract must not claim them by name. They resolve to the generic default
 # descriptor until a dedicated qwen4 contract exists.
 _QWEN4_PREVIEW_MARKER = re.compile(r"flash[._-]?next|qwen[._-]?4")
+_BONSAI2_MARKERS = ("bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b")
 
 
 def _explicit_qwen_family_marker(text: str) -> str | None:
     if _QWEN4_PREVIEW_MARKER.search(text):
         return None
-    if any(marker in text for marker in (
-        "bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b",
-    )):
+    if any(marker in text for marker in _BONSAI2_MARKERS):
         return "qwen3_8"
     if _QWEN3_8_MARKER.search(text):
         return "qwen3_8"
@@ -1395,6 +1402,11 @@ def reasoning_policy_for_model(
         descriptor=descriptor,
     )
     if family == "qwen3_8":
+        text = _text_markers(model_ref, inspection)
+        if model_ref:
+            text += " " + " ".join(_artifact_family_texts(str(model_ref)))
+        if any(marker in text for marker in _BONSAI2_MARKERS):
+            return BONSAI2_REASONING_CODEC
         return QWEN3_8_REASONING_CODEC
     if family == "qwen4_exp":
         return QWEN4_EXP_REASONING_CODEC
