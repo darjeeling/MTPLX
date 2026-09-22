@@ -54,6 +54,11 @@ Compiled routes
     (``_dense_vision_compiled_verify_admission``) names the settings that
     keep an image request eager; the same kill switch as Flash-Next,
     ``MTPLX_QWEN4_VISION_COMPILED_VERIFY=0``, governs both families.
+    Dense image compilation also requires the explicit opt-in
+    ``MTPLX_DENSE_VISION_COMPILED_VERIFY=1``. The real 27B serving gate found
+    different SDPA rounding on the natural eager KV length and the compiled
+    padded buffers; matching parity2's common-buffer reference alone does
+    not prove the free-running image trajectory.
 
 Fail closed
     A tensor-offset cache reached by an armed request WITHOUT a delta is a

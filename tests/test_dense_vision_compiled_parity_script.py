@@ -81,6 +81,7 @@ def _entry(
         bank["parity2"] = _parity_record(image=image, **parity_kwargs)
     entry = {
         "kind": "image" if image else "text",
+        "finish_reason": "stop",
         "output_sha256": sha,
         "compiled_verify_admission": admission,
         "cached_tokens": cached_tokens,
@@ -129,6 +130,24 @@ def test_every_round_equal_and_every_check_held_is_exact():
     )["detail"]
     restored = _check(outcome, "product_second_turn_restored_the_image_turn")
     assert restored["ok"] is True and restored["required"] is False
+
+
+def test_incomplete_image_turns_cannot_pass_even_with_exact_rounds():
+    arms = _arms()
+    arms["product"]["requests"]["image_turn1"]["finish_reason"] = "length"
+    outcome = parity.evaluate(arms, native_sampler=NATIVE)
+    assert outcome["exit_code"] == 1
+    assert "image_turns_completed" in outcome["failed_checks"]
+
+
+@pytest.mark.parametrize("thinking,expected", [("default", None), ("on", True), ("off", False)])
+def test_explicit_request_thinking_control(thinking, expected):
+    args = parity.parse_args(["--pack", "/unused", "--image", "/unused.png", "--thinking", thinking])
+    body = parity._body([{"role": "user", "content": "Describe the image."}], args)
+    if expected is None:
+        assert "enable_thinking" not in body
+    else:
+        assert body["enable_thinking"] is expected
 
 
 def test_one_divergent_image_round_is_never_exact():

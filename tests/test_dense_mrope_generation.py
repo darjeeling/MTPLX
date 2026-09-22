@@ -265,6 +265,7 @@ def test_the_armed_request_takes_the_compiled_verifier_with_its_delta(
     text request has (tests/test_dense_mrope_compiled_route.py proves the
     route bit for bit; this pins the wiring and the record)."""
     eager = _generate(rig)
+    monkeypatch.setenv("MTPLX_DENSE_VISION_COMPILED_VERIFY", "1")
     monkeypatch.setenv("MTPLX_COMPILED_VERIFY", "1")
     built: list[dict] = []
     real_bank = generation.CompiledVerifyBank
@@ -306,6 +307,7 @@ def test_the_armed_request_takes_the_compiled_verifier_with_its_delta(
 
 def test_the_graph_bank_and_the_compiled_draft_core_carry_the_delta(rig, monkeypatch):
     """Both promote caches; both stamp the request's delta on them."""
+    monkeypatch.setenv("MTPLX_DENSE_VISION_COMPILED_VERIFY", "1")
     graph_banks: list[dict] = []
     draft_cores: list[dict] = []
     real_graph_bank = generation.SpecDecodeGraphBank

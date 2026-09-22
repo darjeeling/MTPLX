@@ -45,6 +45,12 @@ words are carried forward):
 
 Sampling: no sampler field is sent, so the server applies the pack's native
 settings (``mtplx_runtime.json``), with one fixed seed. Greedy is not used.
+Use ``--thinking on`` or ``--thinking off`` for explicit request controls,
+and a request budget large enough to finish both image turns. An image turn
+whose finish reason is not ``stop`` fails the gate. Dense image compilation
+is currently opt-in: testing that candidate requires
+``--env MTPLX_DENSE_VISION_COMPILED_VERIFY=1``. Without it, the default eager
+admission is reported and does not qualify as compiled-route proof.
 
 How to read the verdict:
 
@@ -178,6 +184,18 @@ def evaluate(
 
     def requests_of(arm: str) -> dict[str, Any]:
         return (arms.get(arm) or {}).get("requests") or {}
+
+    incomplete = [
+        f"{arm}/{name}: {entry.get('finish_reason')!r}"
+        for arm in arms
+        for name, entry in requests_of(arm).items()
+        if entry.get("kind") == "image" and entry.get("finish_reason") != "stop"
+    ]
+    check(
+        "image_turns_completed",
+        not incomplete,
+        "; ".join(incomplete) or "every image turn finished with stop",
+    )
 
     applied = {
         arm: data["health"].get("sampler")
@@ -389,13 +407,17 @@ def evaluate(
 def _body(messages: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
     # No temperature, top_p or top_k: the server applies the pack's native
     # sampler. One seed for every request of every arm.
-    return {
+    body = {
         "model": "default",
         "messages": messages,
         "max_tokens": int(args.max_tokens),
         "seed": int(args.seed),
         "stream": False,
     }
+    thinking = getattr(args, "thinking", "default")
+    if thinking != "default":
+        body["enable_thinking"] = thinking == "on"
+    return body
 
 
 def request_plan(image_url: str, args: argparse.Namespace) -> dict[str, dict[str, Any]]:
@@ -529,6 +551,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--arms", default=DEFAULT_ARMS, help=f"comma separated, from {', '.join(ARMS)} (default: {DEFAULT_ARMS})")
     parser.add_argument("--seed", type=int, default=20260921)
     parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument("--thinking", choices=("default", "on", "off"), default="default", help="explicit per-request thinking control; default leaves the server setting unchanged")
     parser.add_argument("--question", default=harness.QUESTION)
     parser.add_argument("--follow-up", default=harness.FOLLOW_UP)
     parser.add_argument("--text-prompt", default=harness.TEXT_PROMPT)
@@ -590,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
                 "max_tokens": int(args.max_tokens),
                 "seed": int(args.seed),
                 "sampler_fields_sent": [],
+                "thinking": args.thinking,
             }
             for name, spec in plan_requests.items()
         },
@@ -627,6 +651,7 @@ def main(argv: list[str] | None = None) -> int:
         "settings": {
             "seed": args.seed,
             "max_tokens": args.max_tokens,
+            "thinking": args.thinking,
             "sampler": "native: no sampler field is sent, the server applies the pack's own",
             "question": args.question,
             "follow_up": args.follow_up,

@@ -450,6 +450,10 @@ def _qwen4_fixed_m4_compiled_verify_requested(
 # request record carries. One constant line each: the demotion ledger formats
 # nothing.
 _VISION_COMPILED_VERIFY_REFUSALS: dict[str, str] = {
+    "vision_dense_opt_in_required": (
+        "dense image compiled verification requires MTPLX_DENSE_VISION_COMPILED_VERIFY=1; "
+        "the full serving trajectory has not passed exact comparison with eager verification"
+    ),
     "vision_kill_switch": (
         "MTPLX_QWEN4_VISION_COMPILED_VERIFY=0: image requests keep the eager "
         "verifier, as they did before the compiled image route"
@@ -5494,7 +5498,7 @@ def _dense_mrope_capable(rt: Any) -> bool:
 
 
 def _dense_vision_compiled_verify_admission(
-    vision_splice: Any | None, prompt_ids: Sequence[int]
+    vision_splice: Any | None, prompt_ids: Sequence[int], *, dense_model: bool = True
 ) -> dict[str, object]:
     """Can the compiled verify bank carry this dense-path request's positions?
 
@@ -5535,6 +5539,11 @@ def _dense_vision_compiled_verify_admission(
         verdict["refusal"] = "vision_kill_switch"
     elif _env_int("MTPLX_STATE_REBASE_EVERY", 0) > 0:
         verdict["refusal"] = "vision_state_rebase"
+    elif dense_model and not env_bool("MTPLX_DENSE_VISION_COMPILED_VERIFY", default=False):
+        # The real dense 27B serving gate differs at live-length versus
+        # padded-buffer SDPA, outside parity2's common-buffer comparison.
+        # Keep that unproven route opt-in without changing Flash-Next.
+        verdict["refusal"] = "vision_dense_opt_in_required"
     # No table (the request was prefilled at plain sequence positions and
     # decodes at them): the text trace, unless a switch above said no.
     return verdict
@@ -9433,7 +9442,19 @@ def generate_mtpk(
     # request takes the compiled verifier, the graph bank and its compiled
     # draft core like a text request; the admission names what stays eager.
     _dense_mrope_request = _dense_mrope_state_of(vision_splice)
-    _dense_admission = _dense_vision_compiled_verify_admission(vision_splice, prompt_ids)
+    _dense_text_model = getattr(rt.model, "language_model", rt.model)
+    _dense_model_type = getattr(
+        getattr(_dense_text_model, "args", None), "model_type", None
+    )
+    _dense_admission = _dense_vision_compiled_verify_admission(
+        vision_splice,
+        prompt_ids,
+        dense_model=(
+            _dense_mrope_request is not None
+            or _dense_mrope_capable(rt)
+            or _dense_model_type in {"qwen3_5", "qwen3_5_text", "prism_hadamard_qwen35"}
+        ),
+    )
     _dense_admitted = _dense_admission["refusal"] is None
     if _dense_mrope_request is not None and draft_core != "stock" and not _dense_admitted:
         # A refused request keeps today's routes end to end: the eager

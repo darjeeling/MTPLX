@@ -72,6 +72,9 @@ NATIVE_DRAFT = SamplerConfig(temperature=1.0, top_p=0.95, top_k=20)
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
+    # Tests of the compiled route explicitly opt in; the default has its
+    # own product-level test below.
+    monkeypatch.setenv("MTPLX_DENSE_VISION_COMPILED_VERIFY", "1")
     for name in (
         "MTPLX_DENSE_MROPE",
         "MTPLX_DENSE_MROPE_STRICT",
@@ -490,6 +493,24 @@ def test_the_admission_verdicts():
     assert generation._dense_draft_rope_delta(state) == DELTA
     state.mtp_aligned = False
     assert generation._dense_draft_rope_delta(state) is None
+
+
+@pytest.mark.parametrize("armed", [True, False])
+def test_dense_image_compilation_requires_explicit_opt_in(rig, monkeypatch, armed):
+    monkeypatch.setenv("MTPLX_COMPILED_VERIFY", "1")
+    monkeypatch.delenv("MTPLX_DENSE_VISION_COMPILED_VERIFY", raising=False)
+    result = _generate(rig, splice=_splice(rig, PROMPT, armed=armed))
+    assert result.stats.compiled_verify_admission["reason"] == "vision_dense_opt_in_required"
+    assert result.stats.compiled_verify_admission["engaged"] is False
+    assert not (result.stats.graphbank or {}).get("compiled_verify")
+
+
+def test_dense_opt_in_does_not_change_other_family_admission(monkeypatch):
+    monkeypatch.delenv("MTPLX_DENSE_VISION_COMPILED_VERIFY", raising=False)
+    splice = SimpleNamespace(dense_mrope=None, image_pad_token_id=PAD, pad_counts=(6,))
+    admit = generation._dense_vision_compiled_verify_admission
+    assert admit(splice, PROMPT, dense_model=False)["refusal"] is None
+    assert admit(None, TEXT)["refusal"] is None
 
 
 def test_the_session_bank_restores_an_image_turn_the_compiled_route_banked(rig, monkeypatch):
