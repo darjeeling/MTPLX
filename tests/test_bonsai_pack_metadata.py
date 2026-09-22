@@ -343,3 +343,12 @@ def test_memory_guidance_reads_the_measured_rows_and_never_extrapolates():
     assert "1 configuration(s) were not run." in text
     refused = [row(16, 4096, 0, "off", 11.55, verdict="refuse", fit=4096, tight=False)]
     assert "The planner refuses the pack with KV off." in render_memory_guidance({"rows": refused})
+
+
+def test_card_carries_the_measured_reason_for_an_mtp_default_too():
+    from scripts.build_bonsai_mtplx_pack import render_card
+
+    card = render_card(source_sha="abc", head_note="head", recommended_generation_mode="mtp",
+                       recommended_generation_mode_reason="Depth 1 measured 1.3x through the daemon.")
+    assert "The draft head is on by default (MTP speculative decoding)." in card
+    assert "Depth 1 measured 1.3x through the daemon." in card

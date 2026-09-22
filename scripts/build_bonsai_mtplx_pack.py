@@ -459,6 +459,8 @@ def render_card(*, source_sha: str, head_note: str,
             generation_default += "\n\nNo measured reason was supplied for this recommendation."
     else:
         generation_default = "The draft head is on by default (MTP speculative decoding)."
+        if recommended_generation_mode_reason:
+            generation_default += "\n\n" + recommended_generation_mode_reason
     return CARD_TEMPLATE.format(
         source_sha=source_sha, head_note=head_note,
         generation_default=generation_default,
