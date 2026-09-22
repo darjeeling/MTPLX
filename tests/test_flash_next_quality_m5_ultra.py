@@ -66,17 +66,19 @@ def test_m5_ultra_brand_string_classifies_as_modern_m5():
 
 
 @pytest.mark.parametrize("ram_gib", M5_ULTRA_TIERS)
-def test_catalog_recommends_quality_first_on_m5_ultra_tiers(ram_gib):
+def test_catalog_leads_with_optimized_speed_then_quality_on_m5_ultra_tiers(ram_gib):
+    # Optimized Speed leads and Quality follows, as the 27B trio does.
+    lead = ["flash-next-optimized-speed", QUALITY_ID]
     raw = recommended_catalog_ids(memory_gib=ram_gib, chip_tier=MODERN_TIER)
-    assert raw[0] == QUALITY_ID
+    assert raw[:2] == lead
     assert raw.count(QUALITY_ID) == 1
     visible = recommended_models(memory_gib=ram_gib, chip_tier=MODERN_TIER)
-    assert visible[0].id == QUALITY_ID
-    assert default_catalog_model(memory_gib=ram_gib, chip_tier=MODERN_TIER).id == QUALITY_ID
+    assert [m.id for m in visible[:2]] == lead
+    assert default_catalog_model(memory_gib=ram_gib, chip_tier=MODERN_TIER).id == lead[0]
     pack = catalog_model_with_id(QUALITY_ID)
     assert pack.hf_model_id == QUALITY_HF
     assert "mtplx-flash-next-optimized-quality" in pack.aliases
-    # The badge: 166.2 GiB peak x 1.5 safety = 249.3 GiB <= 256 GiB.
+    # The badge: 136.4 GiB peak x 1.5 safety = 204.6 GiB <= 256 GiB.
     assert evaluate_feasibility(pack, chip_tier=MODERN_TIER, ram_gib=ram_gib, disk_free_gib=1000).verdict == "recommended"
 
 
@@ -93,7 +95,7 @@ def test_quality_is_offered_but_not_first_below_256_gib():
 
 
 @pytest.mark.parametrize("ram_gib", M5_ULTRA_TIERS)
-def test_mtplx_start_default_is_quality_on_m5_ultra(ram_gib, monkeypatch):
+def test_mtplx_start_default_is_optimized_speed_on_m5_ultra(ram_gib, monkeypatch):
     from mtplx import default_models as defaults
 
     monkeypatch.delenv(defaults.QWEN38_OPTIMIZED_SPEED_MODEL_ENV, raising=False)
@@ -105,9 +107,10 @@ def test_mtplx_start_default_is_quality_on_m5_ultra(ram_gib, monkeypatch):
     # The brand string path, not a pre-classified generation.
     hardware = {"system": "Darwin", "machine": "arm64", "chip": "Apple M5 Ultra", "memory_gib": float(ram_gib)}
     selection = defaults.select_default_model(hardware=hardware)
-    assert selection.hf_model == QUALITY_HF
+    assert selection.hf_model == "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed"
+    assert selection.display_name == "Qwen 3.8 Flash-Next Optimized Speed"
     assert selection.chip_generation == "m5"
-    assert defaults.public_model_id_for_ref(selection.hf_model) == "mtplx-flash-next-optimized-quality"
+    assert defaults.public_model_id_for_ref(selection.hf_model) == "mtplx-flash-next-optimized-speed"
 
 
 def test_served_id_and_hf_repo_resolve_through_cli_paths():
