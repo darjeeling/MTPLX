@@ -10225,15 +10225,29 @@ final class MTPLXAppCoreTests: XCTestCase {
         process.environment = environment
         let stdout = Pipe()
         process.standardOutput = stdout
-        process.standardError = Pipe()
+        // The child's stderr goes to a file, never to a pipe nobody drains:
+        // an undrained pipe blocks the child in write() as soon as one buffer
+        // (16 KB) is full. A file also keeps the text for the failure message.
+        let stderrURL = isolatedHome.appendingPathComponent("dry-run.stderr")
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+        process.standardError = try FileHandle(forWritingTo: stderrURL)
         try process.run()
+        // Read to end-of-file BEFORE waiting. The old order (wait, then read)
+        // deadlocked whenever the child wrote more than one pipe buffer: the
+        // child sat in write(), waitUntilExit() never returned, and the whole
+        // suite hung on this test (seen 2026-09-21 in the full debug run, in
+        // a worktree whose wrapper can really start the CLI; in worktrees
+        // without an environment the wrapper exits 1 and this test skips,
+        // which is how the hazard stayed invisible).
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        let stderrBytes = (try? Data(contentsOf: stderrURL).count) ?? 0
+        print("mtplx start --dry-run wrote \(data.count) bytes of stdout and \(stderrBytes) bytes of stderr")
         guard process.terminationStatus == 0 else {
             throw XCTSkip(
                 "mtplx start --dry-run exited \(process.terminationStatus); runtime not usable here"
             )
         }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
         let payload = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
