@@ -2521,6 +2521,24 @@ def _set_metal_memory_limit(mx: Any, name: str, value: int) -> str:
     raise AttributeError(f"MLX memory cap API {name} is unavailable")
 
 
+def _system_wired_limit_bytes(mx: Any) -> int | None:
+    """The largest wired limit macOS allows (``iogpu.wired_limit_mb``).
+
+    MLX reports it as the GPU's ``max_recommended_working_set_size`` and
+    ``set_wired_limit`` raises above it. None when MLX cannot say.
+    """
+    device_info = getattr(mx, "device_info", None) or getattr(
+        getattr(mx, "metal", None), "device_info", None
+    )
+    if not callable(device_info):
+        return None
+    try:
+        value = device_info().get("max_recommended_working_set_size")
+    except Exception:
+        return None
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
 def _metal_system_reserve_bytes(total_ram_bytes: int) -> int:
     """Unwired headroom macOS keeps outside the allocator caps.
 
@@ -2668,6 +2686,14 @@ def _apply_metal_memory_caps(
     if wired_limit > mem_limit:
         wired_limit = mem_limit
         applied["wired_limit_clamped_to_memory_limit"] = True
+    system_wired = _system_wired_limit_bytes(mx)
+    if system_wired is not None and wired_limit > system_wired:
+        # A refused wired limit wires nothing and leaves the keepalive off
+        # (Flash-Next Speed on a stock 96 GB Mac asks for 80.3 GiB of about
+        # 72); wire what macOS allows instead.
+        applied["wired_limit_requested_bytes"] = int(wired_limit)
+        applied["system_wired_limit_bytes"] = system_wired
+        wired_limit = system_wired
     # Prefer the new top-level mx.set_memory_limit / mx.set_wired_limit; fall
     # back to the deprecated mx.metal.* names if running on an older MLX.
     try:
@@ -3661,6 +3687,15 @@ class ServerState:
             _startup_line(
                 "[5/6] GPU residency keepalive off "
                 f"({self.gpu_keepalive.get('reason', 'unknown')})"
+            )
+        requested_wired = self.metal_memory_caps.get("wired_limit_requested_bytes")
+        if requested_wired:
+            _startup_line(
+                "[5/6] Wired memory: macOS allows "
+                f"{self.metal_memory_caps['system_wired_limit_bytes'] / 1024**3:.1f}"
+                f" GiB of the {requested_wired / 1024**3:.1f} GiB this model asks "
+                "for; the rest can be paged out while idle. To wire it all: "
+                f"sudo sysctl iogpu.wired_limit_mb={math.ceil(requested_wired / 1024**2)}"
             )
         self.session_bank_cold_tier = _session_bank_cold_tier_from_args(args)
         self.sessions = EngineSessionManager(
