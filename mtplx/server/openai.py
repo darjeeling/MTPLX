@@ -20949,6 +20949,7 @@ PUBLIC_MTPLX_STATS_KEYS = (
     "transcript_compacted_repeated_read_inspection_chars",
     "request_session_keep_live_ref",
     "request_session_keep_live_ref_reason",
+    "request_session_cancel_handoff",
     "request_session_bank_bypass",
     "request_session_prefix_diagnostic",
     "live_frontier_candidate",
@@ -32954,8 +32955,17 @@ def create_app(state: ServerState) -> FastAPI:
                             nonstream_stop_monitor.matched_stop or ""
                         )
 
+        # Filled by generation_slot when this request had to wait for a
+        # generation the client had already cancelled to let go of the
+        # session (Stop, then send again under the same session id).
+        session_cancel_handoff: dict[str, Any] = {}
+
         def adopt_forked_session(acquired_session: Any) -> None:
             nonlocal session, session_id, session_keep_live_ref
+            if session_cancel_handoff:
+                request_observability["request_session_cancel_handoff"] = dict(
+                    session_cancel_handoff
+                )
             if acquired_session is session:
                 return
             session = acquired_session
@@ -33007,7 +33017,10 @@ def create_app(state: ServerState) -> FastAPI:
                     )
                 )
             with state.sessions.generation_slot(
-                session, source=session_source
+                session,
+                source=session_source,
+                cancel_event=nonstream_cancel_event,
+                handoff_out=session_cancel_handoff,
             ) as acquired_session:
                 adopt_forked_session(acquired_session)
                 generated_result = _run_generation_dispatched(
@@ -34324,7 +34337,10 @@ def create_app(state: ServerState) -> FastAPI:
                             )
                         else:
                             with state.sessions.generation_slot(
-                                session, source=session_source
+                                session,
+                                source=session_source,
+                                cancel_event=cancel_event,
+                                handoff_out=session_cancel_handoff,
                             ) as acquired_session:
                                 adopt_forked_session(acquired_session)
                                 generated = _run_generation_dispatched(
