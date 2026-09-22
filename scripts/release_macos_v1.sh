@@ -5,10 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_ROOT="$ROOT/apps/MTPLXApp"
 BUILD_SCRIPT="$APP_ROOT/script/build_and_run.sh"
 VERSION="${MTPLX_RELEASE_VERSION:-$(/usr/bin/awk -F'"' '/^version = / { print $2; exit }' "$ROOT/pyproject.toml")}"
-# Left empty, the build script derives it from VERSION; the appcast then reads
-# the number back off the built bundle so the feed cannot rank a release
-# differently from the app it ships.
-APP_BUILD="${MTPLX_RELEASE_BUILD:-}"
+# Sparkle ranks releases by CFBundleVersion alone. QA bundles take the numbers
+# after the one build_and_run.sh derives from VERSION (2.12.0's ran 2012001 to
+# 2012005), so the release names its own build: raise this with the version.
+# The appcast reads the number back off the built bundle, so the feed cannot
+# rank a release differently from the app it ships.
+APP_BUILD="${MTPLX_RELEASE_BUILD:-2012006}"
 RELEASE_TAG="${MTPLX_RELEASE_TAG:-v$VERSION}"
 GITHUB_REPO="${MTPLX_GITHUB_REPO:-youssofal/mtplx}"
 GITHUB_ASSET_BASE="${MTPLX_GITHUB_ASSET_BASE:-https://github.com/$GITHUB_REPO/releases/download/$RELEASE_TAG}"
@@ -37,11 +39,6 @@ fi
 # and never be offered to updaters — while 2.9.2 could be offered "back" to
 # 2.9.3 users. Refuse, before any expensive gate runs, any build number
 # that does not strictly advance the local shipping record.
-CANDIDATE_BUILD="$APP_BUILD"
-if [[ -z "$CANDIDATE_BUILD" ]]; then
-  IFS='.' read -r _bn_major _bn_minor _bn_patch <<<"$VERSION"
-  CANDIDATE_BUILD="$((10#$_bn_major * 1000000 + 10#$_bn_minor * 1000 + 10#$_bn_patch))"
-fi
 LAST_SHIPPED_BUILD=0
 for _bn_manifest in "$HOME"/.mtplx/releases/*/site/releases/latest.json; do
   [[ -f "$_bn_manifest" ]] || continue
@@ -49,8 +46,8 @@ for _bn_manifest in "$HOME"/.mtplx/releases/*/site/releases/latest.json; do
   [[ "$_bn_val" =~ ^[0-9]+$ ]] || continue
   if (( _bn_val > LAST_SHIPPED_BUILD )); then LAST_SHIPPED_BUILD="$_bn_val"; fi
 done
-if (( LAST_SHIPPED_BUILD > 0 && CANDIDATE_BUILD <= LAST_SHIPPED_BUILD )); then
-  echo "error: build number $CANDIDATE_BUILD does not advance the last shipped CFBundleVersion $LAST_SHIPPED_BUILD" >&2
+if (( LAST_SHIPPED_BUILD > 0 && APP_BUILD <= LAST_SHIPPED_BUILD )); then
+  echo "error: build number $APP_BUILD does not advance the last shipped CFBundleVersion $LAST_SHIPPED_BUILD" >&2
   echo "       Sparkle ranks by CFBundleVersion alone, so this release would never reach existing users." >&2
   echo "       Export MTPLX_RELEASE_BUILD=$((LAST_SHIPPED_BUILD + 1)) and rerun." >&2
   exit 1
