@@ -4,29 +4,28 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [2.12.0] - Unreleased
-
-This entry is a release draft. The saved September 21–22 measurements below
-precede the final 2.12.0 package; final regression, native-sampler image,
-public model-download and signed app/client gates remain open.
-See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and limits.
+## [2.12.0] - 2026-09-22
 
 ### Added
 
-- **Dense 27B image requests take the compiled verify route too.** The route carries the image delta as a graph input and leaves the text trace unchanged. Two complete serving runs exercised 18 requests, nine with thinking on and nine with thinking off; every request finished with `stop`, and the instrument compared 762 compiled image rounds and 511 text rounds against the eager verifier from the same cache with zero differences in logits, hidden states, cache state or captures. A seeded 27B image reply run separately on the eager verifier agreed for its first 61 tokens before the two parted, at attention over the eager path's live-length buffers against the compiled path's padded buffers, with identical prefill logits, hidden states, draft inputs and rotary positions: the same rounding class the compiled text lane has always carried, not a position error. `MTPLX_DENSE_VISION_COMPILED_VERIFY=0` keeps dense image requests on the eager verifier; the shared image kill switch `MTPLX_QWEN4_VISION_COMPILED_VERIFY=0` and the state-rebase refusal still take precedence. Flash-Next admission is unchanged.
+- **Dense 27B image requests take the compiled verify route too.** The route carries the image position offset as a graph input and leaves the text trace unchanged. Eighteen complete requests, nine with thinking on and nine with thinking off, all finished with `stop`, and 762 compiled image rounds and 511 text rounds compared against the eager verifier from the same cache showed zero differences in logits, hidden states, cache state or captures. A seeded 27B image reply run separately on each route agreed for its first 61 tokens, then parted at a rounding difference between the eager route's live-length attention buffers and the compiled route's padded buffers, with identical prefill logits, hidden states, draft inputs and rotary positions. Compiled text verification has always carried the same rounding difference; it is not a position error. `MTPLX_DENSE_VISION_COMPILED_VERIFY=0` keeps dense image requests on the eager verifier; the shared image switch `MTPLX_QWEN4_VISION_COMPILED_VERIFY=0` and the state-rebase refusal still take precedence.
 
 - **Ternary Bonsai 2 27B** (issue #515). MTPLX loads Prism ML's 2-bit
   ternary Bonsai 2 27B natively (`prism_hadamard_qwen35`: the Hadamard
   rotation is applied at run time; a pack without its rotation metadata or
   its vision tower is refused), with image input. The MTPLX pack
   `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` carries Prism ML's weights
-  byte for byte and adds the Qwen3.8-27B draft head; served id
-  `mtplx-bonsai-2-27b-optimized-speed`, engine floor 2.12.0. The draft head
-  is on by default at depth 1. The saved quiet-window M5 Max run measured
-  50.0 tok/s at 4K and 42.6 at 16K, against 38.8 and 34.3 for plain decoding.
-  The dense 27B measured 49.8 and 49.4: Bonsai ties it at 4K and trails at
-  16K while using about half the memory. These are candidate measurements,
-  not final-package or older-Mac speed claims.
+  byte for byte and adds the Qwen3.8-27B draft head, 8.85 GB in total;
+  served id `mtplx-bonsai-2-27b-optimized-speed`, minimum engine 2.12.0.
+  The draft head is on by default at depth 1. On an M5 Max it measured
+  50.0 tok/s at 4K and 42.6 at 16K, against 38.8 and 34.3 for plain
+  decoding; the dense 27B measured 49.8 to 52.7 and 49.4 to 50.1 in the
+  same session, so Bonsai matches it at 4K and is slower at 16K, in about
+  half the memory. Reasoning effort is `medium` by default in the app, the
+  CLI and every client; `xhigh` is available, and `low` is not offered
+  because Prism ML does not support it. On a stopwatch coding task `xhigh`
+  spent 577 s and 21,848 reasoning tokens without an answer, while
+  `medium` finished the task and a correction turn.
   `scripts/build_bonsai_mtplx_pack.py` builds, stamps and restamps the pack
   from measured evidence; `scripts/bonsai_memory_table.py` measures the
   peak memory per RAM class.
@@ -37,11 +36,11 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   fixed-width verifier rejects an 8-bit table). The streaming audit stamps
   its own result into the pack and
   `scripts/build_flash_next_quality_pack.sh` builds, verifies with a full
-  load and smoke-tests chat, a tool call and an image in one command.
-  Recommended first on modern Macs with 256 GB or more. Full-size artifact,
-  download and runtime qualification remain separate gates. The automatic
-  n-gram policy keeps the table resident from 160 GiB upward, including
-  256/512 GB machines, and counts it in the memory plan.
+  load and tests chat, a tool call and an image in one command. The
+  published pack is 169,958,537,278 bytes in 57 files, and its weights need
+  about 128.5 GiB with the n-gram table on SSD. It has not yet been run on a
+  256 GB Mac, so on 256 GB and 512 GB Macs it is listed second, after
+  Flash-Next Optimized Speed.
 
 - **Compiled verify route for image requests on Flash-Next.** An image
   request used to fall back to eager verification for the whole
@@ -62,8 +61,8 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   shape of the pack; a miss removes the row count with the reason in the
   demotion ledger. Measured on an M5 Max: nothing exact beats stock at one or
   two rows; 1.01 to 1.04x on the whole step at four rows, within a 2 percent
-  noise floor. The later daemon measurement was 49.0 tok/s at depth 3
-  with the kernel, versus 47.2 without it and 50.0 at the default depth 1.
+  noise floor. Through the server it measured 49.0 tok/s at depth 3
+  with the kernel, against 47.2 without it and 50.0 at the default depth 1.
   It does not accelerate depth 1, so it remains off by default.
 
 - **Packs can declare their generation mode.** `recommended_generation_mode`
@@ -80,10 +79,14 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   app languages.
 
 - **One catalog for the app and the CLI.** 25 entries with the same
-  identities, sizes and recommendation rule (`BONSAI_RECOMMENDATION_MIN_GIB`
-  16, Flash-Next Optimized-Quality from 256 GiB), a shared recommendation
+  identities, sizes and recommendation rule, a shared recommendation
   fixture both sides are tested against, and model descriptions that follow
-  the app language without a restart.
+  the app language without a restart. On M3, M4 and M5: the 4B below 16 GB,
+  Bonsai 2 from 16 GB (`BONSAI_RECOMMENDATION_MIN_GIB`), the Qwen 3.8 27B
+  Optimized Speed from 32 GB, and Flash-Next Optimized Speed first from
+  256 GB with Optimized Quality second. On a 96 GB Mac the Flash-Next
+  option is Bare Speed (peak 78 GiB), because Optimized Speed peaks at
+  87 GiB.
 
 - **`forge build` converts Qwen3.8-Flash-Next sources** (PR #508, Bradford
   Matthews, issue #390). Forge handed every Flash-Next fine-tune to the
@@ -113,22 +116,67 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
 
 ### Changed
 
-- **Speed: the decode and prompt-processing work of September 18 to 20.**
-  The September 22 comparison of 2.11.3 with candidate def3894d used the
-  same M5 Max, runtime and prompts, verified max fans, native sampler and
-  512 generated tokens: at 65,502 tokens, decode 65.0 to 79.6 tok/s,
-  prompt processing 902 to 1,269 tok/s, first token 72.9 to 51.9 s; at
-  4,061 tokens, decode 89.0 to 88.7, prompt processing 912 to 1,321,
-  first token 4.53 to 3.15 s. The earlier pair used another candidate, so
-  a frozen final-candidate regression comparison remains open. Saved
-  attention buffers grow to the size reuse needs and are reused in place
-  (at some prompt lengths all 24 key and value buffers were copied every
-  verification step, about 135 MB each at 128K); Flash-Next prepares its
-  sampled guesses together and overlaps their preparation with GPU work;
-  prompt processing uses 4,096-token chunks on the supported M5 chips and
-  begins sparse processing at 16K for wide chunks; attention selection no
-  longer compiles a new GPU program per context size; the smaller
-  lookup-table files are preferred and resident data is not reread.
+- **Speed: Flash-Next prompt processing and long-context decode.** 2.11.3
+  against 2.12.0 on the same M5 Max with the same prompts, fans at
+  maximum, native sampler and 512 generated tokens: at 65,502 tokens,
+  decode 65.0 to 79.6 tok/s, prompt processing 902 to 1,269 tok/s, first
+  token 72.9 to 51.9 s, peak memory 92.7 to 90.5 GB; at 4,061 tokens,
+  decode 89.0 to 88.7, prompt processing 912 to 1,321, first token 4.53 to
+  3.15 s. Saved attention buffers are sized on the cache's growth step and
+  written in place (at some prompt lengths all 24 key and value buffers
+  were copied every verify round, about 135 MB each at 128K; the 24 writes
+  went from 7.8 to 0.6 ms). Flash-Next builds all sampled draft depths with
+  one device sync and sends each depth to the GPU as it is built. Prompt
+  processing uses 4,096-token chunks on M5 chips and begins sparse
+  attention at 16K for those chunks; the sparse attention kernel reads the
+  cache in place (19.8 to 7.1 µs per row at 64K, bit-identical); block
+  selection runs on one simdgroup per row (2.68 to 0.58 µs per row at 18K);
+  the hyper-connection write is one fused kernel; block selection no
+  longer compiles a new GPU program per context size (40 to 56 ms each);
+  the last chunk of a cold prompt is no longer cut into 256-row forwards;
+  the n-gram pre-read fills the small scale and bias files first, and the
+  warm pass reads only the files that are not in memory. A warm agent turn
+  reprocesses at most 64 tokens at the end of its prompt instead of up to
+  256. Restore points are recorded inside the last wide forward instead of
+  ending extra forwards at each one: a cold 4,061-token prompt reached its
+  first token in 2.79 to 2.81 s against 3.06 to 3.10 s
+  (`MTPLX_GDN_BOUNDARY_INFORWARD=0` restores the old layout).
+
+- **The Qwen 3.8 27B measured 3.9 percent lower at 4K and 2.1 percent
+  higher at 16K** than 2.11.3 (means of two pairs on the same Mac: 53.3 to
+  51.2 and 48.7 to 49.7 tok/s). The two builds sample different tokens
+  from the same seed; a verify round costs about 2 percent more at both
+  lengths.
+
+- **The n-gram table streams from SSD on every Mac.** On Macs with 160 GB
+  or more the automatic policy also loaded the 29.8 GiB table into GPU
+  memory, and nothing in this release reads that copy. It now streams from
+  SSD as it does on 128 GB, which leaves 29.8 GiB more for context and the
+  session cache on 256 GB and 512 GB Macs. `MTPLX_NGRAM_RESIDENT` no longer
+  has any effect.
+
+- **A model that does not fit gets the floor window.** A plan whose verdict
+  was "does not fit" became "no limit", so the 27B picked by hand on a 16
+  or 24 GB Mac, and Flash-Next on 96 GB, were served the full 262,144-token
+  maximum under a MODEL DOES NOT FIT banner. They now get the 4,096-token
+  floor and one startup line that says so; an explicit `--context-window`
+  still wins.
+
+- **The decode context ceiling follows the model's own KV size.** Every
+  model was budgeted with the 27B's 65,536 bytes per token (Flash-Next uses
+  24,576) and every Flash-Next start printed a warning about it. The value
+  now comes from the model's config; on 16 and 24 GB Macs the 27B ceiling
+  is 65,536 and 98,304 tokens instead of a flat 131,072.
+
+- **One launch setup for the app, `mtplx start` and `mtplx serve`.** Pi runs
+  on the serial scheduler from every entry point (the OpenCode preset
+  measured it at 51.4 against 36.8 decode tok/s at 8K), the SSD cache size
+  is automatic everywhere (it was a fixed 100 GB on `mtplx start hermes`
+  and 32 GB on `mtplx start opencode`), the minimum saved prefix is 512
+  tokens everywhere, and the app's presets no longer fix the prompt chunk at
+  2,048 tokens for every model. A test builds the app's launch command for
+  294 combinations of client, model family and Mac size and compares it
+  with the engine's table.
 
 - **The memory planner admits a model on a tight Mac when only the
   session-bank floor is unfunded.** When the engine budget cannot fund the
@@ -140,14 +188,16 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   11.80 GiB under the 12 GiB budget). Every plan that funds the floor is
   unchanged.
 
-- **The SSD conversation-cache default follows RAM** from both the app and
-  the CLI: 16 GB on Macs with 16 GB or less, 24 GB up to 32 GB, 32 GB up to
-  64 GB, 100 GB above. An explicit limit wins.
+- **The SSD conversation-cache size follows RAM from the terminal too.**
+  `mtplx serve` defaulted to a flat 100 GB, so a 16 GB Mac got a 100 GB
+  store while the app scaled it. The default is now `auto` everywhere:
+  16 GiB on Macs with 16 GB of RAM or less, 24 GiB up to 32 GB, 32 GiB up
+  to 64 GB (100 GiB when the disk has at least 150 GiB free), and 100 GiB
+  above 64 GB. An explicit size still wins.
 
-- **Flash-Next Optimized Speed on a 96 GB Mac** has one 84 GiB engine
-  allowance: a planned 86,016-token window with sparse prompt processing,
-  20,480 without; a model classified as too large gets the 4,096-token
-  floor instead of the full 262,144-token maximum by accident.
+- **Flash-Next on a 96 GB Mac** has one 84 GiB engine budget, shared by
+  the catalog, the memory planner and the verify memory check: a planned
+  86,016-token window with sparse prompt processing, 20,480 without.
 
 - **Request captures hold no content by default** (PR #356, Philip John
   Basile). Capture is still off unless `MTPLX_REQUEST_CAPTURE_DIR` is set.
@@ -173,7 +223,7 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   the visible chat. A thinking block ends only at `</think>` or at the
   opener of a real tool call (tools declared, line start, outside a code
   fence, call-shaped; a bare `<function=NAME>` must name a declared tool).
-  The same rule gates the reasoning-only retry, and a retry fed a tool
+  The same rule decides whether a reasoning-only answer is retried, and a retry fed a tool
   result starts its stream clean. 117 contract cases; 10 streamed requests
   on the release build quoting up to 43 tags in one thinking block, none
   leaked.
@@ -261,7 +311,6 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   watchdog from failing a healthy batched prefill that runs longer than its
   300 s deadline.
 - **Forge builds a model that ships as one weights file** (issue #492). A
-- **Forge finds an MTP head in a single-file source.** A
   model small enough for a single `model.safetensors` has no
   `model.safetensors.index.json`. `mtplx inspect` read the file's header
   and reported the draft head as present, but Forge looked for the head
@@ -355,18 +404,86 @@ See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and lim
   248,320). The loader now applies the same detector-gated restoration
   Forge uses. A head already in the absolute convention passes through
   byte for byte, so nothing is shifted twice.
-
-### Validation still required before publication
-
-- Final frozen-commit Python and Swift checks, the signed and notarized
-  self-contained app, and actual OpenCode Desktop/CLI, Pi and Hermes tasks.
-- Flash-Next compiled/eager image distribution and generated-state restore
-  proof. The saved real-pack parity run reports numerical differences on
-  both text and image rounds; it is not a statistical exactness result.
-- Final 128K and sustained performance coverage, dense image timing, and
-  the consistent roughly 2 percent dense verify-round cost increase.
-- Public Bonsai/Quality downloads, actual Quality artifact sizes, full-load
-  status on a 256 GB or larger Mac, and physical small-Mac qualification.
+- **The GPU wired limit is clamped to what the Mac allows.** When the
+  memory the engine wanted wired was above the limit macOS allows, MLX
+  refused the request, the error was dropped, and the model ran with none
+  of its memory wired and no GPU keepalive: extra time after every idle
+  pause, and memory macOS could evict under pressure. The wired limit is
+  now set to the largest value the Mac accepts, and the startup log says
+  how much macOS allowed and gives the `sudo sysctl iogpu.wired_limit_mb`
+  command that wires all of it. On a stock 96 GB Mac that limit is about
+  72 GiB.
+- **Image placeholder text stays text** (PR #519, François-David Collin).
+  A client that sent the image placeholder string back as plain text made
+  the chat template render it as a real image slot, and the request was
+  refused with `prompt contains more image placeholders than images`. Only
+  real image parts create image slots now; placeholder text is kept as
+  readable, escaped text in message content, in reasoning and in tool-call
+  arguments, so an agent that edits code containing a placeholder keeps
+  its image turns.
+- **The two new official packs no longer read "needs contract repair".**
+  `mtplx inspect` and `mtplx serve` told users to rebuild Bonsai 2 and
+  Flash-Next Optimized Quality with Forge, because each pack's exactness
+  record is still open, and `mtplx inspect` exited with code 3. They now say
+  that the pack is an official MTPLX pack whose exactness measurement is not
+  published yet and that it runs, and `mtplx inspect` exits with 0.
+- **A pack that needs a newer MTPLX is refused before it loads.** When a
+  pack's `min_engine_version` is newer than the running engine, `mtplx
+  serve` and `mtplx inspect` stop with "This model needs MTPLX <version> or
+  later (you have <version>). Update MTPLX, then try again." No unsafe flag
+  overrides it.
+- **The free-disk check before a download matches the download.** The app
+  asked for 2.5 times a model's download size, about 396 GiB for Flash-Next
+  Optimized Quality. The app and the CLI catalog now ask for the bytes still
+  to download plus 5 GiB, the rule `mtplx pull` already used.
+- **A made-up tool call in a reply without tools is hidden completely.**
+  The stream filter closed its hidden span at the first `</function>`, so
+  the block's own `</tool_call>` reached the user as visible text. It now
+  waits for the closing tag that matches the opening one, as the
+  non-streamed path does.
+- **Thinking-off tool sessions keep the template's own tokens.** The prompt
+  cut the empty thinking block in two, so from the second request of a
+  tool session the history no longer matched the saved state. Across 2,020
+  audited conversation turns the unexplained differences from the chat
+  template fell from 848 to 0, and the predicted reusable history matched
+  the next request in 834 of 834 cases, up from 498. For OpenCode with
+  thinking on, turns that extend the saved stream went from 28 of 36 to 36
+  of 36.
+- **The open inference menu no longer loads the CPU.** Live metrics redrew
+  the whole app scene. With the menu open during inference the app's CPU
+  use went from 47.9 and 27.4 percent to 2.2 and 3.3 percent.
+- **Activity and Cache show every saved prefix.** Several prefixes saved
+  from one conversation shared one row identity, which hid entries the
+  engine still held. Rows are now keyed by the session and the token hash.
+- **Setup uses the runtime and model defaults it selected.** An app runtime
+  started from another MTPLX folder could import that folder's package
+  first and report the wrong version; the runtime wrapper now runs Python
+  in safe-path mode. When tuning is skipped, the installed pack's own depth
+  applies, so Bonsai starts at depth 1 instead of 2.
+- **The bundled native kernels load on a fresh Mac.** The app's native
+  wheel finds its libraries inside the installed package instead of the
+  build machine's paths, and it is built against MLX's macOS 15 release so
+  it loads on macOS 15 and later. The source distribution no longer
+  includes local profiling scripts.
+- **If Flash-Next's compiled verifier cannot run on a GPU, the request
+  continues.** Its first dispatch runs under a guard; on a GPU that refuses
+  the kernel, the path is retired with one log line and the same round runs
+  eagerly, with unchanged output.
+- **Performance reports explain a slow response.** `/health`, the request
+  log and `mtplx doctor --explain` count every fallback from the fast path
+  with its reason, and Pi traces include compaction requests and the image
+  context.
+- **The packed-GQA verify counter counts accepted windows too** (issue
+  #506). It counted only declined windows, and only while the compiled
+  verifier was being traced, so a healthy daemon showed 96 declines and no
+  accepts.
+- **`mtplx inspect` reports whether a pack takes images,** and a pack that
+  keeps its vision tower in one weight file with no index, like Prism ML's,
+  is served with vision.
+- **`MTPLX_MLX_COMMAND_BUFFER_MB`** (off by default) lifts MLX's 50 MiB
+  command-buffer rule. At 128K it measured 65.9 tok/s against 51 to 54,
+  but it raised the process peak from 92.0 to 103.7 GB at 16K, so it is an
+  operator setting, not a default.
 
 ## [2.11.3] - 2026-09-17
 
