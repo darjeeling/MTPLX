@@ -321,3 +321,28 @@ def test_the_generation_loop_is_wired_to_the_admission():
     # The old blanket guard is gone, and so is its one-line reason.
     assert "vision_splice is None\n        and _qwen4_fixed_m4" not in source
     assert "fixed_m4_admission=fixed_m4_admission" in source
+
+
+def test_the_admission_decides_roped_requests_on_the_bank_keys_predicate():
+    """One predicate says whether a request's rows are positioned by its
+    table and delta: the attention scope opens on it, the session bank key is
+    salted on it, and the compiled route admits on it. Three readers of one
+    answer cannot drift apart."""
+
+    from mtplx.vision.splice import mrope_rope_state
+
+    ids = list(range(1, 25)) + [PAD] * 16 + list(range(30, 40))
+    for splice in (
+        None,
+        _splice(ids),
+        _splice(ids, delta=None, table=False),
+        _splice(ids, delta=-3, table=False),
+        _splice(ids, delta=None, table=True),
+    ):
+        roped = mrope_rope_state(splice)
+        assert gen._vision_rope_request(splice) is (roped is not None)
+        if splice is None:
+            continue
+        verdict = gen._qwen4_vision_compiled_verify_admission(_rt(), splice, ids)
+        assert (verdict["positions"] == "vision_delta") is (roped is not None)
+        assert verdict["rope_delta"] == (roped[1] if roped is not None else None)

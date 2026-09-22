@@ -492,18 +492,20 @@ def _vision_rope_request(vision_splice: Any | None) -> bool:
     """True when this request's forwards rope through the request context.
 
     The exact condition under which ``_vision_rope_scope_for`` opens a
-    ``vision_rope`` scope: an image request of a family with an M-RoPE
-    contract (qwen4_exp) whose table was built. Such a request may only reach
-    a fixed-capacity QSA bank through the admission below, which hands the
-    bank the delta; every other compiled route stays off it.
+    ``vision_rope`` scope, decided by the same predicate the session bank key
+    is salted on (``mtplx.vision.splice.mrope_rope_state``): an image request
+    of a family with an M-RoPE contract (qwen4_exp) whose table was built.
+    Such a request may only reach a fixed-capacity QSA bank through the
+    admission below, which hands the bank the delta; every other compiled
+    route stays off it.
     """
 
     if vision_splice is None or _dense_mrope_state_of(vision_splice) is not None:
         return False
-    return (
-        getattr(vision_splice, "mrope_table", None) is not None
-        or int(getattr(vision_splice, "mrope_delta", 0) or 0) != 0
-    )
+    from mtplx.vision.splice import mrope_rope_state
+
+    # The one predicate the scope and the session bank key are decided on.
+    return mrope_rope_state(vision_splice) is not None
 
 
 def _qwen4_indexer_compress_ratio(rt: Any) -> int:
@@ -561,15 +563,16 @@ def _qwen4_vision_compiled_verify_admission(
             "refusal": refusal,
         }
 
-    table = getattr(vision_splice, "mrope_table", None)
-    delta = int(getattr(vision_splice, "mrope_delta", 0) or 0)
+    from mtplx.vision.splice import mrope_rope_state
+
+    # (table, delta) exactly when the request's forwards rope through the
+    # request scope: the predicate the scope and the bank key are decided on.
+    roped = mrope_rope_state(vision_splice)
+    table = roped[0] if roped is not None else None
+    delta = roped[1] if roped is not None else 0
     dense = _dense_mrope_state_of(vision_splice) is not None
-    positions = (
-        "vision_delta"
-        if dense or table is not None or delta != 0
-        else "vision_sequential"
-    )
-    carried = delta if positions == "vision_delta" and not dense else None
+    positions = "vision_delta" if dense or roped is not None else "vision_sequential"
+    carried = delta if roped is not None and not dense else None
     if not env_bool("MTPLX_QWEN4_VISION_COMPILED_VERIFY", default=True):
         # The kill switch is the previous behaviour: no image request at all.
         return verdict(positions, carried, "vision_kill_switch")
