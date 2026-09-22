@@ -1603,7 +1603,26 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
     }
 
+    /// Memoized like the engine's lru_cached `_artifact_family_texts`: the
+    /// effort picker asks on every render, and a miss resolves symlinks and
+    /// reads mtplx_runtime.json.
+    private static let bonsai2ModelCache = OSAllocatedUnfairLock<[String: Bool]>(
+        initialState: [:]
+    )
+
     public static func isBonsai2Model(_ model: String) -> Bool {
+        if let cached = bonsai2ModelCache.withLock({ $0[model] }) {
+            return cached
+        }
+        let resolved = resolveIsBonsai2Model(model)
+        bonsai2ModelCache.withLock { cache in
+            if cache.count > 512 { cache.removeAll() }
+            cache[model] = resolved
+        }
+        return resolved
+    }
+
+    private static func resolveIsBonsai2Model(_ model: String) -> Bool {
         if isBonsaiFamilyHint(model.lowercased()) { return true }
         let path = URL(fileURLWithPath: NSString(string: model).expandingTildeInPath)
             .resolvingSymlinksInPath()

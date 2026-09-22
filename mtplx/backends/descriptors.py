@@ -487,12 +487,13 @@ QWEN3_8_REASONING_CODEC = ReasoningCodec(
     default_effort="medium",
 )
 # Prism's Bonsai 2 card explicitly excludes low: the model behaves near
-# xhigh at that setting. Keep medium available for coding clients.
+# xhigh at that setting. Chat and agents default to medium: at xhigh the
+# 2.12.0 stopwatch task spent 577 s and 21,848 reasoning tokens without an
+# answer, and a 16 GB Mac has an 8K window.
 BONSAI2_REASONING_CODEC = replace(
     QWEN3_8_REASONING_CODEC,
     effort_levels=("xhigh", "medium"),
-    default_effort="xhigh",
-    default_agent_effort="medium",
+    default_effort="medium",
 )
 # Families whose reasoning codec overrides a shared/generic lane
 # descriptor, keyed to the ONLY lanes they ride. Both conditions must

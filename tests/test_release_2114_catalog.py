@@ -52,7 +52,7 @@ def test_legacy_bonsai_runtime_identity_and_family(tmp_path):
     assert model_family_from_inspection(model_ref=str(pack)) == "qwen3_8"
     codec = reasoning_policy_for_model(model_ref=str(pack))
     assert codec.effort_levels == ("xhigh", "medium")
-    assert codec.default_effort == "xhigh"
+    assert codec.default_effort == "medium"
     assert codec.agent_effort == "medium"
 
 
@@ -67,9 +67,10 @@ def test_bonsai_reasoning_excludes_unsupported_low(ref):
 
     codec = reasoning_policy_for_model(ref)
     assert codec.effort_levels == ("xhigh", "medium")
-    assert codec.default_effort == "xhigh"
+    assert codec.default_effort == "medium"
     controls = model_controls_for_descriptor(QWEN3_NEXT_DESCRIPTOR, model_ref=ref)
     assert controls["reasoning"]["effort_levels"] == ["xhigh", "medium"]
+    assert controls["reasoning"]["default_effort"] == "medium"
 
 MATRIX = json.loads((Path(__file__).parent / "fixtures/release_2114_recommendations.json").read_text())
 
