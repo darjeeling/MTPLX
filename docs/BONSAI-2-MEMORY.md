@@ -34,8 +34,10 @@ Bonsai on 16 GB misses by the cache floor alone. That floor limits the warm
 cache; it is not a physical need. When it is the only thing left unfunded, the
 planner now admits the model with the cache floor at zero, a 256 MiB margin
 over the runtime reserve, and the KV cache counted at its full width, and
-restores come from the SSD cache. Every plan that funds the floor is
-unchanged.
+restores come from the SSD cache. The rule applies only to a pack whose runtime
+contract carries its own measured memory table (`memory_evidence`), which is
+why the measured table is stamped into the published pack. Every plan that funds
+the floor is unchanged.
 
 ## Running the memory table
 

@@ -20,7 +20,7 @@ Every number below was measured on a MacBook Pro M5 Max with 128 GB, fans verifi
 
 | Model | Speed | Run |
 |---|---|---|
-| Qwen 3.8 Flash Next, Optimized Speed | 79.6 tok/s | 65,502-token prompt, 512 tokens generated, thinking off, MTPLX 2.12.0 (65.0 on 2.11.3); the prompt read at 1,269 tok/s (902 on 2.11.3) |
+| Qwen 3.8 Flash Next, Optimized Speed | 63.5 tok/s | 65,502-token prompt read at 1,094 tok/s (768 on 2.11.3), first token after 60.1 s instead of 85.5 s, 512 tokens generated, thinking off, MTPLX 2.12.0 (56.1 tok/s on 2.11.3) |
 | Ternary Bonsai 2 27B, Optimized Speed | 50.0 tok/s | 4,061-token prompt, 512 tokens generated, MTP depth 1, thinking off, MTPLX 2.12.0 (38.8 with plain decoding), 11.6 GB peak |
 | Qwen 3.8 Flash Next, Optimized Speed | 125.8 tok/s | one OpenCode request: 1,301 tokens generated, 18,539-token prompt with 18,364 tokens served from cache, MTP depth 3, MTPLX 2.11.3, 16 September 2026 |
 | Qwen 3.8 Flash Next | 79.3 tok/s | 9k-token code prompt, 1,500 tokens generated, thinking off, two alternating boots each, MTPLX 2.11.3 (62.5 on 2.11.2) |

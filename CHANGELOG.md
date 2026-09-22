@@ -55,16 +55,6 @@ All notable user-facing changes to MTPLX. The format is based on
   and refuses to say `exact` without a compiled dispatch and a warm restore
   into generated tokens.
 
-- **An exact 2-bit kernel for Bonsai verify rows, off by default**
-  (`MTPLX_BONSAI_TERNARY_KERNEL=1`). Serves four to eight verify rows after an
-  install-time probe proves every row count bit-exact against stock on every
-  shape of the pack; a miss removes the row count with the reason in the
-  demotion ledger. Measured on an M5 Max: nothing exact beats stock at one or
-  two rows; 1.01 to 1.04x on the whole step at four rows, within a 2 percent
-  noise floor. Through the server it measured 49.0 tok/s at depth 3
-  with the kernel, against 47.2 without it and 50.0 at the default depth 1.
-  It does not accelerate depth 1, so it remains off by default.
-
 - **Packs can declare their generation mode.** `recommended_generation_mode`
   (`mtp` or `ar`), with a reason and the measurement behind it, in the
   runtime contract. `mtplx serve` applies it when the mode flag is omitted or
@@ -117,12 +107,12 @@ All notable user-facing changes to MTPLX. The format is based on
 ### Changed
 
 - **Speed: Flash-Next prompt processing and long-context decode.** 2.11.3
-  against 2.12.0 on the same M5 Max with the same prompts, fans at
-  maximum, native sampler and 512 generated tokens: at 65,502 tokens,
-  decode 65.0 to 79.6 tok/s, prompt processing 902 to 1,269 tok/s, first
-  token 72.9 to 51.9 s, peak memory 92.7 to 90.5 GB; at 4,061 tokens,
-  decode 89.0 to 88.7, prompt processing 912 to 1,321, first token 4.53 to
-  3.15 s. Saved attention buffers are sized on the cache's growth step and
+  against 2.12.0 on the same M5 Max and Python runtime, alternating boots,
+  fans at maximum, seed 1731, thinking off, 512-token answers: at 65,502
+  tokens, first token 85.5 to 60.1 s, prompt processing 768 to 1,094 tok/s
+  (+42%), decode 56.1 to 63.5 tok/s (+13%); at 4,061 tokens, first token
+  5.26 to 2.88 s, prompt processing 786 to 1,453 tok/s (+85%), decode 74.4
+  to 74.1 (tie). Saved attention buffers are sized on the cache's growth step and
   written in place (at some prompt lengths all 24 key and value buffers
   were copied every verify round, about 135 MB each at 128K; the 24 writes
   went from 7.8 to 0.6 ms). Flash-Next builds all sampled draft depths with
@@ -138,8 +128,8 @@ All notable user-facing changes to MTPLX. The format is based on
   warm pass reads only the files that are not in memory. A warm agent turn
   reprocesses at most 64 tokens at the end of its prompt instead of up to
   256. Restore points are recorded inside the last wide forward instead of
-  ending extra forwards at each one: a cold 4,061-token prompt reached its
-  first token in 2.79 to 2.81 s against 3.06 to 3.10 s
+  ending extra forwards at each one: on the same build a cold 4,061-token
+  prompt prefills in 2.79 to 2.81 s instead of 3.06 to 3.10 s
   (`MTPLX_GDN_BOUNDARY_INFORWARD=0` restores the old layout).
 
 - **The Qwen 3.8 27B measured 3.9 percent lower at 4K and 2.1 percent
@@ -149,11 +139,12 @@ All notable user-facing changes to MTPLX. The format is based on
   lengths.
 
 - **The n-gram table streams from SSD on every Mac.** On Macs with 160 GB
-  or more the automatic policy also loaded the 29.8 GiB table into GPU
-  memory, and nothing in this release reads that copy. It now streams from
-  SSD as it does on 128 GB, which leaves 29.8 GiB more for context and the
-  session cache on 256 GB and 512 GB Macs. `MTPLX_NGRAM_RESIDENT` no longer
-  has any effect.
+  or more earlier releases also loaded the 29.8 GiB table into GPU memory,
+  and nothing in this release reads that copy. It now streams from SSD on
+  every Mac and is never wired. On 256 GB and 512 GB Macs this raises
+  Flash-Next Optimized Quality's memory for context and the session cache
+  from 29.7 to 59.5 GiB and lowers its wired memory from 164.3 to
+  134.5 GiB.
 
 - **A model that does not fit gets the floor window.** A plan whose verdict
   was "does not fit" became "no limit", so the 27B picked by hand on a 16
@@ -183,10 +174,12 @@ All notable user-facing changes to MTPLX. The format is based on
   weights, the 3 GiB runtime transient, the 1 GiB bank floor and one KV
   block together, but can fund the weights, the transient plus a 256 MiB
   margin and one block at the dense KV width, the plan admits the model
-  with the bank floor at zero (restores come from the SSD tier). Measured on
-  Bonsai 2 27B: the 16 GiB class admits 8,192 tokens (peak 11.78 to
-  11.80 GiB under the 12 GiB budget). Every plan that funds the floor is
-  unchanged.
+  with the bank floor at zero (restores come from the SSD tier). The rule
+  applies only to a pack that stamps its own measured memory table
+  (`memory_evidence` in its runtime contract), as the Bonsai pack does; any
+  other pack is refused as before. Measured on Bonsai 2 27B: the 16 GiB class
+  admits 8,192 tokens (peak 11.78 to 11.80 GiB under the 12 GiB budget).
+  Every plan that funds the floor is unchanged.
 
 - **The SSD conversation-cache size follows RAM from the terminal too.**
   `mtplx serve` defaulted to a flat 100 GB, so a 16 GB Mac got a 100 GB
@@ -424,13 +417,14 @@ All notable user-facing changes to MTPLX. The format is based on
 - **The two new official packs no longer read "needs contract repair".**
   `mtplx inspect` and `mtplx serve` told users to rebuild Bonsai 2 and
   Flash-Next Optimized Quality with Forge, because each pack's exactness
-  record is still open, and `mtplx inspect` exited with code 3. They now say
-  that the pack is an official MTPLX pack whose exactness measurement is not
-  published yet and that it runs, and `mtplx inspect` exits with 0.
-- **A pack that needs a newer MTPLX is refused before it loads.** When a
-  pack's `min_engine_version` is newer than the running engine, `mtplx
-  serve` and `mtplx inspect` stop with "This model needs MTPLX <version> or
-  later (you have <version>). Update MTPLX, then try again." No unsafe flag
+  record is still open, and `mtplx inspect` exited with code 3. They now show
+  "Official MTPLX pack, qualification pending" while the exactness
+  measurement is still to be published, the pack runs, and `mtplx inspect`
+  exits with 0.
+- **A pack that needs a newer MTPLX is refused before any weight is read.**
+  When a pack's `min_engine_version` is newer than the running engine,
+  `mtplx serve` and `mtplx inspect` stop with "This model needs MTPLX X or
+  later (you have 2.12.0). Update MTPLX, then try again." No unsafe flag
   overrides it.
 - **The free-disk check before a download matches the download.** The app
   asked for 2.5 times a model's download size, about 396 GiB for Flash-Next
@@ -480,10 +474,6 @@ All notable user-facing changes to MTPLX. The format is based on
 - **`mtplx inspect` reports whether a pack takes images,** and a pack that
   keeps its vision tower in one weight file with no index, like Prism ML's,
   is served with vision.
-- **`MTPLX_MLX_COMMAND_BUFFER_MB`** (off by default) lifts MLX's 50 MiB
-  command-buffer rule. At 128K it measured 65.9 tok/s against 51 to 54,
-  but it raised the process peak from 92.0 to 103.7 GB at 16K, so it is an
-  operator setting, not a default.
 
 ## [2.11.3] - 2026-09-17
 
