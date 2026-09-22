@@ -484,6 +484,14 @@ All notable user-facing changes to MTPLX. The format is based on
   #506). It counted only declined windows, and only while the compiled
   verifier was being traced, so a healthy daemon showed 96 declines and no
   accepts.
+- **Quality packs built with Forge carry the Flash-Next sampler settings.**
+  A pack built with the `flash-next-optimized-quality` recipe now records
+  temperature 1.0, top-p 0.95 and top-k 20 in its `mtplx_runtime.json`, as
+  the two Flash-Next Speed packs do.
+- **The `--reasoning-effort` help lists each model's levels and default.**
+  Qwen 3.8 27B offers `xhigh`, `medium` and `low`, and Bonsai 2 offers
+  `xhigh` and `medium`; both default to `medium`. Flash-Next defaults to
+  `xhigh` in chat and to `medium` in coding-agent configurations.
 - **`mtplx inspect` reports whether a pack takes images,** and a pack that
   keeps its vision tower in one weight file with no index, like Prism ML's,
   is served with vision.
