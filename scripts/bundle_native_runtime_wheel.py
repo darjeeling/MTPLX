@@ -11,6 +11,7 @@ from email.policy import compat32
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -30,6 +31,28 @@ def sign_mach_o(name: str, data: bytes, identity: str) -> bytes:
     with tempfile.TemporaryDirectory() as scratch:
         path = Path(scratch) / Path(name).name
         path.write_bytes(data)
+        # CMake's build-tree rpaths include the builder's private venv.
+        # Wheels must resolve both libraries from their installed package
+        # layout before Developer ID signing freezes the load commands.
+        load_commands = subprocess.check_output(
+            ["/usr/bin/otool", "-l", str(path)], text=True
+        )
+        rpaths = re.findall(
+            r"cmd LC_RPATH\n\s+cmdsize \d+\n\s+path (.+?) \(offset \d+\)",
+            load_commands,
+        )
+        for rpath in rpaths:
+            if Path(rpath).is_absolute():
+                subprocess.run(
+                    ["/usr/bin/install_name_tool", "-delete_rpath", rpath, str(path)],
+                    check=True, capture_output=True, text=True,
+                )
+        for rpath in ("@loader_path", "@loader_path/../mlx/lib"):
+            if rpath not in rpaths:
+                subprocess.run(
+                    ["/usr/bin/install_name_tool", "-add_rpath", rpath, str(path)],
+                    check=True, capture_output=True, text=True,
+                )
         subprocess.run(
             ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp",
              "--sign", identity, str(path)],

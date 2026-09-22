@@ -82,11 +82,22 @@ def _run_bundler(monkeypatch, pure: Path, native: Path, out: Path, *extra: str) 
     return out / "mtplx-9.9.9-cp314-cp314-macosx_15_0_arm64.whl"
 
 
-def _fake_codesign(calls: list[list[str]], *, timestamp: bool = True):
+def _fake_native_tools(calls: list[list[str]], *, timestamp: bool = True):
     def run(cmd, **kwargs):
-        assert cmd[0] == "/usr/bin/codesign", cmd
         calls.append(list(cmd))
         target = Path(cmd[-1])
+        if cmd[0] == "/usr/bin/otool":
+            rpaths = ["/build/private-venv/mlx/lib"]
+            if target.suffix == ".so":
+                rpaths.append("@loader_path")
+            details = "".join(
+                f"          cmd LC_RPATH\n      cmdsize 64\n         path {rpath} (offset 12)\n"
+                for rpath in rpaths
+            )
+            return subprocess.CompletedProcess(cmd, 0, details, "")
+        if cmd[0] == "/usr/bin/install_name_tool":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        assert cmd[0] == "/usr/bin/codesign", cmd
         if "--sign" in cmd:
             target.write_bytes(b"SIGNED:" + target.read_bytes())
             return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -109,7 +120,7 @@ def _record_hash(data: bytes) -> str:
 def test_native_mach_o_members_are_signed_and_the_record_follows(tmp_path, monkeypatch) -> None:
     pure, native = _inputs(tmp_path)
     calls: list[list[str]] = []
-    monkeypatch.setattr(bundler.subprocess, "run", _fake_codesign(calls))
+    monkeypatch.setattr(bundler.subprocess, "run", _fake_native_tools(calls))
     bundled = _run_bundler(
         monkeypatch, pure, native, tmp_path / "out", "--codesign-identity", "Developer ID Application: Test"
     )
@@ -131,12 +142,22 @@ def test_native_mach_o_members_are_signed_and_the_record_follows(tmp_path, monke
     for call in sign_calls:
         assert call[1:6] == ["--force", "--options", "runtime", "--timestamp", "--sign"]
         assert call[6] == "Developer ID Application: Test"
+        edits = [
+            edit for edit in calls
+            if edit[0] == "/usr/bin/install_name_tool" and edit[-1] == call[-1]
+        ]
+        expected = [["-delete_rpath", "/build/private-venv/mlx/lib"]]
+        if Path(call[-1]).suffix == ".dylib":
+            expected.append(["-add_rpath", "@loader_path"])
+        expected.append(["-add_rpath", "@loader_path/../mlx/lib"])
+        assert [edit[1:-1] for edit in edits] == expected
+        assert all(calls.index(edit) < calls.index(call) for edit in edits)
 
 
 def test_without_an_identity_the_members_are_packaged_unchanged(tmp_path, monkeypatch) -> None:
     pure, native = _inputs(tmp_path)
     calls: list[list[str]] = []
-    monkeypatch.setattr(bundler.subprocess, "run", _fake_codesign(calls))
+    monkeypatch.setattr(bundler.subprocess, "run", _fake_native_tools(calls))
     bundled = _run_bundler(monkeypatch, pure, native, tmp_path / "out")
     with zipfile.ZipFile(bundled) as archive:
         assert archive.read(EXT) == b"MACHO-EXT"
@@ -146,7 +167,7 @@ def test_without_an_identity_the_members_are_packaged_unchanged(tmp_path, monkey
 
 def test_a_signature_without_a_secure_timestamp_fails_the_build(tmp_path, monkeypatch) -> None:
     pure, native = _inputs(tmp_path)
-    monkeypatch.setattr(bundler.subprocess, "run", _fake_codesign([], timestamp=False))
+    monkeypatch.setattr(bundler.subprocess, "run", _fake_native_tools([], timestamp=False))
     with pytest.raises(RuntimeError, match="secure timestamp"):
         _run_bundler(
             monkeypatch, pure, native, tmp_path / "out", "--codesign-identity", "Developer ID Application: Test"
