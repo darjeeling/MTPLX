@@ -250,7 +250,11 @@ def test_stamping_measured_results_lifts_the_pending_status(tmp_path):
         exactness={"top1_agreement": 1.0, "kl_mean": 3e-6},
         exactness_status="passed",
         mtp_depth_default=3,
-        speed_evidence={"depth": 3, "tok_s": [60.0]},
+        speed_evidence={"status": "measured", "rows": [{
+            "hardware": "synthetic test fixture", "context_tokens": 4096,
+            "ar_tokens_per_second": 40.0, "mtp_tokens_per_second": 60.0,
+            "accepted_tokens_per_step": 2.0,
+        }]},
         verified_on={"timestamp": "2026-09-18T05:00:00-0700"},
     )
     assert contract["mtp_depth_default"] == 3

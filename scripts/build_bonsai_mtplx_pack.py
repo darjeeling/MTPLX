@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import struct
@@ -203,6 +204,7 @@ def write_float16_head(source: Path, target: Path, *, mode: str) -> dict[str, An
 
 def build_config(source_config: dict[str, Any], mtp_pack_config: dict[str, Any] | None) -> dict[str, Any]:
     config = json.loads(json.dumps(source_config))
+    config["model_family"] = MODEL_FAMILY
     text = config.setdefault("text_config", {})
     text["mtp_num_hidden_layers"] = 1
     text["mtp_use_dedicated_embeddings"] = False
@@ -271,13 +273,12 @@ def build_runtime_contract(
             mtp_prequantized=True,
         )
     return {
+        **identity_stamps(),
         "arch_id": "qwen3-next-mtp",
         "artifact_role": "mtplx-pack",
         "base_trunk": BASE_TRUNK,
         "source_repo": SOURCE_REPO,
         "public_model_id": PUBLIC_MODEL_ID,
-        "model_family": MODEL_FAMILY,
-        "min_engine_version": MIN_ENGINE_VERSION,
         "mtplx_version": mtplx_version,
         "precision_variant": "fp16",
         "precision_policy": {
@@ -310,6 +311,19 @@ def build_runtime_contract(
     }
 
 
+def identity_stamps() -> dict[str, Any]:
+    """Trunk family and container are different contracts. Keep both explicit."""
+    return {
+        "pack_name": PACK_NAME,
+        "hf_repo": HF_REPO,
+        "public_model_id": PUBLIC_MODEL_ID,
+        "model_family": MODEL_FAMILY,
+        "min_engine_version": MIN_ENGINE_VERSION,
+        "quantization": {"format": MODEL_TYPE, "bits": 2, "group_size": 128,
+                         "mode": "affine", "weight_values": "ternary"},
+    }
+
+
 def build_index(header: dict[str, Any], total_size: int) -> dict[str, Any]:
     return {
         "metadata": {"total_size": int(total_size), "format": "mlx"},
@@ -317,10 +331,49 @@ def build_index(header: dict[str, Any], total_size: int) -> dict[str, Any]:
     }
 
 
-def render_card(*, source_sha: str, head_note: str) -> str:
+def render_speed_table(evidence: dict[str, Any] | None) -> str:
+    if evidence is None:
+        return "No speed measurements supplied. No throughput or MTP speed-up is claimed."
+    if evidence.get("status") != "measured" or not evidence.get("rows"):
+        raise PackBuildError("speed JSON requires status='measured' and nonempty rows")
+    lines = ["| Mac | Context tokens | AR tokens/s | MTP tokens/s | Accepted tokens/step |",
+             "| :--- | ---: | ---: | ---: | ---: |"]
+    for row in evidence["rows"]:
+        keys = ("context_tokens", "ar_tokens_per_second", "mtp_tokens_per_second", "accepted_tokens_per_step")
+        if not isinstance(row, dict) or not isinstance(row.get("hardware"), str) or not row["hardware"].strip():
+            raise PackBuildError("each speed row needs hardware and measured values")
+        if any(isinstance(row.get(k), bool) or not isinstance(row.get(k), (int, float))
+               or not math.isfinite(row[k]) or row[k] < 0
+               or (row[k] == 0 and k != "accepted_tokens_per_step") for k in keys):
+            raise PackBuildError("speed values must be finite and positive (accepted tokens may be zero)")
+        hardware = row["hardware"].replace("|", "\\|").replace("\n", " ")
+        lines.append("| " + " | ".join([hardware, *(str(row[k]) for k in keys)]) + " |")
+    return "\n".join(lines)
+
+
+def render_memory_table(evidence: dict[str, Any] | None) -> str:
+    if evidence is None:
+        return (
+            "| RAM (GiB) | Planner | Measured peak (bytes / GiB) | Context guidance |\n"
+            "| ---: | :--- | :--- | :--- |\n"
+            "| 16 | Pending | Pending | Not established |\n"
+            "| 18 | Pending | Pending | Not established |\n"
+            "| 24 | Pending | Pending | Not established |"
+        )
+    from scripts.bonsai_memory_table import SCHEMA, markdown_table
+
+    if evidence.get("schema") != SCHEMA or not evidence.get("rows"):
+        raise PackBuildError("memory JSON must be produced by bonsai_memory_table.py")
+    return markdown_table(evidence).rstrip()
+
+
+def render_card(*, source_sha: str, head_note: str,
+                speed_evidence: dict[str, Any] | None = None,
+                memory_evidence: dict[str, Any] | None = None) -> str:
     return CARD_TEMPLATE.format(
-        source_sha=source_sha, head_note=head_note, hf_repo=HF_REPO,
-        min_engine_version=MIN_ENGINE_VERSION,
+        source_sha=source_sha, head_note=head_note,
+        speed_table=render_speed_table(speed_evidence),
+        memory_table=render_memory_table(memory_evidence),
     )
 
 
@@ -347,9 +400,10 @@ tags:
 - coding
 ---
 
-# Bonsai 2 27B MTPLX Optimized Speed
+# Ternary Bonsai 2 27B MTPLX Optimized Speed
 
-A compact 27B-class vision-language model for Macs, with a draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
+A 27B-class vision-language model for Apple Silicon Macs, with a
+draft head for speculative decoding. This pack is for [MTPLX](https://mtplx.com).
 
 **Full credit for the model goes to [Prism ML](https://prismml.com).** The
 language model and the vision tower in this pack are Prism ML's
@@ -363,14 +417,14 @@ for the method, the benchmarks and the limitations of the model itself.
 
 | File | What it is |
 | :--- | :--- |
-| `model.safetensors` | Prism ML's file, unchanged (sha256 `{source_sha}`). It holds the ternary language model and the float16 vision tower. |
+| `model.safetensors` | Prism ML's file, unchanged (sha256 `{source_sha}`). It holds the ternary language model (7.67 GB) and the vision tower (0.92 GB, float16). |
 | `mtp.safetensors` | The multi-token prediction draft head of Qwen3.8-27B, from the MTPLX Qwen 3.8 27B pack. {head_note} |
 | `hadamard.json`, `config.json` | Prism ML's rotation metadata, unchanged, plus the MTPLX head contract in `config.json`. |
 | `mtplx_runtime.json` | Sampler defaults and the MTPLX runtime contract. |
 | `MTPLX_PACK_MANIFEST.json` | The sha256 of every file and where each one came from. |
 
-This is a vision-language model. Image input works in MTPLX the same way it
-does for the other Qwen 3.8 27B packs.
+This is a vision-language model. The pack retains Prism ML's vision tower
+and processor metadata. Image quality needs its own runtime validation.
 
 ## What MTPLX adds
 
@@ -382,19 +436,24 @@ metadata or vision tower is missing.
 
 The draft head lets MTPLX propose several tokens per step and verify them with
 the full model. Verification uses exact speculative sampling, so the output
-distribution is the same as decoding one token at a time. The head was trained
-on the original Qwen3.8-27B, not on the ternary model, so it agrees with Bonsai
-less often than with the model it was trained on. If the head does not make
-decoding faster on your Mac, turn speculative decoding off in MTPLX. The output
-distribution is the same either way.
+distribution follows the target model. The head comes from the original
+Qwen3.8-27B. Its acceptance rate and useful depth on Bonsai require measurement.
+
+## Loader parity
+
+The S1 Bonsai report (2026-09-18) measured mean KL divergence **2.6e-6**
+against Prism ML's own bundled runtime in the float16 comparison. This was
+a synthetic-pack loader check described in S1, not a new full-model quality
+benchmark or proof of identical output tokens. The pack's full-model parity
+status is recorded separately in `mtplx_runtime.json`; this historical figure
+does not mark that status as passed. Reference-float32 and image parity are
+separate checks.
 
 ## Speed
 
-<!-- MTPLX maintainers: fill this table from the measured runs before publishing. -->
+<!-- Filled only from an explicitly supplied --speed-evidence-json measurement. -->
 
-| Mac | Context | Decode without the head | Decode with the head | Accepted tokens per step |
-| :--- | ---: | ---: | ---: | ---: |
-| to be measured | | | | |
+{speed_table}
 
 ## How to run it
 
@@ -403,10 +462,10 @@ pip install mtplx
 mtplx start
 ```
 
-Pick Bonsai 2 27B in the model list, or pass
-`--model {hf_repo}` to `mtplx serve`.
-The macOS app lists it in the model picker. This pack requires MTPLX
-{min_engine_version} or newer.
+Pass `--model Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` to
+`mtplx serve`. The served id is `mtplx-bonsai-2-27b-optimized-speed`.
+This pack requires MTPLX **2.11.4 or newer**. Its trunk family is `qwen3_8`;
+`prism_hadamard_qwen35` identifies the Prism quantization container and loader.
 
 ## Recommended settings
 
@@ -418,19 +477,29 @@ default.
 | Thinking | 1.0 | 0.95 | 20 | 0.0 |
 | Non-thinking | 0.7 | 0.80 | 20 | 1.5 |
 
-The pack uses the `qwen3_8` behavior family. MTPLX supplies the reasoning
-defaults from that runtime policy; explicit user settings take precedence.
+The model thinks at the `xhigh` effort level by default. Use `medium` for
+shorter answers. Prism ML states that `low` is not supported.
 
 ## Memory
 
-The pack manifest records the actual file sizes. Catalog memory figures are
-provisional until the measured memory table is available. The context cache
-grows with the conversation; MTPLX plans context from the artifact and the
-memory available on your Mac.
+RAM recommendations are pending measured evidence. Generate the table with
+`scripts/bonsai_memory_table.py` and pass its `memory.json` to the builder's
+`--memory-json` option. GiB means 1,073,741,824 bytes.
+
+{memory_table}
+
+The measurement includes the resident draft head and vision weights, text
+prefill, and AR decode. It does not cover MTP verification, image activations,
+or a populated session bank. MLX memory limits are guidelines; completion
+alone does not prove a small-Mac fit. A peak above the engine budget fails
+that budget check. A refused planner's 4096-token field is a fallback, not
+an admitted context. A physical small-Mac check is still required before a
+RAM recommendation.
 
 ## License and attribution
 
-Apache 2.0. `LICENSE` and `NOTICE.txt` are carried from Prism ML's pack.
+Apache 2.0. [LICENSE](LICENSE) and [NOTICE.txt](NOTICE.txt) are carried
+verbatim from Prism ML's pack.
 This pack contains Prism ML's Ternary Bonsai 2 27B (Copyright 2026 Prism ML,
 Inc.), which is built from Qwen3.8-27B (Copyright 2026 Alibaba Cloud), and the
 Qwen3.8-27B draft head as packed for MTPLX.
@@ -455,9 +524,15 @@ def build_pack(
     link_mode: str = "hardlink",
     move_existing_aside: bool = False,
     verify_source_hash: bool = True,
+    speed_evidence: dict[str, Any] | None = None,
+    memory_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = source.expanduser().resolve()
-    output = output.expanduser()
+    output = output.expanduser().resolve()
+    _separate_output(source, output)
+    _separate_output(mtp_source.expanduser().resolve().parent, output)
+    render_speed_table(speed_evidence)
+    render_memory_table(memory_evidence)
     checked = check_source(source)
 
     source_sha = None
@@ -535,16 +610,14 @@ def build_pack(
     runtime_contract = build_runtime_contract(
         mtplx_version=_mtplx_version(), provenance=provenance, head=head_quant
     )
+    _record_card_evidence(output, runtime_contract, speed_evidence, memory_evidence)
     (output / "mtplx_runtime.json").write_text(
         json.dumps(runtime_contract, indent=2) + "\n", encoding="utf-8"
     )
-    head_note = (
-        "Stored in float16 to match the model."
-        if head_report["action"] != "cast_to_float16"
-        else "Cast once from bfloat16 to float16 to match the model."
-    )
     (output / "README.md").write_text(
-        render_card(source_sha=source_sha or published or "see the manifest", head_note=head_note),
+        render_card(source_sha=source_sha or published or "see the manifest",
+                    head_note=_head_note(output), speed_evidence=speed_evidence,
+                    memory_evidence=memory_evidence),
         encoding="utf-8",
     )
 
@@ -565,14 +638,108 @@ def build_pack(
             "size": path.stat().st_size,
             "placed_by": actions.get(path.name, "written"),
         }
-    manifest = {
-        "pack": PACK_NAME, "public_model_id": PUBLIC_MODEL_ID,
-        "model_family": MODEL_FAMILY, "min_engine_version": MIN_ENGINE_VERSION,
-        "provenance": provenance, "files": manifest_files,
-    }
+    manifest = {**identity_stamps(), "pack": PACK_NAME, "provenance": provenance, "files": manifest_files}
     (output / "MTPLX_PACK_MANIFEST.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+    return manifest
+
+
+def _separate_output(source: Path, output: Path) -> None:
+    if source == output or source in output.parents or output in source.parents:
+        raise PackBuildError("output must be separate from the source, not the source or its parent/child")
+
+
+def _head_note(pack: Path) -> str:
+    quant = mtp_quantization_from_header(pack / "mtp.safetensors")
+    if quant:
+        return f"Packed at {quant['bits']} bits, group {quant['group_size']}, with float16 scales and auxiliary tensors."
+    return "Stored in float16 to match the model."
+
+
+def _record_card_evidence(pack: Path, contract: dict[str, Any],
+                          speed: dict[str, Any] | None,
+                          memory: dict[str, Any] | None) -> None:
+    if speed is not None:
+        render_speed_table(speed)
+        contract["speed_evidence"] = speed
+    if memory is not None:
+        render_memory_table(memory)
+        weights = {str(p.relative_to(pack)): p.stat().st_size
+                   for p in sorted(pack.rglob("*.safetensors"))}
+        if memory.get("pack", {}).get("weight_files_bytes") != weights:
+            raise PackBuildError("memory evidence weight files do not match this pack")
+        contract["memory_evidence"] = memory
+
+
+def _refresh_metadata_manifest(pack: Path, manifest: dict[str, Any]) -> None:
+    manifest.update(identity_stamps(), pack=PACK_NAME)
+    for name in ("config.json", "mtplx_runtime.json", "README.md"):
+        path = pack / name
+        manifest.setdefault("files", {})[name] = {
+            "sha256": sha256_file(path), "size": path.stat().st_size, "placed_by": "stamped",
+        }
+    (pack / "MTPLX_PACK_MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def restamp_pack(source: Path, output: Path, *, link_mode: str = "hardlink",
+                 speed_evidence: dict[str, Any] | None = None,
+                 memory_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Publishable identity in a NEW directory; source metadata is never linked.
+
+    All weight files are byte-for-byte hard links or copies. Other carried
+    files, including the license and notice, are independent verbatim copies.
+    Unknown metadata/provenance and existing parity verdicts are preserved.
+    """
+    source, output = source.expanduser().resolve(), output.expanduser().resolve()
+    _separate_output(source, output)
+    if output.exists():
+        raise PackBuildError(f"{output} already exists; --restamp requires a new directory")
+    checked = check_source(source)
+    verify_built_pack(source)
+    manifest = json.loads((source / "MTPLX_PACK_MANIFEST.json").read_text(encoding="utf-8"))
+    contract = json.loads((source / "mtplx_runtime.json").read_text(encoding="utf-8"))
+    _record_card_evidence(source, contract, speed_evidence, memory_evidence)
+    # Refuse symlinked directory trees, whose contents might escape this pack.
+    paths = sorted(source.rglob("*"))
+    if any(path.is_dir() and path.is_symlink() for path in paths):
+        raise PackBuildError("restamp does not follow symlinked directories")
+    output.mkdir(parents=True)
+    new_files = {}
+    for path in paths:
+        relative = path.relative_to(source)
+        target = output / relative
+        if path.is_dir():
+            target.mkdir(exist_ok=True)
+            continue
+        if not path.is_file():
+            raise PackBuildError(f"unsupported pack entry: {relative}")
+        if str(relative) in {"config.json", "mtplx_runtime.json", "README.md", "MTPLX_PACK_MANIFEST.json"}:
+            continue
+        action = place_file(path.resolve(), target, mode=link_mode if path.suffix == ".safetensors" else "copy")
+        digest = sha256_file(target)
+        prior = manifest.get("files", {}).get(str(relative), {}).get("sha256")
+        if prior is not None and digest != prior:
+            raise PackBuildError(f"source manifest checksum mismatch: {relative}")
+        new_files[str(relative)] = {"sha256": digest, "size": target.stat().st_size, "placed_by": action}
+    config = checked["config"]
+    config["model_family"] = MODEL_FAMILY
+    (output / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    contract.update(identity_stamps())
+    contract["restamp_provenance"] = {
+        "source_directory": str(source),
+        "source_manifest_sha256": sha256_file(source / "MTPLX_PACK_MANIFEST.json"),
+        "restamped_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "weights_changed": False,
+    }
+    (output / "mtplx_runtime.json").write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    (output / "README.md").write_text(render_card(
+        source_sha=new_files["model.safetensors"]["sha256"], head_note=_head_note(output),
+        speed_evidence=speed_evidence, memory_evidence=memory_evidence,
+    ), encoding="utf-8")
+    manifest["files"] = new_files
+    _refresh_metadata_manifest(output, manifest)
+    verify_built_pack(output)
     return manifest
 
 
@@ -604,6 +771,7 @@ def stamp_pack(
     mtp_depth_default: int | None = None,
     speed_evidence: dict[str, Any] | None = None,
     verified_on: dict[str, Any] | None = None,
+    memory_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Record measured results in mtplx_runtime.json after the GPU runs.
 
@@ -616,6 +784,8 @@ def stamp_pack(
     pack = pack.expanduser()
     contract_path = pack / "mtplx_runtime.json"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract.update(identity_stamps())
+    _record_card_evidence(pack, contract, speed_evidence, memory_evidence)
     if exactness is not None or exactness_status is not None:
         baseline = dict(contract.get("exactness_baseline") or {})
         if exactness is not None:
@@ -628,8 +798,6 @@ def stamp_pack(
             raise PackBuildError("mtp_depth_default is outside 1..mtp_depth_max")
         contract["mtp_depth_default"] = int(mtp_depth_default)
         contract.pop("mtp_depth_default_status", None)
-    if speed_evidence is not None:
-        contract["speed_evidence"] = speed_evidence
     if verified_on is not None:
         contract["verified_on"] = verified_on
     aside = pack.parent / "_aside"
@@ -641,12 +809,12 @@ def stamp_pack(
     manifest_path = pack / "MTPLX_PACK_MANIFEST.json"
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest.setdefault("files", {})["mtplx_runtime.json"] = {
-            "sha256": sha256_file(contract_path),
-            "size": contract_path.stat().st_size,
-            "placed_by": "stamped",
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        if speed_evidence is not None or memory_evidence is not None:
+            card = render_card(source_sha=manifest["files"]["model.safetensors"]["sha256"],
+                               head_note=_head_note(pack), speed_evidence=speed_evidence,
+                               memory_evidence=memory_evidence)
+            (pack / "README.md").write_text(card, encoding="utf-8")
+        _refresh_metadata_manifest(pack, manifest)
     return contract
 
 
@@ -654,24 +822,35 @@ def _read_json_arg(value: str | None) -> dict[str, Any] | None:
     if not value:
         return None
     text = Path(value).expanduser().read_text(encoding="utf-8").strip()
+    if not text:
+        raise PackBuildError("evidence JSON is empty")
     # Cell scripts print one JSON line last; accept a whole log file.
-    return json.loads(text.splitlines()[-1]) if "\n" in text else json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = json.loads(text.splitlines()[-1])
+    if not isinstance(parsed, dict):
+        raise PackBuildError("evidence must be a JSON object")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--stamp",
         default=None,
         metavar="PACK",
         help="record measured results in an already built pack instead of building",
     )
+    modes.add_argument("--restamp", metavar="PACK", help="copy metadata and link/copy weights into a new --out directory")
     parser.add_argument("--exactness-json", default=None)
     parser.add_argument("--exactness-status", default=None, help="for example: passed")
     parser.add_argument("--mtp-depth-default", type=int, default=None)
     parser.add_argument("--speed-evidence-json", default=None)
+    parser.add_argument("--memory-json", default=None, help="memory.json from bonsai_memory_table.py")
     parser.add_argument("--source", default=str(DEFAULT_SOURCE))
-    parser.add_argument("--output", default=str(MODELS_DIR / PACK_NAME))
+    parser.add_argument("--out", "--output", dest="output", default=None)
     parser.add_argument("--mtp-source", default=None)
     parser.add_argument("--link-mode", choices=("hardlink", "copy"), default="hardlink")
     parser.add_argument("--move-existing-aside", action="store_true")
@@ -681,6 +860,21 @@ def main(argv: list[str] | None = None) -> int:
         help="do not hash the 8.6 GB source file (the manifest then has no trunk sha256)",
     )
     args = parser.parse_args(argv)
+    if args.restamp:
+        if not args.output or args.move_existing_aside:
+            parser.error("--restamp requires an explicit new --out and does not move existing directories")
+        if args.exactness_json or args.exactness_status or args.mtp_depth_default is not None:
+            parser.error("--restamp preserves parity and MTP depth; use --stamp on the NEW copy for those results")
+        try:
+            manifest = restamp_pack(Path(args.restamp), Path(args.output), link_mode=args.link_mode,
+                                    speed_evidence=_read_json_arg(args.speed_evidence_json),
+                                    memory_evidence=_read_json_arg(args.memory_json))
+        except (PackBuildError, OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"restamped": args.output, "pack": manifest["pack"]}))
+        return 0
+    args.output = args.output or str(MODELS_DIR / PACK_NAME)
     if args.stamp:
         try:
             contract = stamp_pack(
@@ -689,6 +883,7 @@ def main(argv: list[str] | None = None) -> int:
                 exactness_status=args.exactness_status,
                 mtp_depth_default=args.mtp_depth_default,
                 speed_evidence=_read_json_arg(args.speed_evidence_json),
+                memory_evidence=_read_json_arg(args.memory_json),
                 verified_on={
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "hardware": __import__("platform").platform(),
@@ -707,8 +902,10 @@ def main(argv: list[str] | None = None) -> int:
             link_mode=args.link_mode,
             move_existing_aside=args.move_existing_aside,
             verify_source_hash=not args.skip_source_hash,
+            speed_evidence=_read_json_arg(args.speed_evidence_json),
+            memory_evidence=_read_json_arg(args.memory_json),
         )
-    except PackBuildError as exc:
+    except (PackBuildError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(
