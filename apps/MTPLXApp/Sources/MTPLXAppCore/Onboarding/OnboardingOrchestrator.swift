@@ -562,11 +562,28 @@ public final class OnboardingOrchestrator: ObservableObject {
             skipTuneForModelDefaults()
             return
         }
-        // Used by the ThermalForge-missing fallback. depth=2 is the
-        // codebase's documented safe Qwen heuristic.
+        // A pack's measured default outranks the generic Qwen heuristic.
+        // In particular, Bonsai declares D1; choosing D2 here made skipping
+        // onboarding tuning slower than the same model's CLI defaults.
+        var candidate = TuneCandidate.d2
+        if let modelPath = resolvedTuneModelPath(),
+           let metadata = MTPLXRuntimeMetadata.read(
+               at: URL(fileURLWithPath: NSString(string: modelPath).expandingTildeInPath)
+                   .appendingPathComponent("mtplx_runtime.json").path
+           ) {
+            if metadata.rawJSON["recommended_generation_mode"] as? String == "ar" {
+                candidate = .ar
+            } else if let depth = metadata.rawJSON["mtp_depth_default"] as? Int
+                ?? metadata.rawJSON["recommended_mtp_depth"] as? Int,
+                depth > 0,
+                depth <= (metadata.mtpDepthMax ?? 3),
+                let declared = state.tuneCandidates.first(where: { $0.controlValue == depth }) {
+                candidate = declared
+            }
+        }
         tuneResult = TuneResult(
-            bestCandidate: .d2,
-            bestDepth: 2,
+            bestCandidate: candidate,
+            bestDepth: candidate.controlValue,
             bestTokS: 0,
             bestMultiplierVsAR: 0,
             allCandidates: []

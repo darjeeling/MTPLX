@@ -9869,6 +9869,32 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertEqual(orchestrator.tuneResult?.allCandidates, [])
     }
 
+    @MainActor
+    func testOnboardingSkipTuneHonorsTheInstalledPacksDefault() throws {
+        let cases: [([String: Any], TuneCandidate)] = [
+            (["mtp_depth_default": 1], .d1),
+            (["recommended_mtp_depth": 3], .d3),
+            (["recommended_generation_mode": "ar", "mtp_depth_default": 1], .ar),
+            (["mtp_depth_default": 9], .d2),
+        ]
+        for (values, expected) in cases {
+            let model = temporaryDirectory().appendingPathComponent("Bonsai-2-27B")
+            try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+            var metadata: [String: Any] = ["model_family": "qwen3_8", "mtp_depth_max": 3]
+            metadata.merge(values) { _, value in value }
+            try JSONSerialization.data(withJSONObject: metadata)
+                .write(to: model.appendingPathComponent("mtplx_runtime.json"))
+            let orchestrator = OnboardingOrchestrator(
+                initialState: OnboardingFeatureState(step: .tune, pick: .local(path: model.path))
+            )
+            orchestrator.skipTuneWithSafeDefault()
+            XCTAssertEqual(orchestrator.tuneResult?.bestCandidate, expected)
+            XCTAssertEqual(orchestrator.tuneResult?.bestDepth, expected.controlValue)
+            XCTAssertFalse(orchestrator.isTuning)
+            XCTAssertEqual(orchestrator.tuneResult?.allCandidates, [])
+        }
+    }
+
     func testAppConfigurationBackCompatWithoutOnboardingFields() throws {
         let legacy = """
         {
