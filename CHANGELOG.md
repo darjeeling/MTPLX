@@ -4,7 +4,12 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [2.11.4] - 2026-09-21
+## [2.12.0] - Unreleased
+
+This entry is a release draft. The saved September 21–22 measurements below
+precede the final 2.12.0 package; final regression, native-sampler image,
+public model-download and signed app/client gates remain open.
+See [the release draft](docs/releases/v2.12.0.md) for the exact evidence and limits.
 
 ### Added
 
@@ -16,10 +21,12 @@ All notable user-facing changes to MTPLX. The format is based on
   its vision tower is refused), with image input. The MTPLX pack
   `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` carries Prism ML's weights
   byte for byte and adds the Qwen3.8-27B draft head; served id
-  `mtplx-bonsai-2-27b-optimized-speed`, engine floor 2.11.4. The draft head
-  is on by default at depth 1: through the daemon on an M5 Max it measured
-  47 to 51 tok/s against 27 to 40 for plain decoding on code and reasoning
-  prompts, thinking on and off, with 58 to 75 percent of drafts accepted.
+  `mtplx-bonsai-2-27b-optimized-speed`, engine floor 2.12.0. The draft head
+  is on by default at depth 1. The saved quiet-window M5 Max run measured
+  50.0 tok/s at 4K and 42.6 at 16K, against 38.8 and 34.3 for plain decoding.
+  The dense 27B measured 49.8 and 49.4: Bonsai ties it at 4K and trails at
+  16K while using about half the memory. These are candidate measurements,
+  not final-package or older-Mac speed claims.
   `scripts/build_bonsai_mtplx_pack.py` builds, stamps and restamps the pack
   from measured evidence; `scripts/bonsai_memory_table.py` measures the
   peak memory per RAM class.
@@ -31,7 +38,10 @@ All notable user-facing changes to MTPLX. The format is based on
   its own result into the pack and
   `scripts/build_flash_next_quality_pack.sh` builds, verifies with a full
   load and smoke-tests chat, a tool call and an image in one command.
-  Recommended first on Macs with 256 GB or more. The built pack follows.
+  Recommended first on modern Macs with 256 GB or more. Full-size artifact,
+  download and runtime qualification remain separate gates. The automatic
+  n-gram policy keeps the table resident from 160 GiB upward, including
+  256/512 GB machines, and counts it in the memory plan.
 
 - **Compiled verify route for image requests on Flash-Next.** An image
   request used to fall back to eager verification for the whole
@@ -52,7 +62,9 @@ All notable user-facing changes to MTPLX. The format is based on
   shape of the pack; a miss removes the row count with the reason in the
   demotion ledger. Measured on an M5 Max: nothing exact beats stock at one or
   two rows; 1.01 to 1.04x on the whole step at four rows, within a 2 percent
-  noise floor, so the switch stays off until measured through the daemon.
+  noise floor. The later daemon measurement was 49.0 tok/s at depth 3
+  with the kernel, versus 47.2 without it and 50.0 at the default depth 1.
+  It does not accelerate depth 1, so it remains off by default.
 
 - **Packs can declare their generation mode.** `recommended_generation_mode`
   (`mtp` or `ar`), with a reason and the measurement behind it, in the
@@ -102,11 +114,13 @@ All notable user-facing changes to MTPLX. The format is based on
 ### Changed
 
 - **Speed: the decode and prompt-processing work of September 18 to 20.**
-  Measured 2.11.3 against 2.11.4 on an M5 Max, same runtime, alternating
-  boots, Flash-Next Optimized Speed, 512 generated tokens: 65,502-token
-  prompt, decode 64.0 to 76.0 tok/s, prompt processing 900 to 1,192 tok/s,
-  first token 73.0 to 55.2 s; 4,061-token prompt, decode 89.9 to 90.0,
-  prompt processing 906 to 1,234, first token 4.56 to 3.37 s. Saved
+  The September 22 comparison of 2.11.3 with candidate def3894d used the
+  same M5 Max, runtime and prompts, verified max fans, native sampler and
+  512 generated tokens: at 65,502 tokens, decode 65.0 to 79.6 tok/s,
+  prompt processing 902 to 1,269 tok/s, first token 72.9 to 51.9 s; at
+  4,061 tokens, decode 89.0 to 88.7, prompt processing 912 to 1,321,
+  first token 4.53 to 3.15 s. The earlier pair used another candidate, so
+  a frozen final-candidate regression comparison remains open. Saved
   attention buffers grow to the size reuse needs and are reused in place
   (at some prompt lengths all 24 key and value buffers were copied every
   verification step, about 135 MB each at 128K); Flash-Next prepares its
@@ -247,6 +261,7 @@ All notable user-facing changes to MTPLX. The format is based on
   watchdog from failing a healthy batched prefill that runs longer than its
   300 s deadline.
 - **Forge builds a model that ships as one weights file** (issue #492). A
+- **Forge finds an MTP head in a single-file source.** A
   model small enough for a single `model.safetensors` has no
   `model.safetensors.index.json`. `mtplx inspect` read the file's header
   and reported the draft head as present, but Forge looked for the head
@@ -340,6 +355,18 @@ All notable user-facing changes to MTPLX. The format is based on
   248,320). The loader now applies the same detector-gated restoration
   Forge uses. A head already in the absolute convention passes through
   byte for byte, so nothing is shifted twice.
+
+### Validation still required before publication
+
+- Final frozen-commit Python and Swift checks, the signed and notarized
+  self-contained app, and actual OpenCode Desktop/CLI, Pi and Hermes tasks.
+- Flash-Next compiled/eager image distribution and generated-state restore
+  proof. The saved real-pack parity run reports numerical differences on
+  both text and image rounds; it is not a statistical exactness result.
+- Final 128K and sustained performance coverage, dense image timing, and
+  the consistent roughly 2 percent dense verify-round cost increase.
+- Public Bonsai/Quality downloads, actual Quality artifact sizes, full-load
+  status on a 256 GB or larger Mac, and physical small-Mac qualification.
 
 ## [2.11.3] - 2026-09-17
 
