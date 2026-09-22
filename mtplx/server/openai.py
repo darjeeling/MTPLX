@@ -17673,7 +17673,7 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
         from mtplx.attention_split import gqa_packed_route_engaged_counts
 
         nax["gqa_packed_engaged_counters"] = dict(gqa_packed_route_engaged_counts)
-    except BaseException:
+    except Exception:
         pass
 
     # Nothing goes slow in silence: every demotion off a fast lane, with a
@@ -17682,7 +17682,7 @@ def _health_degradation_payload(state: Any) -> dict[str, Any]:
         from mtplx.demotions import snapshot as _demotions_snapshot
 
         demotions: Any = _demotions_snapshot()
-    except BaseException:
+    except Exception:
         demotions = "unknown"
 
     return {
