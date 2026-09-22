@@ -474,6 +474,12 @@ All notable user-facing changes to MTPLX. The format is based on
   log and `mtplx doctor --explain` count every fallback from the fast path
   with its reason, and Pi traces include compaction requests and the image
   context.
+- **A Qwen model with MiMo in its name keeps the Qwen settings.** The MiMo
+  family was matched on the folder name, so Xiaomi's Qwen-architecture
+  distills named MiMo (MiMo-V2.6-Distill-Qwen-9B) were served with the MiMo
+  settings, draft depth 1 only and reasoning off. The family now comes from
+  the checkpoint's own model type and architecture, so such a distill keeps
+  the Qwen 3.5 settings.
 - **The packed-GQA verify counter counts accepted windows too** (issue
   #506). It counted only declined windows, and only while the compiled
   verifier was being traced, so a healthy daemon showed 96 declines and no
