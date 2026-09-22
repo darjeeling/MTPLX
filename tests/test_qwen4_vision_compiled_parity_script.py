@@ -81,6 +81,8 @@ def _entry(*, image: bool, mode="on", engaged=True, reason="admitted", sha="a", 
     entry = {
         "kind": "image" if image else "text",
         "output_sha256": sha,
+        "finish_reason": "stop",
+        "output_text": "A completed response.",
         "fixed_m4_admission": admission,
         "prompt_tokens": 1200 if image else 40,
         "completion_tokens": 48,
@@ -148,6 +150,7 @@ def test_every_round_equal_and_every_check_held_is_exact():
     assert outcome["failed_checks"] == [] and outcome["exit_code"] == 0
     assert all(c["ok"] is True for c in outcome["checks"])
     assert {c["name"] for c in outcome["checks"]} == {
+        "image_turns_completed",
         "sampled_at_the_packs_native_settings",
         "instrument_image_rounds_exact",
         "instrument_every_image_round_had_a_reference",
@@ -328,6 +331,17 @@ def test_a_server_that_does_not_apply_the_native_sampler_fails_the_run():
     assert "product applies" in _check(outcome, "sampled_at_the_packs_native_settings")["detail"]
 
 
+@pytest.mark.parametrize("finish,content", [("length", "partial"), ("stop", ""), (None, "partial")])
+def test_exact_rounds_and_a_cache_hit_do_not_prove_a_completed_image_turn(finish, content):
+    arms = _arms()
+    arms["product"]["requests"]["image_turn1"].update(
+        finish_reason=finish, output_text=content,
+    )
+    outcome = _evaluate(arms)
+    assert outcome["failed_checks"] == ["image_turns_completed"]
+    assert outcome["exit_code"] == 1
+
+
 def test_the_instrument_arm_alone_is_enough_for_a_verdict():
     arms = {"instrument": _arms()["instrument"]}
     outcome = _evaluate(arms)
@@ -360,7 +374,7 @@ def test_follow_up_uses_each_arms_actual_response_without_mutating_the_plan(
             sent.append(body)
             if len(sent) == 1 and first_fails:
                 raise RuntimeError("first response failed")
-            return {"choices": [{"message": message, "finish_reason": "length"}]}
+            return {"choices": [{"message": message, "finish_reason": "stop"}]}
 
         monkeypatch.setattr(parity, "_http_json", respond)
         result = parity.run_arm(arm, args, plan, tmp_path)
@@ -478,7 +492,7 @@ _STUB = textwrap.dedent(
             reply = {"role": "assistant", "content": "echo " + digest[:16], "reasoning_content": "hm"}
             if image and len(body["messages"]) == 1:
                 first_reply = reply
-            self._send(200, {"id": rid, "choices": [{"finish_reason": "length", "message": reply}],
+            self._send(200, {"id": rid, "choices": [{"finish_reason": os.environ.get("STUB_FINISH", "stop"), "message": reply}],
                 "usage": {"completion_tokens": body["max_tokens"]}})
             time.sleep(0.3)  # the product writes its line as the request finishes
             log(record)
@@ -568,6 +582,15 @@ def test_divergent_image_rounds_fail_the_run(stand_in):
     assert code == 1 and report["verdict"] == "image_route_diverges"
     assert report["instrument_summary"]["image_turn1"]["divergent_rounds"] == 3
     assert report["instrument_summary"]["text_control"]["state"] == "exact"
+
+
+def test_truncated_reply_is_not_sent_as_a_generated_state_follow_up(stand_in):
+    code, report, _ = stand_in("--env", "STUB_FINISH=length", "--arms", "instrument")
+    assert code == 1
+    assert "image_turns_completed" in report["failed_checks"]
+    follow = report["arms"]["instrument"]["requests"]["image_turn2"]
+    assert "increase --max-tokens" in follow["error"]
+    assert "response_id" not in follow
 
 
 def test_an_instrument_that_changes_the_output_fails_the_run(stand_in):

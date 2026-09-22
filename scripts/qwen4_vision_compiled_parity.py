@@ -45,6 +45,9 @@ The requests (the follow-up carries that arm's actual first response):
 
 Sampling: no sampler field is sent, so the server applies the pack's native
 settings (``mtplx_runtime.json``), with one fixed seed. Greedy is not used.
+Both image turns must finish with ``stop`` and visible content. A truncated
+reasoning-only answer cannot establish a real follow-up or cache restoration;
+increase this diagnostic's ``--max-tokens`` when the report names that failure.
 
 How to read the verdict:
 
@@ -291,6 +294,21 @@ def evaluate(
 
     def requests_of(arm: str) -> dict[str, Any]:
         return (arms.get(arm) or {}).get("requests") or {}
+
+    incomplete = [
+        f"{arm}/{name}: finish={entry.get('finish_reason')!r}, "
+        f"visible_content={bool(str(entry.get('output_text') or '').strip())}"
+        for arm in arms
+        for name, entry in requests_of(arm).items()
+        if entry.get("kind") == "image" and (
+            entry.get("finish_reason") != "stop"
+            or not str(entry.get("output_text") or "").strip()
+        )
+    ]
+    check(
+        "image_turns_completed", not incomplete,
+        "; ".join(incomplete) or "every image turn finished with stop and visible content",
+    )
 
     applied = {
         arm: data["health"].get("sampler")
@@ -777,6 +795,12 @@ def run_arm(
                 first = result["requests"].get(spec["after_response"]) or {}
                 if first.get("error") or not first.get("response_message"):
                     entry["error"] = "the first response is unavailable for the follow-up"
+                    continue
+                if first.get("finish_reason") != "stop" or not first.get("output_text", "").strip():
+                    entry["error"] = (
+                        "the first image response did not complete with visible content; "
+                        "increase --max-tokens before testing generated-state restoration"
+                    )
                     continue
                 body = dict(body, messages=[
                     *body["messages"][:-1], first["response_message"], body["messages"][-1],

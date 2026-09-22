@@ -456,11 +456,14 @@ def test_the_real_pack_script_requires_a_follow_up_after_exact_single_turns(pack
     arms = {"instrument": arm("parity2"), "product": arm("1"), "eager": arm("1", kill=True)}
     outcome = script.evaluate(arms, eager_scope_fix_present=True)
     assert outcome["verdict"] == "generated_state_not_restored", outcome
-    assert outcome["failed_checks"] == ["follow_up_restored_generated_tokens"]
+    assert outcome["failed_checks"] == [
+        "image_turns_completed", "follow_up_restored_generated_tokens",
+    ]
     assert outcome["exit_code"] == 1
     assert outcome["instrument"]["image_turn1"]["rounds"] >= 8
     assert outcome["instrument"]["text_control"]["state"] == "exact"
     assert {c["name"]: c["ok"] for c in outcome["checks"]} == {
+        "image_turns_completed": False,
         "instrument_image_rounds_exact": True,
         "instrument_every_image_round_had_a_reference": True,
         "instrument_text_control_exact": True,
