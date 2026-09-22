@@ -471,7 +471,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.5 4B",
                 "Small Qwen",
             ],
-            sizeBytes: 2_567_456_776,
+            sizeBytes: 2_567_456_768,
             peakMemoryGiB: 2.86,
             recommendedFor: [.modernApple]
         ),
@@ -491,7 +491,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.5 4B Optimized Quality",
                 "Qwen 3.5 4B Quality",
             ],
-            sizeBytes: 4_576_426_401,
+            sizeBytes: 4_576_426_393,
             peakMemoryGiB: 4.75,
             recommendedFor: [.modernApple]
         ),
@@ -515,7 +515,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.5 9B Speed 6-bit",
                 "Qwen 3.5 9B Speed",
             ],
-            sizeBytes: 8_695_118_657,
+            sizeBytes: 8_695_118_659,
             peakMemoryGiB: 10.0,
             recommendedFor: [.modernApple]
         ),
@@ -534,7 +534,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.5 9B Optimized Speed FP16",
                 "Qwen 3.5 9B Speed FP16",
             ],
-            sizeBytes: 7_783_301_179,
+            sizeBytes: 7_783_301_181,
             peakMemoryGiB: 10.5,
             recommendedFor: [.legacyApple]
         ),
@@ -555,7 +555,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Bare Speed",
             ],
             // Exact byte sum of the published HF repo files (2026-08-15 tree API).
-            sizeBytes: 16_313_698_865,
+            sizeBytes: 16_313_700_871,
             // Measured 2026-08-14: request-log MLX high-water 19.6 GiB during
             // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
             peakMemoryGiB: 20.0,
@@ -577,7 +577,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.8 Optimized Speed",
             ],
             // Exact byte sum of the published HF repo files (2026-08-15 tree API).
-            sizeBytes: 20_703_484_600,
+            sizeBytes: 20_703_486_605,
             // Measured 2026-08-14: request-log MLX high-water 24.6 GiB during
             // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
             peakMemoryGiB: 25.0,
@@ -599,7 +599,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.8 Optimized Quality",
             ],
             // Exact byte sum of the published HF repo files (2026-08-15 tree API).
-            sizeBytes: 29_972_712_041,
+            sizeBytes: 29_972_714_046,
             // Measured 2026-08-14: request-log MLX high-water 32.9 GiB during
             // quiet-window 2.4k-context serving (boot + Flappy arms + rung).
             peakMemoryGiB: 33.0,
@@ -628,7 +628,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Bare Speed FP16",
             ],
             // Exact byte sum of the local sibling at build time (2026-08-15).
-            sizeBytes: 16_314_182_467,
+            sizeBytes: 16_314_184_539,
             // Same packs and tensor bytes as the parent; peak carried over.
             peakMemoryGiB: 20.0,
             recommendedFor: [.legacyApple]
@@ -649,7 +649,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.8 Optimized Speed FP16",
             ],
             // Exact byte sum of the local sibling at build time (2026-08-15).
-            sizeBytes: 20_703_969_110,
+            sizeBytes: 20_703_971_173,
             // Same packs and tensor bytes as the parent; peak carried over.
             peakMemoryGiB: 25.0,
             recommendedFor: [.legacyApple]
@@ -670,7 +670,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen 3.8 Optimized Quality FP16",
             ],
             // Exact byte sum of the local sibling at build time (2026-08-15).
-            sizeBytes: 29_973_197_540,
+            sizeBytes: 29_973_199_603,
             // Same packs and tensor bytes as the parent; peak carried over.
             peakMemoryGiB: 33.0,
             recommendedFor: [.legacyApple]
@@ -699,7 +699,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             ],
             // Exact byte sum of the local pack (2026-08-27 audit); includes
             // the 32 GB SSD-streamed n-gram table and the vision tower.
-            sizeBytes: 106_336_812_636,
+            sizeBytes: 106_336_814_165,
             // Weights 72.6 GB + MTP 1.7 GB resident (n-gram on SSD) plus
             // KV/working headroom at the default profile.
             peakMemoryGiB: 78.0,
@@ -723,7 +723,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             ],
             // Exact byte sum of the local pack (2026-08-27 audit); includes
             // the 32 GB SSD-streamed n-gram table and the vision tower.
-            sizeBytes: 115_061_253_581,
+            sizeBytes: 115_061_255_377,
             // Weights 81.4 GB + MTP 1.7 GB resident (n-gram on SSD) plus
             // KV/working headroom at the default profile.
             peakMemoryGiB: 87.0,
@@ -747,7 +747,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             // Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
             // Planner need at 128K with the n-gram table streamed from SSD (calculated,
             // not yet measured on a 256 GB Mac).
-            sizeBytes: 169_958_537_278, peakMemoryGiB: 136.4,
+            sizeBytes: 169_958_537_441, peakMemoryGiB: 136.4,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
@@ -768,7 +768,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "mtplx-bonsai-38-27b-optimized-speed",
             ],
             // Published Hub bytes (2026-09-22) and the measured 8K context peak.
-            sizeBytes: 8_847_924_260, peakMemoryGiB: 11.80,
+            sizeBytes: 8_847_918_468, peakMemoryGiB: 11.80,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
@@ -787,7 +787,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed V2",
                 "Optimized Speed V2",
             ],
-            sizeBytes: 19_887_455_619,
+            sizeBytes: 19_887_455_621,
             peakMemoryGiB: 21.5,
             recommendedFor: [.modernApple]
         ),
@@ -807,7 +807,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed",
                 "Optimized Speed",
             ],
-            sizeBytes: 16_419_081_846,
+            sizeBytes: 16_419_081_848,
             peakMemoryGiB: 17.0,
             recommendedFor: [.modernApple]
         ),
@@ -827,7 +827,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Speed FP16",
                 "Optimized Speed FP16",
             ],
-            sizeBytes: 16_419_644_366,
+            sizeBytes: 16_419_644_386,
             peakMemoryGiB: 17.5,
             recommendedFor: [.legacyApple]
         ),
@@ -851,7 +851,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6-35B-A3B-MTPLX-Official4-CyanKiwiMTP-CleanRecipe",
                 "Qwen3.6-35B-A3B-MTPLX-Flat4-CyanKiwiMTP-ForgeRepairClean",
             ],
-            sizeBytes: 21_014_908_550,
+            sizeBytes: 21_014_908_552,
             peakMemoryGiB: 28.0,
             recommendedFor: [.modernApple]
         ),
@@ -870,7 +870,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 35B-A3B Optimized Speed FP16",
                 "Qwen3.6 35B Speed FP16",
             ],
-            sizeBytes: 21_016_116_512,
+            sizeBytes: 21_016_116_514,
             peakMemoryGiB: 28.5,
             recommendedFor: [.legacyApple]
         ),
@@ -889,7 +889,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 35B-A3B Optimized Balance",
                 "Qwen3.6 35B Balance",
             ],
-            sizeBytes: 29_671_037_161,
+            sizeBytes: 29_671_037_163,
             peakMemoryGiB: 32.0,
             recommendedFor: [.modernApple]
         ),
@@ -908,7 +908,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 35B-A3B Optimized Balance FP16",
                 "Qwen3.6 35B Balance FP16",
             ],
-            sizeBytes: 29_672_249_552,
+            sizeBytes: 29_672_249_554,
             peakMemoryGiB: 32.5,
             recommendedFor: [.legacyApple]
         ),
@@ -931,7 +931,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "mtplx/gemma4-mtplx-optimized-speed",
                 "mtplx-gemma4-optimized-speed",
             ],
-            sizeBytes: 17_715_574_395,
+            sizeBytes: 17_715_574_397,
             peakMemoryGiB: 18.0,
             recommendedFor: [.modernApple]
         ),
@@ -951,7 +951,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Quality",
                 "Optimized Quality",
             ],
-            sizeBytes: 30_016_961_493,
+            sizeBytes: 30_016_961_495,
             peakMemoryGiB: 27.62,
             recommendedFor: [.modernApple]
         ),
@@ -970,7 +970,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "Qwen3.6 27B Optimized Quality FP16",
                 "Optimized Quality FP16",
             ],
-            sizeBytes: 30_017_528_922,
+            sizeBytes: 30_017_528_942,
             peakMemoryGiB: 28.12,
             recommendedFor: [.legacyApple]
         ),
