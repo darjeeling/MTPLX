@@ -446,24 +446,75 @@ def test_a_model_that_cannot_be_inspected_is_a_record_not_a_failed_load():
     assert demotions.snapshot()["counts"]["vision_mrope_sequential_fallback"] == 1
 
 
-def test_tensor_offset_call_keeps_stock_positions_and_is_counted(monkeypatch):
+def test_tensor_offset_is_the_callers_rotary_origin():
+    """A tensor offset comes from a cache that owns its rotary origin (the
+    compiled routes hand ``offset + delta``): the stock kernel at it, exactly
+    the int-offset call of the eager route past the prompt, nothing counted."""
+    from mtplx.dense_mrope import host_positions_for_tensor_offsets
+
     rope = nn.RoPE(ROTARY_DIMS, traditional=False, base=ROPE_THETA)
     adapter = DenseMRopeAdapter(rope, mrope_axes(SECTION, True, 8), ROLE_TRUNK)
     x = mx.random.normal((1, 2, 3, 64))
-    offset = mx.array(40)
+    n = len(PROMPT)
+    origin = mx.array(n + 4, dtype=mx.int32) + mx.array([DELTA], dtype=mx.int32)
     with dense_mrope_scope(_state()):
-        out = adapter(x, offset=offset)
-    assert mx.array_equal(out, rope(x, offset=offset)).item()
-    assert demotions.snapshot()["counts"]["vision_mrope_tensor_offset_call"] == 1
-
+        armed = adapter(x, offset=origin)
+        eager = adapter(x, offset=n + 4)  # the eager route's shift plan
+    assert mx.array_equal(armed, eager).item()
+    assert mx.array_equal(armed, rope(x, offset=n + 4 + DELTA)).item()
     # Unarmed, a tensor offset is simply the stock call (compiled text routes).
-    demotions.reset()
-    assert mx.array_equal(adapter(x, offset=offset), rope(x, offset=offset)).item()
+    assert mx.array_equal(adapter(x, offset=origin), rope(x, offset=origin)).item()
     assert demotions.snapshot()["total"] == 0
 
+    # The instrument's reference leg: a CONCRETE plain offset resolved through
+    # the host table, as the eager route resolves a host integer.
+    with dense_mrope_scope(_state()), host_positions_for_tensor_offsets():
+        reference = adapter(x, offset=mx.array(n + 4, dtype=mx.int32))
+        inside = adapter(x, offset=mx.array(2, dtype=mx.int32))
+    assert mx.array_equal(reference, eager).item()
+    with dense_mrope_scope(_state()):
+        assert mx.array_equal(inside, adapter(x, offset=2)).item()
+    assert demotions.snapshot()["total"] == 0
+
+
+def test_a_delta_less_tensor_offset_cache_under_an_armed_request_is_counted(monkeypatch):
+    """The routing-hole canary lives where the cache is known: rope_offset_of."""
+    from mtplx.graphbank import TensorOffsetKVCache
+    from mtplx.rope_origin import (
+        cache_owns_rotary_origin,
+        rope_offset_of,
+        stamp_rope_delta,
+    )
+
+    keys = mx.zeros((1, 1, 8, 64))
+    cache = TensorOffsetKVCache(keys, keys, 5)
+    assert not cache_owns_rotary_origin(cache)
+    # Text (unarmed): the plain offset, nothing counted.
+    assert rope_offset_of(cache) is cache.offset
+    assert demotions.snapshot()["total"] == 0
+    # Armed without a delta: a compiled route the admission never handed the
+    # delta. The stock positions, counted once per call.
+    with dense_mrope_scope(_state()):
+        assert rope_offset_of(cache) is cache.offset
+    snap = demotions.snapshot()
+    assert snap["counts"]["vision_mrope_tensor_offset_call"] == 1
+    assert "owns no rotary origin" in snap["reasons"]["vision_mrope_tensor_offset_call"]
+    # Stamped: the origin is offset + delta and nothing more is counted.
+    assert stamp_rope_delta([cache, None], DELTA) == 1
+    assert cache_owns_rotary_origin(cache)
+    with dense_mrope_scope(_state()):
+        origin = rope_offset_of(cache)
+    assert int(origin.item()) == 5 + DELTA
+    assert demotions.snapshot()["counts"]["vision_mrope_tensor_offset_call"] == 1
+    # The delta is one int32 value, whatever it was given as.
+    assert cache.rope_delta.dtype == mx.int32 and cache.rope_delta.shape == (1,)
+    assert cache.rope_state == [cache.rope_delta]
+    cache.rope_delta = None
+    assert cache.rope_state == [] and rope_offset_of(cache) is cache.offset
+
     monkeypatch.setenv("MTPLX_DENSE_MROPE_STRICT", "1")
-    with dense_mrope_scope(_state()), pytest.raises(RuntimeError, match="tensor cache offset"):
-        adapter(x, offset=offset)
+    with dense_mrope_scope(_state()), pytest.raises(RuntimeError, match="owns no rotary origin"):
+        rope_offset_of(cache)
 
 
 def test_prompt_whose_image_tokens_moved_is_refused():

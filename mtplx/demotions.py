@@ -78,14 +78,15 @@ KINDS: dict[str, str] = {
         "ran the stock path."
     ),
     "vision_request_eager_verify": (
-        "An image request ran on the eager verifier. Flash-Next image requests "
-        "take the compiled verifier; this one was kept off it by its prompt "
-        "shape, a diagnostic setting or the kill switch, or it ran on the "
-        "dense path, which has no compiled image route (see the reason line)."
+        "An image request ran on the eager verifier. Image requests take the "
+        "compiled verifier on Flash-Next and on the dense Qwen3.5 / Qwen3.8 "
+        "packs alike; this one was kept off it by its prompt shape, a "
+        "diagnostic setting or the kill switch (see the reason line)."
     ),
     "vision_request_eager_draft": (
-        "An image request ran the draft head on the stock route (the compiled "
-        "draft core cannot carry the image position offsets)."
+        "An image request ran the draft head on the stock route: the request "
+        "was kept off the compiled verify route, or its prompt ends on an "
+        "image row, whose position a compiled draft core cannot express."
     ),
     "vision_mrope_sequential_fallback": (
         "An image request on a dense Qwen pack was roped with sequential "
@@ -98,9 +99,9 @@ KINDS: dict[str, str] = {
         "draft acceptance rate is affected, the verifier stays exact."
     ),
     "vision_mrope_tensor_offset_call": (
-        "An attention call with a tensor cache offset ran during an image "
-        "request and kept the stock positions (a route that should have been "
-        "bypassed for that request)."
+        "An attention route reached a tensor-offset cache that owns no rotary "
+        "origin during an image request and kept the stock positions (a "
+        "compiled route the admission never handed the image delta)."
     ),
 }
 

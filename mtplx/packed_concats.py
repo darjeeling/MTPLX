@@ -40,6 +40,8 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from .rope_origin import rope_offset_of
+
 logger = logging.getLogger(__name__)
 
 COUNTERS: dict[str, int] = {
@@ -223,8 +225,12 @@ def install_qwen3_next_packed_concats(model: Any) -> dict[str, int] | None:
                 0, 2, 1, 3
             )
             if cache is not None:
-                queries = self.rope(queries, offset=cache.offset)
-                keys = self.rope(keys, offset=cache.offset)
+                # The cache's own rotary origin (rope_origin): the offset for
+                # a text request, offset + delta for an image request on a
+                # compiled route. KV indices below stay on ``cache.offset``.
+                rope_offset = rope_offset_of(cache)
+                queries = self.rope(queries, offset=rope_offset)
+                keys = self.rope(keys, offset=rope_offset)
                 keys, values = cache.update_and_fetch(keys, values)
             else:
                 queries = self.rope(queries)

@@ -40,14 +40,37 @@ Image requests
       are the same numbers, so text rows keep bit-identical keys to a text
       request; only image rows and the rows after them change.
 
+Compiled routes
+    A compiled or tensor-offset route cannot slice a host table: its offset
+    is an array, and inside a shared trace it is a tracer. Those routes own
+    the request's rotary origin instead (``mtplx.rope_origin``): every
+    tensor-offset cache generation promotes for an admitted image request is
+    stamped with the request's delta, the attention routes rotate at
+    ``cache.rope_offset`` (``offset + delta``, a graph input of the verify
+    trace, never a Python constant), and the adapter treats a tensor offset
+    as that origin and calls the stock kernel at it. Past the prompt this is
+    the eager route bit for bit, since every row there is the sequence index
+    plus the delta on all three axes. The admission in ``mtplx.generation``
+    (``_dense_vision_compiled_verify_admission``) names the settings that
+    keep an image request eager; the same kill switch as Flash-Next,
+    ``MTPLX_QWEN4_VISION_COMPILED_VERIFY=0``, governs both families.
+
 Fail closed
-    A compiled or tensor-offset route cannot carry a host table. Generation
-    keeps an armed request off those routes (eager verifier, stock draft
-    core), counted in the demotion ledger. If one is reached anyway the call
-    keeps the stock positions and is counted (``MTPLX_DENSE_MROPE_STRICT=1``
-    raises instead). A table that cannot be built, or an attention layer the
-    adapter does not recognise, leaves the whole request on sequential
-    positions with a counted demotion: never a half-applied table.
+    A tensor-offset cache reached by an armed request WITHOUT a delta is a
+    routing hole (a route that promoted the cache without the admission):
+    the call keeps the stock positions and is counted
+    (``MTPLX_DENSE_MROPE_STRICT=1`` raises instead). A table that cannot be
+    built, or an attention layer the adapter does not recognise, leaves the
+    whole request on sequential positions with a counted demotion: never a
+    half-applied table.
+
+Instrument
+    ``host_positions_for_tensor_offsets`` makes the adapter resolve a
+    CONCRETE tensor offset through the host table, as it does a host
+    integer. The parity instrument of the compiled verify bank opens it
+    around its reference forward, so the reference is positioned by the
+    request's table and not by the delta under test. Never opened around a
+    trace: a tracer has no value to resolve, and the call raises.
 
 Rollback: ``MTPLX_DENSE_MROPE=0`` restores sequential image positions.
 """
@@ -83,14 +106,44 @@ ROLE_MTP = "mtp"
 _FALLBACK_KIND = "vision_mrope_sequential_fallback"
 _TENSOR_OFFSET_KIND = "vision_mrope_tensor_offset_call"
 _TENSOR_OFFSET_REASON = (
-    "an attention call reached the image position adapter with a tensor cache "
-    "offset (a compiled or tensor-offset route); that call kept the stock "
+    "an attention route reached a tensor-offset cache that owns no rotary "
+    "origin during an image request (a compiled or tensor-offset route the "
+    "admission did not hand the image delta); that call kept the stock "
     "positions"
 )
 _TABLE_UNBUILDABLE_REASON = (
     "the image position table could not be built (video pads, or a pad layout "
     "that does not match the images); the request used sequential positions"
 )
+
+
+def note_unowned_tensor_offset() -> None:
+    """Count a routing hole: a delta-less tensor-offset cache under an armed
+    request (``rope_origin.note_unowned_rotary_origin``). Nothing to count
+    for a text request, a request that fell back to sequential positions, or
+    the parity instrument's reference leg, whose delta-less containers are
+    positioned from the host table on purpose."""
+
+    if _STATE.get() is None or _HOST_PLAN.get():
+        return
+    demotions.note(_TENSOR_OFFSET_KIND, _TENSOR_OFFSET_REASON)
+    if _strict():
+        raise RuntimeError(_TENSOR_OFFSET_REASON)
+
+
+_HOST_PLAN: ContextVar[bool] = ContextVar("mtplx_dense_mrope_host_plan", default=False)
+
+
+@contextmanager
+def host_positions_for_tensor_offsets() -> Iterator[None]:
+    """Instrument mode: a concrete tensor offset is resolved through the host
+    table like a host integer (see the module docstring, "Instrument")."""
+
+    token = _HOST_PLAN.set(True)
+    try:
+        yield
+    finally:
+        _HOST_PLAN.reset(token)
 
 
 def dense_mrope_enabled() -> bool:
@@ -305,16 +358,18 @@ class DenseMRopeAdapter:
         if self.role == ROLE_MTP and not state.mtp_aligned:
             return self.inner(x, offset=offset)
         if not isinstance(offset, (int, np.integer)):
-            # A tensor offset: a compiled trace or a tensor-offset cache. The
-            # table is sliced by the HOST offset, and a delta baked into a
-            # shared trace would shift every later text request, so this call
-            # keeps the stock positions. Generation keeps armed requests off
-            # these routes; reaching this line is a routing hole, and it is
-            # counted rather than silent.
-            demotions.note(_TENSOR_OFFSET_KIND, _TENSOR_OFFSET_REASON)
-            if _strict():
-                raise RuntimeError(_TENSOR_OFFSET_REASON)
-            return self.inner(x, offset=offset)
+            if _HOST_PLAN.get():
+                # The instrument's reference leg: a concrete offset resolved
+                # through the host table. A tracer has no value and raises.
+                offset = int(offset.item())
+            else:
+                # A tensor offset is the caller's rotary origin: the cache of
+                # a compiled route rotates at ``offset + delta`` and hands
+                # that array here (``rope_origin.rope_offset_of``, which also
+                # counts a cache that owns no delta). The stock kernel at it
+                # is the eager route's shift plan for every row past the
+                # prompt, and no table is ever sliced by a tensor.
+                return self.inner(x, offset=offset)
         kind, payload = state.plan(int(offset), int(x.shape[-2]))
         if kind == "shift":
             return self.inner(x, offset=payload)
