@@ -13046,23 +13046,86 @@ def test_stop_sequence_stream_monitor_holds_back_partial_matches():
     assert flushed.emitted_text == "abc E"
 
 
-def test_chat_stream_stop_sequence_trims_and_cancels_generation(monkeypatch):
-    state = _fake_streaming_session_state()
-    state.args.stream_interval = 1
-    client = TestClient(create_app(state))
-    cancel_seen: dict[str, bool] = {}
+@pytest.fixture(params=[True, False], ids=["during_callback", "after_callback"])
+def _ordered_stop_generation(monkeypatch, request):
+    """Exercise both real cancellation checks without relying on thread timing."""
+    import asyncio
+
+    cancel_during_callback = request.param
+    hello_tokens = [ord(char) for char in "Hello "]
+    stop_tokens = [ord(char) for char in "STOP\n"]
+    cancel_seen: dict[str, object] = {}
+    cancel_events: list[Event] = []
+    queued_tokens: list[list[int]] = []
+    queues = []
+
+    def token_ids(item):
+        if item[0] != "tokens":
+            return None
+        return item[1]["tokens"] if isinstance(item[1], dict) else item[1]
+
+    class OrderedStopQueue(openai._LoopFedStreamQueue):
+        def __init__(self, loop):
+            super().__init__(loop)
+            self.stop_callback_returned = asyncio.Event()
+            queues.append(self)
+
+        def put(self, item):
+            tokens = token_ids(item)
+            if tokens is not None:
+                queued_tokens.append(tokens)
+            super().put(item)
+            if cancel_during_callback and token_ids(item) == stop_tokens:
+                # Let the real consumer cancel before on_tokens performs
+                # its post-put check. Cancellation may unwind this callback.
+                assert cancel_events[0].wait(timeout=10)
+
+        async def get(self, timeout=None):
+            item = await super().get(timeout)
+            if not cancel_during_callback and token_ids(item) == stop_tokens:
+                # Hold only STOP consumption until on_tokens has returned;
+                # the next callback must then trip its pre-put check.
+                await asyncio.wait_for(self.stop_callback_returned.wait(), timeout=10)
+            return item
+
+    monkeypatch.setattr(openai, "_LoopFedStreamQueue", OrderedStopQueue)
 
     def fake_run_generation(_state, _prompt_ids, **kwargs):
         token_callback = kwargs["token_callback"]
         cancel_event = kwargs["cancel_event"]
-        token_callback([ord(char) for char in "Hello "])
-        token_callback([ord(char) for char in "STOP\n"])
-        assert cancel_event.wait(timeout=10), "stop match must cancel generation"
-        cancel_seen["cancelled"] = True
-        token_callback([ord(char) for char in "after"])
-        raise AssertionError("cancelled token callback must raise")
+        cancel_events.append(cancel_event)
+        token_callback(hello_tokens)
+        point = "stop_callback"
+        try:
+            token_callback(stop_tokens)
+            assert not cancel_during_callback, "post-put check must cancel this callback"
+            queues[0]._loop.call_soon_threadsafe(queues[0].stop_callback_returned.set)
+            assert cancel_event.wait(timeout=10), "stop match must cancel generation"
+            point = "later_callback"
+            token_callback([ord(char) for char in "after"])
+            raise AssertionError("cancelled token callback must raise")
+        except openai._StreamCancelled:
+            cancel_seen.update(
+                point=point, cancelled=cancel_event.is_set(), origin=cancel_event.origin
+            )
+            raise
 
     monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+
+    yield
+
+    assert cancel_seen == {
+        "point": "stop_callback" if cancel_during_callback else "later_callback",
+        "cancelled": True,
+        "origin": "stop_sequence",
+    }
+    assert queued_tokens == [hello_tokens, stop_tokens], "no later tokens may be queued"
+
+
+def test_chat_stream_stop_sequence_trims_and_cancels_generation(_ordered_stop_generation):
+    state = _fake_streaming_session_state()
+    state.args.stream_interval = 1
+    client = TestClient(create_app(state))
 
     response = client.post(
         "/v1/chat/completions",
@@ -13089,11 +13152,12 @@ def test_chat_stream_stop_sequence_trims_and_cancels_generation(monkeypatch):
     final = [
         payload for payload in payloads if payload["choices"][0].get("finish_reason")
     ]
+    assert len(final) == 1
     assert final[-1]["choices"][0]["finish_reason"] == "stop"
     assert final[-1]["mtplx_stats"]["stop_sequence_hit"] is True
     assert final[-1]["mtplx_stats"]["stop_sequence_matched"] == "STOP"
-    assert cancel_seen.get("cancelled") is True
-    assert "data: [DONE]" in response.text
+    assert final[-1]["usage"]["completion_tokens"] == len("Hello STOP\n")
+    assert response.text.count("data: [DONE]") == 1
 
 
 def test_chat_stream_stop_sequence_handles_generation_done_race(monkeypatch):
@@ -13325,22 +13389,9 @@ def test_completions_stream_is_incremental_with_terminal_finish_reason(monkeypat
     assert "data: [DONE]" in response.text
 
 
-def test_completions_stream_honors_stop_sequence(monkeypatch):
+def test_completions_stream_honors_stop_sequence(_ordered_stop_generation):
     state = _fake_streaming_session_state()
     client = TestClient(create_app(state))
-    cancel_seen: dict[str, bool] = {}
-
-    def fake_run_generation(_state, _prompt_ids, **kwargs):
-        token_callback = kwargs["token_callback"]
-        cancel_event = kwargs["cancel_event"]
-        token_callback([ord(char) for char in "Hello "])
-        token_callback([ord(char) for char in "STOP\n"])
-        assert cancel_event.wait(timeout=10), "stop match must cancel generation"
-        cancel_seen["cancelled"] = True
-        token_callback([ord(char) for char in "after"])
-        raise AssertionError("cancelled token callback must raise")
-
-    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
 
     response = client.post(
         "/v1/completions",
@@ -13363,10 +13414,12 @@ def test_completions_stream_honors_stop_sequence(monkeypatch):
     final = [
         payload for payload in payloads if payload["choices"][0].get("finish_reason")
     ]
+    assert len(final) == 1
     assert final[-1]["choices"][0]["finish_reason"] == "stop"
     assert final[-1]["mtplx_stats"]["stop_sequence_hit"] is True
-    assert cancel_seen.get("cancelled") is True
-    assert "data: [DONE]" in response.text
+    assert final[-1]["mtplx_stats"]["stop_sequence_matched"] == "STOP"
+    assert final[-1]["usage"]["completion_tokens"] == len("Hello STOP\n")
+    assert response.text.count("data: [DONE]") == 1
 
 
 def test_completions_nonstream_trims_stop_and_reports_real_finish_reason(
