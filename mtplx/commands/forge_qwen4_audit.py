@@ -372,8 +372,8 @@ def quality_metadata(source: dict, audit: dict) -> dict:
         "source": source, "stored_precision": audit["stored_precision"],
         "tensor_payload_bytes": audit["tensor_payload_bytes"], "files": audit["files"],
         "ram_guidance": {
-            "256 GB": "Fits with the Q4 table resident at 128K (planning estimate; measure the final pack).",
-            "192 GB": "Stream the n-gram table; use MTPLX_NGRAM_RESIDENT=0. Validate the context workload on this machine.",
+            "256 GB": "Fits at 128K with the n-gram table streamed from SSD (planning estimate; measure the final pack).",
+            "192 GB": "Fits with the n-gram table streamed from SSD. Validate the context workload on this machine.",
             "128 GB": "Cannot load: body, MTP and vision alone are approximately 128.46 GiB.",
         },
         "performance": "Q8 weights transfer more bytes per parameter than the Speed pack, so bandwidth-limited decode is expected to be slower. Speed is unmeasured until the first run; no speed claim.",

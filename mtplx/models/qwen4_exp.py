@@ -4511,62 +4511,7 @@ class NGramTable(nn.Module):
             group_size=int(meta.get("ngram_group_size", 32)),
         )
 
-    def attach_resident(self, path: Path) -> bool:
-        """Materialize the table as RESIDENT mx arrays for in-graph gathers.
-
-        mx.load's lazy arrays are NOT page-granular — the first eval reads
-        the whole tensor (measured: a mid-request ~32G materialization train
-        collapsed decode to 8 t/s and trips the GPU watchdog in a bare
-        process). So residency is paid ONCE, up front, at model load — and
-        only on machines whose memory plan can afford it (the pipelined AR
-        lane needs in-graph gathers on LAZY ids; smaller machines keep the
-        pread sidecar + staged classic loop, which SSD serves at zero cost).
-        """
-        try:
-            header, _ = _read_safetensors_header(path)
-            meta = header.get("__metadata__", {})
-            bits = int(meta.get("ngram_bits", 4))
-            started = time.perf_counter()
-            raw = mx.load(str(path))
-            if bits == 0:
-                parts = (raw["ngram.weight"], None, None)
-                mx.eval(parts[0])
-                nbytes = parts[0].nbytes
-            else:
-                parts = (
-                    raw["ngram.weight"],
-                    raw["ngram.scales"],
-                    raw["ngram.biases"],
-                )
-                mx.eval(*parts)
-                nbytes = sum(p.nbytes for p in parts)
-            self._lazy_parts = parts
-            self._lazy_bits = bits
-            self._lazy_group = int(meta.get("ngram_group_size", 32))
-            self.prefer_lazy = False
-            print(
-                f"[qwen4_exp] ngram table resident: {nbytes / 2**30:.1f}G in "
-                f"{time.perf_counter() - started:.1f}s (pipelined-AR lane armed)",
-                flush=True,
-            )
-            return True
-        except Exception as exc:
-            print(f"[qwen4_exp] ngram resident bind failed: {exc!r}", flush=True)
-            self._lazy_parts = None
-            return False
-
-    def _lazy_gather(self, ids: mx.array) -> mx.array:
-        w, s, b = self._lazy_parts
-        rows_w = w[ids]
-        if self._lazy_bits == 0:
-            return rows_w
-        return mx.dequantize(
-            rows_w, s[ids], b[ids], group_size=self._lazy_group, bits=self._lazy_bits
-        )
-
     def __call__(self, ids: mx.array) -> mx.array:
-        if getattr(self, "prefer_lazy", False) and getattr(self, "_lazy_parts", None) is not None:
-            return self._lazy_gather(ids)
         if self._sidecar is not None:
             return self._sidecar(ids, self.dim)
         if self._sidecar_mode:
@@ -5018,18 +4963,6 @@ def _read_safetensors_header(path: Path):
     return header, 8 + n
 
 
-def _ngram_resident_policy() -> bool:
-    """Should the n-gram table go RAM-resident (arming the pipelined AR
-    lane)? Delegates to memory_plan.ngram_table_resident_policy — THE
-    single source: the server's Metal floor and the memory plan consult
-    the same function, so gather behavior and memory accounting can never
-    disagree. (History: resident on 128G wired ~99G and kernel-panicked
-    the machine twice, 2026-08-26 — auto arms only at >=160G.)"""
-    from mtplx.memory_plan import ngram_table_resident_policy
-
-    return ngram_table_resident_policy()
-
-
 #: Cumulative host seconds and call count inside `NGramEmbedding.stage` --
 #: the per-chunk PLE gather the census measures as 8 host-late stalls totalling
 #: 2,313 ms.  One float and one int, bumped once per stage call; the prefill
@@ -5387,11 +5320,6 @@ class NGramEmbedding(nn.Module):
         sidecar = self.ngram_embedding._sidecar
         if sidecar is None or os.environ.get("MTPLX_NGRAM_STAGE", "1") == "0":
             return
-        if getattr(self, "_stage_disabled", False):
-            # Pipelined AR lane: input ids are LAZY — np.asarray below would
-            # force a graph sync and collapse the pipeline. The lane gathers
-            # in-graph via the table's mmap-lazy binding instead.
-            return
         try:
             ids_np = np.asarray(input_ids, dtype=np.int64)
             B, S = ids_np.shape
@@ -5654,9 +5582,7 @@ class Qwen4ExpTextModel(nn.Module):
         # Dual-alias env for the compiled GDN decode lane (PR #395 by maceip):
         # MTPLX_QWEN4EXP_COMPILE is the family-named alias of
         # MTPLX_COMPILED_GDN. An explicit falsy value on EITHER name is a kill
-        # switch that wins over everything, including set_ar_pipeline_mode
-        # re-arming the lane (upstream bug: the lane ignored an operator's
-        # explicit 0 once the AR pipeline engaged).
+        # switch that wins over everything.
         gdn_env = os.environ.get("MTPLX_COMPILED_GDN")
         qwen4_env = os.environ.get("MTPLX_QWEN4EXP_COMPILE")
         truthy_env = {"1", "true", "yes", "on"}
@@ -5671,7 +5597,6 @@ class Qwen4ExpTextModel(nn.Module):
             self._gdn_compiled_env = (
                 gdn_env is not None and gdn_env.strip().lower() in truthy_env
             ) or (qwen4_env is not None and qwen4_env.strip().lower() in truthy_env)
-        self._gdn_compiled_lane = False
         self._decode_runs = None
         self._decode_run_fns = {}
 
@@ -5704,11 +5629,6 @@ class Qwen4ExpTextModel(nn.Module):
             raise RuntimeError(
                 f"{lookahead_mod.ENV_FLAG}=1 prepares rows for the STAGED "
                 "gather, but MTPLX_NGRAM_STAGE=0 routes them in-graph"
-            )
-        if getattr(embedding, "_stage_disabled", False):
-            raise RuntimeError(
-                f"{lookahead_mod.ENV_FLAG}=1 is incompatible with the "
-                "pipelined AR lane, whose input ids are lazy"
             )
         # Build the shared NumPy hash constants on THIS thread so the worker
         # never races the lazy cache in `_np_consts`.
@@ -5768,11 +5688,6 @@ class Qwen4ExpTextModel(nn.Module):
             raise RuntimeError(
                 f"{lookahead_mod.EARLY_ENV_FLAG}=1 prepares rows for the "
                 "STAGED gather, but MTPLX_NGRAM_STAGE=0 routes them in-graph"
-            )
-        if getattr(embedding, "_stage_disabled", False):
-            raise RuntimeError(
-                f"{lookahead_mod.EARLY_ENV_FLAG}=1 is incompatible with the "
-                "pipelined AR lane, whose input ids are lazy"
             )
         start, end = int(span[0]), int(span[1])
         # The sidecar's own servability rule (aa20bf11), restated nowhere: a
@@ -5836,7 +5751,7 @@ class Qwen4ExpTextModel(nn.Module):
             1 <= h.shape[1] <= 4
             and ssm_mask is None
             and not self._gdn_compile_explicit_off
-            and (self._gdn_compiled_env or self._gdn_compiled_lane)
+            and self._gdn_compiled_env
             and cache[self.ssm_idx] is not None
         ):
             h = self._decode_layers_compiled(h, inputs, cache)
@@ -6498,48 +6413,20 @@ class Model(nn.Module):
         path = Path(model_path) / "ngram-table.safetensors"
         if not path.exists():
             return
-        resident = _ngram_resident_policy()
         sidecar = None
         for layer in self.layers:
             if "ple" in layer:
                 table = layer.ple.ple_embedding.ngram_embedding
                 table.attach_sidecar(path)
                 sidecar = table._sidecar
-                if resident:
-                    table.attach_resident(path)
-        if sidecar is not None and not resident:
+        if sidecar is not None:
             hot_mb = (sidecar._hot_cap_rows * sidecar._hot_row_bytes) // 2**20
             print(
                 "[qwen4_exp] ngram table: streamed from SSD (file-backed "
                 f"pages, hot cache {hot_mb}M, prefetch "
-                f"{'on' if sidecar._pool is not None else 'off'}) — "
-                "resident only at >=160G RAM or MTPLX_NGRAM_RESIDENT=1",
+                f"{'on' if sidecar._pool is not None else 'off'})",
                 flush=True,
             )
-
-    def set_ar_pipeline_mode(self, enabled: bool) -> bool:
-        """Flip the family into (or out of) the pipelined-AR decode contract:
-        n-gram staging off + in-graph mmap-lazy gathers, so a forward built
-        on LAZY token ids records no host sync. Returns False when the lazy
-        table binding is unavailable (lane must not engage)."""
-        ready = True
-        for layer in self.layers:
-            if "ple" not in layer:
-                continue
-            emb = layer.ple.ple_embedding
-            table = emb.ngram_embedding
-            if enabled and getattr(table, "_lazy_parts", None) is None:
-                ready = False
-                continue
-            emb._stage_disabled = bool(enabled)
-            table.prefer_lazy = bool(enabled)
-        if ready:
-            model = self.language_model.model
-            if not getattr(model, "_gdn_compile_explicit_off", False):
-                model._gdn_compiled_lane = bool(enabled)
-            else:
-                model._gdn_compiled_lane = False
-        return ready
 
     # -- family capture-commit (repair-free verify rollback) ----------------
 

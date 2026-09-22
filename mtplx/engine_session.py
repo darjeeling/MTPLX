@@ -211,13 +211,11 @@ def model_weights_bytes(model_path: Any) -> int | None:
     scan undercounted those (or returned None outright), silently skewing
     the RAM-aware session-bank budget this number feeds.
 
-    The Flash-Next n-gram sidecar (~30 GiB) is excluded by name: in its
-    default streamed mode only touched pages become resident and they are
+    The Flash-Next n-gram sidecar (~30 GiB) is excluded by name: it streams
+    from SSD, so only touched pages become resident and they are
     reclaimable file-backed pages, not wired weight. Counting it here was
     the 2026-08-28 defect chain (false MODEL DOES NOT FIT, 30G-pessimistic
-    window and bank on 128G Macs). When the resident policy arms, the
-    caller adds ``ngram_table_bytes`` back explicitly — see
-    ``memory_plan.ngram_table_resident_policy``."""
+    window and bank on 128G Macs)."""
     from mtplx.memory_plan import NGRAM_TABLE_FILENAME
 
     try:
@@ -239,8 +237,8 @@ def model_weights_bytes(model_path: Any) -> int | None:
 
 def ngram_table_bytes(model_path: Any) -> int:
     """Size of the Flash-Next n-gram sidecar next to the weights (0 when
-    absent). Kept separate from ``model_weights_bytes`` so callers count it
-    as a commitment exactly when the resident policy says it will be one."""
+    absent). Kept separate from ``model_weights_bytes``: it streams from SSD
+    and is never a commitment."""
     from mtplx.memory_plan import NGRAM_TABLE_FILENAME
 
     try:

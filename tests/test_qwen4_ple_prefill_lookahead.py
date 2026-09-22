@@ -485,7 +485,8 @@ def test_model_builder_refuses_to_run_without_the_staged_sidecar():
         "\n    def ", 1
     )[0]
     assert "if not lookahead_mod.enabled():" in builder
-    assert builder.count("raise RuntimeError") == 3
+    # No sidecar, or MTPLX_NGRAM_STAGE=0 routing rows in-graph.
+    assert builder.count("raise RuntimeError") == 2
     assert "embedding._np_consts()" in builder
 
 

@@ -892,10 +892,9 @@ def _server_runtime_env_overrides(
         # Family speed lanes, defaulted only when the launcher environment
         # left them unset (an explicit operator export wins):
         # - Pipelined AR decode + compiled GDN runs (2026-08-27 receipts:
-        #   42.6 -> 51.9 t/s AR, GPU 57% -> 96.6% busy). Arms itself only
-        #   when the n-gram table went resident (RAM-plan gated via
-        #   MTPLX_NGRAM_RESIDENT=auto); smaller machines keep the staged
-        #   classic loop.
+        #   42.6 -> 51.9 t/s AR, GPU 57% -> 96.6% busy). The pipelined lane
+        #   needed a RAM-resident n-gram table and no longer engages (the
+        #   table streams from SSD on every Mac); the compiled GDN runs do.
         # - Layer-owned capture-commit (2026-08-27 receipts: verify round
         #   51.7 -> 38.8 ms, repair re-forwards 8.2 -> 0 ms/round, MTP
         #   recorder 75.25 -> 85.9 t/s record) — repair-free speculative
@@ -3152,17 +3151,12 @@ class ServerState:
             resident_floor_label = "Laguna-S-2.1"
         elif _served_model_type_is_qwen4_exp(args):
             # The default wired cap (60% of RAM) sits BELOW this family's
-            # working set once the n-gram table goes RAM-resident: on a 128G
-            # M5 Max the cap landed at ~82G against a ~99G resident set and
+            # working set: on a 128G M5 Max the cap landed at ~82G against a
+            # ~99G resident set (the n-gram table was then resident) and
             # Metal's forced eviction collapsed serve decode to 8.5 tok/s
-            # (2026-08-27 battery receipt). Floor = pack weight files
-            # (+ the table when the resident policy arms) + working margin.
+            # (2026-08-27 battery receipt). Floor = pack weight files +
+            # working margin; the n-gram table streams from SSD, never wired.
             try:
-                from mtplx.memory_plan import (
-                    NGRAM_TABLE_FILENAME,
-                    ngram_table_resident_policy,
-                )
-
                 model_dir = Path(str(getattr(args, "model", "") or ""))
                 floor = 0
                 for f in model_dir.glob("model*.safetensors"):
@@ -3170,9 +3164,6 @@ class ServerState:
                 mtp_f = model_dir / "mtp.safetensors"
                 if mtp_f.exists():
                     floor += mtp_f.stat().st_size
-                table_f = model_dir / NGRAM_TABLE_FILENAME
-                if table_f.exists() and ngram_table_resident_policy():
-                    floor += table_f.stat().st_size
                 if floor:
                     ram_bytes, _ = _detect_total_ram_bytes_for_metal_caps()
                     minimum_resident_bytes = floor + _resident_floor_margin_bytes(
@@ -3503,25 +3494,15 @@ class ServerState:
         _plan_weights_bytes = _model_weights_bytes(
             getattr(self.runtime, "model_path", None)
         )
-        # Flash-Next n-gram sidecar: a commitment ONLY when the resident
-        # policy arms (it is then materialized into MLX memory at load);
-        # streamed mode reads reclaimable file-backed pages, so the plan
-        # carries it as a note instead of shrinking the window and the
-        # bank by 30G (the false MODEL-DOES-NOT-FIT chain, 2026-08-28).
+        # Flash-Next n-gram sidecar: it streams from reclaimable file-backed
+        # pages, so the plan carries it as a note instead of shrinking the
+        # window and the bank by 30G (the false MODEL-DOES-NOT-FIT chain,
+        # 2026-08-28).
         from mtplx.engine_session import ngram_table_bytes as _ngram_table_bytes
-        from mtplx.memory_plan import (
-            ngram_table_resident_policy as _ngram_table_resident,
-        )
 
-        _plan_table_bytes = _ngram_table_bytes(
+        _plan_table_streamed_bytes = _ngram_table_bytes(
             getattr(self.runtime, "model_path", None)
         )
-        _plan_table_streamed_bytes = 0
-        if _plan_table_bytes:
-            if _ngram_table_resident():
-                _plan_weights_bytes = (_plan_weights_bytes or 0) + _plan_table_bytes
-            else:
-                _plan_table_streamed_bytes = _plan_table_bytes
         # env override > model-config-derived geometry > flagship default
         _plan_kv_bytes_per_token = 0
         try:
@@ -16885,20 +16866,15 @@ def _memory_attribution(state: Any) -> dict[str, Any]:
     weights = getattr(state, "_model_weights_bytes_cache", None)
     if weights is None:
         try:
-            from mtplx.engine_session import model_weights_bytes, ngram_table_bytes
-            from mtplx.memory_plan import ngram_table_resident_policy
+            from mtplx.engine_session import model_weights_bytes
 
             root = Path(str(state.args.model))
             # model_weights_bytes scans recursively and already counts the
             # nested MTP sidecar — no manual add, or it double-counts. The
-            # n-gram table is excluded from that scan; it belongs in this
-            # wired-weights bucket only when the resident policy actually
-            # materialized it (streamed mode reads file-backed pages that
-            # never enter allocator active — counting them here made
-            # "weights" exceed "active total" in the app).
+            # n-gram table is excluded from that scan: it streams from
+            # file-backed pages that never enter allocator active (counting
+            # them here made "weights" exceed "active total" in the app).
             weights = int(model_weights_bytes(root) or 0)
-            if ngram_table_resident_policy():
-                weights += ngram_table_bytes(root)
         except Exception:
             weights = 0
         state._model_weights_bytes_cache = weights

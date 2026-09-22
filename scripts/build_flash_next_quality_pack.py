@@ -366,7 +366,7 @@ def main(argv=None) -> int:
             if not (source / required).is_file():
                 raise RuntimeError(f"BF16 source is missing {required}; preserve upstream license and credits before building")
         env = os.environ.copy()
-        env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MTPLX_NGRAM_RESIDENT": "1"})
+        env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
         # A clean named output is required; Forge may never silently select -1.
         command = [sys.executable, "-m", "mtplx.cli", "forge", "build", "--repo", str(source),
                    "--model-root", str(output.parent), "--branded-name", output.name,

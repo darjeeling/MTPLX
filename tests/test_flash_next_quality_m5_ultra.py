@@ -14,7 +14,6 @@ import pytest
 from mtplx.hardware import classify_apple_silicon_generation
 from mtplx.memory_plan import (
     ENGINE_RAM_CAP_BYTES,
-    NGRAM_RESIDENT_AUTO_MIN_RAM_BYTES,
     dense_kv_bytes_per_token_from_config,
     engine_envelope_bytes,
     plan_memory,
@@ -36,10 +35,10 @@ QUALITY_ID = "flash-next-optimized-quality"
 QUALITY_HF = "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality"
 
 # Same file-size accounting as engine_session.model_weights_bytes and
-# ngram_table_bytes: 37 body/vision shards, the MTP head, and the separate table.
+# ngram_table_bytes: 37 body/vision shards, the MTP head, and the separate
+# table, which streams from SSD on every Mac and is never weight.
 BODY_MTP_VISION_BYTES = 137_934_585_655
 NGRAM_TABLE_BYTES = 32_000_153_976
-RESIDENT_WEIGHTS_BYTES = BODY_MTP_VISION_BYTES + NGRAM_TABLE_BYTES  # table resident >= 160 GiB
 # openai._resident_floor_margin_bytes at 112 GB and up.
 RESIDENT_FLOOR_MARGIN_BYTES = 6 * GIB
 MODEL_MAX_CONTEXT = 262_144
@@ -126,15 +125,15 @@ def test_served_id_and_hf_repo_resolve_through_cli_paths():
 
 def _quality_plan(ram_gib: int, *, sparse_prefill: bool, requested_context: int | None = None):
     total = ram_gib * GIB
-    assert total >= NGRAM_RESIDENT_AUTO_MIN_RAM_BYTES  # auto policy: table resident, counted as weights
     kv = dense_kv_bytes_per_token_from_config(FLASH_NEXT_CONFIG)
     aux = qsa_aux_bytes_per_token_from_config(FLASH_NEXT_CONFIG)
     transient = 0 if sparse_prefill else qsa_prefill_transient_bytes_per_token_from_config(FLASH_NEXT_CONFIG)
     assert (kv, aux) == (24_576, 7_872)
-    floor = RESIDENT_WEIGHTS_BYTES + RESIDENT_FLOOR_MARGIN_BYTES
+    floor = BODY_MTP_VISION_BYTES + RESIDENT_FLOOR_MARGIN_BYTES
     return plan_memory(
         total_ram_bytes=total,
-        model_weights_bytes=RESIDENT_WEIGHTS_BYTES,
+        model_weights_bytes=BODY_MTP_VISION_BYTES,
+        ngram_table_streamed_bytes=NGRAM_TABLE_BYTES,
         kv_bytes_per_token=kv,
         model_max_context=MODEL_MAX_CONTEXT,
         requested_context=requested_context,
@@ -149,23 +148,26 @@ def test_planner_grants_full_window_with_sparse_prefill_on_m5_ultra(ram_gib):
     plan = _quality_plan(ram_gib, sparse_prefill=True)
     assert plan.available and plan.model_fits and not plan.tight_machine
     # The allocator envelope is the 192 GiB cap on both tiers; the floor
-    # (158.3 + 6 GiB) sits under it, so the 75% rule is not lifted.
+    # (128.5 + 6 GiB) sits under it, so the 75% rule is not lifted.
     assert plan.usable_bytes == ENGINE_RAM_CAP_BYTES == 192 * GIB
     assert plan.usable_source == "formula"
     assert plan.context_window_fit == MODEL_MAX_CONTEXT
     assert plan.context_window_resolved == MODEL_MAX_CONTEXT
     assert not plan.context_machine_bound
-    # Weights 158.26 GiB leave 29.7 GiB of KV budget under the cap.
-    assert 29 * GIB < plan.usable_bytes - plan.model_weights_bytes - 4 * GIB < 30 * GIB
+    # Weights 128.46 GiB leave 59.5 GiB of KV budget under the cap; the
+    # 29.8 GiB table streams and is reported, not budgeted.
+    assert 59 * GIB < plan.usable_bytes - plan.model_weights_bytes - 4 * GIB < 60 * GIB
+    assert plan.ngram_table_streamed_bytes == NGRAM_TABLE_BYTES
 
 
 @pytest.mark.parametrize("ram_gib", M5_ULTRA_TIERS)
-def test_planner_dense_prefill_fallback_still_covers_128k_on_m5_ultra(ram_gib):
+def test_planner_dense_prefill_fallback_still_covers_the_full_window_on_m5_ultra(ram_gib):
+    # M3 Ultra from pip or Homebrew: the dense indexer lane prices 104,448
+    # extra bytes per token, and 59.5 GiB still funds 466,944 tokens.
     plan = _quality_plan(ram_gib, sparse_prefill=False)
     assert plan.model_fits and not plan.tight_machine
-    assert plan.context_window_fit == 229_376
-    assert plan.context_machine_bound
-    assert plan.context_window_fit >= 131_072
+    assert plan.context_window_fit == MODEL_MAX_CONTEXT
+    assert not plan.context_machine_bound
     # 128K requested explicitly is not overcommitted even on the dense lane.
     explicit = _quality_plan(ram_gib, sparse_prefill=False, requested_context=131_072)
     assert explicit.context_window_resolved == 131_072 and not explicit.context_overcommitted
@@ -192,14 +194,15 @@ def test_metal_load_gate_admits_quality_on_m5_ultra(ram_gib, monkeypatch):
         set_wired_limit=lambda v: calls.append(("wired", int(v))),
     )
     total = ram_gib * GIB
-    floor = RESIDENT_WEIGHTS_BYTES + openai._resident_floor_margin_bytes(total)
+    floor = BODY_MTP_VISION_BYTES + openai._resident_floor_margin_bytes(total)
     assert openai._resident_floor_margin_bytes(total) == RESIDENT_FLOOR_MARGIN_BYTES
     result = openai._apply_metal_memory_caps(mx_module=mx, total_ram_bytes=total, minimum_resident_bytes=floor)
     assert result["applied"] is True, result
     assert result["memory_limit_bytes"] == 192 * GIB
-    # The 60% wired default (153.6 GiB at 256, 160 GiB cap at 512) is lifted
-    # to the resident floor so the table-resident set is never force-evicted.
-    assert result["wired_limit_bytes"] == floor
+    # The floor (134.5 GiB) sits under the 60% wired default (153.6 GiB at
+    # 256, the 160 GiB cap at 512), so the default wires the weights.
+    assert result["wired_limit_bytes"] == min(int(total * 0.60), 160 * GIB)
+    assert result["wired_limit_bytes"] > floor
     assert floor + system_reserve_bytes(total) < total
     assert engine_envelope_bytes(total, resident_floor_bytes=floor) == 192 * GIB
 
@@ -211,7 +214,7 @@ def test_metal_load_gate_refuses_quality_on_96_gib_m5_ultra(monkeypatch):
     monkeypatch.delenv("MTPLX_WIRED_LIMIT_BYTES", raising=False)
     mx = SimpleNamespace(metal=SimpleNamespace(is_available=lambda: True), set_memory_limit=lambda v: None, set_wired_limit=lambda v: None)
     total = 96 * GIB
-    # Below 160 GiB the table streams, so the floor is body+MTP+vision + margin.
+    # The table streams, so the floor is body+MTP+vision + margin.
     floor = BODY_MTP_VISION_BYTES + openai._resident_floor_margin_bytes(total)
     result = openai._apply_metal_memory_caps(mx_module=mx, total_ram_bytes=total, minimum_resident_bytes=floor)
     assert result["applied"] is False and result["reason"] == "insufficient_ram"
