@@ -128,7 +128,10 @@ All notable user-facing changes to MTPLX. The format is based on
   `MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`, `MTPLX_QWEN4_GDN_PREFILL_PREWORK=0`,
   `MTPLX_QWEN4_GDN_GATED_NORM=0` and `MTPLX_QWEN4_PREFILL_DQ_GEMM=0` turn one
   step off; `MTPLX_QWEN4_PREFILL_DQ_GEMM=1` forces the projection step on any
-  Mac.
+  Mac. Every Flash-Next load checks the four kernels that run on every Mac
+  on its own GPU first (bit-exact against the stock chain at the family's
+  shapes and thread counts, about 58 ms); a kernel that fails is turned off
+  for the process, the stock path serves, and `/health` shows the lane.
 
 - **Every Bonsai load checks its two kernels on the GPU it runs on.** The
   fused Hadamard rotation must return the stock operations' exact bits and
