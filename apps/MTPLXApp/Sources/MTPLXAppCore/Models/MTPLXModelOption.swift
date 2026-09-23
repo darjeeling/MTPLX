@@ -1022,8 +1022,26 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         {
             appendCustom(current, to: &rows)
         }
+        // A discovered folder joins a catalog, remembered or current row when
+        // it is that model: the row already lists the folder, or the folder's
+        // name (see ModelLibrary) is the row's. Discovered folders never join
+        // each other by name, so two builds keep two rows; only the same
+        // install found under two library roots (same folder name, same
+        // declared name) shares one row, first root first.
+        var listedInstalls: [String: Int] = [:]
+        for (index, row) in rows.enumerated() {
+            for candidate in row.localCandidates {
+                let path = ModelLibrary.canonicalURL(for: expand(candidate)).path
+                if listedInstalls[path] == nil {
+                    listedInstalls[path] = index
+                }
+            }
+        }
+        var discoveredRows: [String: Int] = [:]
         for local in modelLibrary.discoverCompleteModels() {
-            if let index = rows.firstIndex(where: { $0.matches(local.reference) }) {
+            if let index = listedInstalls[local.path] ?? rows.indices.first(where: {
+                !rows[$0].id.hasPrefix("local:") && rows[$0].matches(local.reference)
+            }) {
                 rows[index].localCandidates = insertLibraryPath(
                     local.path,
                     to: rows[index].localCandidates,
@@ -1040,6 +1058,17 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 appendUnique(official, to: &rows)
                 continue
             }
+            let installKey = normalized(local.reference) + "\n"
+                + normalized(URL(fileURLWithPath: local.path).lastPathComponent)
+            if let index = discoveredRows[installKey] {
+                rows[index].localCandidates = insertLibraryPath(
+                    local.path,
+                    to: rows[index].localCandidates,
+                    library: modelLibrary
+                )
+                continue
+            }
+            discoveredRows[installKey] = rows.count
             rows.append(MTPLXModelOption(
                 id: "local:\(local.path)",
                 displayName: local.displayName,
