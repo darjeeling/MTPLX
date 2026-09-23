@@ -332,7 +332,12 @@ public struct MutableSettings: Codable, Equatable, Sendable {
     public var reasoning: String?
     public var reasoningEffort: String?
     public var managedClientControls: String?
+    /// The prefill chunk the user pinned, or nil when the engine chooses.
+    /// A push of 0 returns a running daemon to its own choice.
     public var prefillChunkTokens: Int?
+    /// Read-only: the chunk an unpinned request plans with (the family's
+    /// memory-gated width where it has one). The server drops it on echo.
+    public var prefillChunkTokensDefault: Int?
     /// `none` or a policy name (`expected_value`). Live-mutable like
     /// `depth`; the daemon builds its depth policy per request.
     public var adaptivePolicy: String?
@@ -366,6 +371,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         reasoningEffort: String? = nil,
         managedClientControls: String? = nil,
         prefillChunkTokens: Int? = nil,
+        prefillChunkTokensDefault: Int? = nil,
         adaptivePolicy: String? = nil,
         adaptiveDepthSupported: Bool? = nil
     ) {
@@ -394,6 +400,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         self.reasoningEffort = reasoningEffort
         self.managedClientControls = managedClientControls
         self.prefillChunkTokens = prefillChunkTokens
+        self.prefillChunkTokensDefault = prefillChunkTokensDefault
         self.adaptivePolicy = adaptivePolicy
         self.adaptiveDepthSupported = adaptiveDepthSupported
     }
@@ -424,6 +431,7 @@ public struct MutableSettings: Codable, Equatable, Sendable {
         case reasoningEffort = "reasoning_effort"
         case managedClientControls = "managed_client_controls"
         case prefillChunkTokens = "prefill_chunk_tokens"
+        case prefillChunkTokensDefault = "prefill_chunk_tokens_default"
         case adaptivePolicy = "adaptive_policy"
         case adaptiveDepthSupported = "adaptive_depth_supported"
     }

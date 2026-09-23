@@ -1615,6 +1615,45 @@ final class MTPLXAppCoreTests: XCTestCase {
         XCTAssertEqual(partial.topP, 0.9)
     }
 
+    func testSanitizeMigratesPrefillChunkFallbackOnce() throws {
+        // A saved 2048 is the fingerprint of the inference panel's fallback,
+        // which older builds wrote on any live-settings push. It yields back
+        // to the engine's own chunk exactly ONCE per config.
+        var legacy = MTPLXAppConfiguration()
+        legacy.prefillChunkTokens = 2048
+        legacy.sanitizeLaunchCriticalFields()
+        XCTAssertNil(legacy.prefillChunkTokens)
+        XCTAssertTrue(legacy.prefillChunkFallbackMigrated)
+
+        // A 2048 chosen after the migration sticks.
+        legacy.prefillChunkTokens = 2048
+        legacy.sanitizeLaunchCriticalFields()
+        XCTAssertEqual(legacy.prefillChunkTokens, 2048)
+
+        // Any other saved value was a deliberate choice and survives the
+        // first pass (which still consumes the one-shot flag).
+        var chosen = MTPLXAppConfiguration()
+        chosen.prefillChunkTokens = 8192
+        chosen.sanitizeLaunchCriticalFields()
+        XCTAssertEqual(chosen.prefillChunkTokens, 8192)
+        XCTAssertTrue(chosen.prefillChunkFallbackMigrated)
+    }
+
+    func testLegacySavedPrefillFallbackNoLongerPinsTheLaunchChunk() throws {
+        // The founder's settings.json shape: 2048 saved by an older build and
+        // no migration flag. After decode the launch carries no chunk flag, so
+        // the engine keeps the family's memory-gated width.
+        let json = Data(#"{"model": "/models/qwen", "prefill_chunk_tokens": 2048}"#.utf8)
+        let loaded = try JSONDecoder().decode(MTPLXAppConfiguration.self, from: json)
+        XCTAssertNil(loaded.prefillChunkTokens)
+        let fake = try makeExecutable(named: "mtplx")
+        var configuration = loaded
+        configuration.executablePath = fake.path
+        let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
+        let command = try builder.buildServeCommand(configuration: configuration)
+        XCTAssertFalse(command.arguments.contains("--prefill-chunk-tokens"))
+    }
+
     func testCommandBuilderEmitsLaunchOwnershipAndStrictFanArgs() throws {
         let fake = try makeExecutable(named: "mtplx")
         let builder = MTPLXCommandBuilder(environment: ["PATH": fake.deletingLastPathComponent().path])
