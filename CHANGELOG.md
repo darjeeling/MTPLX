@@ -115,6 +115,27 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Changed
 
+- **Flash-Next prefill runs five more steps as single GPU kernels.** The
+  hyper-connection read, the expert-output combine, the gated-delta prework
+  and the gated-delta norm gate run as one kernel each on every Mac; on M5
+  chips the wide projections also run as one dequantize plus a dense matrix
+  multiply (M1 to M4 keep the quantized multiply, where MLX's two paths are
+  not known to agree). Output is bit-identical to 2.12.0 without them: every
+  position's logits and 256 greedy tokens on code and prose at 16K and code
+  at 64K. On an M5 Max, alternating boots without and with the kernels:
+  1,459 -> 1,695 tok/s at 16K (+16%) and 1,415 -> 1,548 at 64K (+9%), same
+  peak memory. `MTPLX_QWEN4_HC_PREFILL_READ=0`,
+  `MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`, `MTPLX_QWEN4_GDN_PREFILL_PREWORK=0`,
+  `MTPLX_QWEN4_GDN_GATED_NORM=0` and `MTPLX_QWEN4_PREFILL_DQ_GEMM=0` turn one
+  step off; `MTPLX_QWEN4_PREFILL_DQ_GEMM=1` forces the projection step on any
+  Mac.
+
+- **Every Bonsai load checks its two kernels on the GPU it runs on.** The
+  fused Hadamard rotation must return the stock operations' exact bits and
+  the ternary kernel must match stock; a kernel that fails is turned off for
+  the process, the stock path serves, and `/health` shows the lane. Both are
+  plain SIMD code and run on M1 to M5.
+
 - **`mtplx tune` pins the fans only when asked.** It pinned them at
   maximum on every run, so Forge's verification did too, even without
   `--max`. Tune now pins them only with its new `--max` flag or
