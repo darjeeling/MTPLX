@@ -238,20 +238,209 @@ final class ModelLibraryTests: XCTestCase {
         XCTAssertEqual(orchestrator.installedLocalPath(for: option), model.path)
     }
 
+    // Two Forge builds of one source (a 4-bit and a 6-bit) both record that
+    // source as forge_provenance.source_repo. Each is its own model: it is
+    // listed under its folder name, in its own row, and selecting the row
+    // launches that folder.
+    func testBuildsOfOneSourceKeepTheirFolderNamesAndTheirOwnRows() throws {
+        let root = temporaryDirectory()
+        let tag = String(UUID().uuidString.prefix(8))
+        for source in [root.appendingPathComponent("_src-Qwen3.5-9B-V26-Distill-graft").path, "Qwen/Qwen3.5-9B"] {
+            let runtime: [String: Any] = ["forge_provenance": forgeProvenance(source: source)]
+            let variant = source.hasPrefix("/") ? "local" : "hub"
+            let fourBit = try makeCompleteModel(
+                under: root,
+                directoryName: "MiMo-9B-namecheck-\(variant)-\(tag)",
+                runtime: runtime
+            )
+            let sixBit = try makeCompleteModel(
+                under: root,
+                directoryName: "MiMo-9B-6bit-\(variant)-\(tag)",
+                runtime: runtime
+            )
+            let library = ModelLibrary(primaryDirectory: root.path)
+            XCTAssertEqual(recordedSource(of: sixBit), source, "the fixture must parse as Forge provenance")
+
+            let names = Dictionary(
+                uniqueKeysWithValues: library.discoverCompleteModels().map { ($0.path, $0.displayName) }
+            )
+            XCTAssertEqual(names[fourBit.path], fourBit.lastPathComponent)
+            XCTAssertEqual(names[sixBit.path], sixBit.lastPathComponent)
+
+            let rows = MTPLXModelOption.pickerCatalog(customModels: [], modelLibrary: library)
+            for folder in [fourBit, sixBit] {
+                let listing = rows.filter { $0.localCandidates.contains(folder.path) }
+                XCTAssertEqual(listing.count, 1, folder.lastPathComponent)
+                XCTAssertEqual(listing.first?.displayName, folder.lastPathComponent)
+                XCTAssertEqual(listing.first?.localCandidates, [folder.path])
+                XCTAssertEqual(listing.first?.resolvedReference(in: library), folder.path)
+                XCTAssertEqual(listing.first?.installedLocalPath, folder.path)
+            }
+            XCTAssertFalse(rows.contains { $0.displayName.hasPrefix("_src-") || $0.matches(source) })
+        }
+    }
+
+    // Official packs record the base model they were built from. A download of
+    // one belongs to its catalog row only, not to a second row named after the
+    // base model.
+    func testOfficialDownloadIsNotListedAgainUnderItsBaseModel() throws {
+        let root = temporaryDirectory()
+        let repo = "Youssofal/Qwen3.8-27B-MTPLX-Optimized-Speed"
+        let official = try makeCompleteModel(
+            under: root,
+            directoryName: repo.replacingOccurrences(of: "/", with: "--"),
+            runtime: ["forge_provenance": forgeProvenance(source: "Qwen/Qwen3.8-27B")]
+        )
+        let library = ModelLibrary(primaryDirectory: root.path)
+        XCTAssertEqual(recordedSource(of: official), "Qwen/Qwen3.8-27B")
+
+        let rows = MTPLXModelOption.pickerCatalog(
+            customModels: [],
+            currentModel: repo,
+            modelLibrary: library
+        )
+
+        XCTAssertEqual(rows.filter { $0.localCandidates.contains(official.path) }.map(\.hfModelID), [repo])
+        XCTAssertFalse(rows.contains { $0.id.hasPrefix("local:") })
+        XCTAssertFalse(rows.contains { $0.matches("Qwen/Qwen3.8-27B") })
+    }
+
+    // Only a name the pack declares for itself replaces the folder name.
+    func testOnlyADeclaredPublicNameReplacesTheFolderName() throws {
+        let root = temporaryDirectory()
+        let tag = String(UUID().uuidString.prefix(8))
+        let provenance = forgeProvenance(source: "Acme/Base")
+        let publicName = try makeCompleteModel(
+            under: root,
+            directoryName: "build-a-\(tag)",
+            runtime: ["public_model_id": "acme-coder-a-\(tag)", "forge_provenance": provenance]
+        )
+        let servedName = try makeCompleteModel(
+            under: root,
+            directoryName: "build-b-\(tag)",
+            runtime: ["served_model_id": "acme-coder-b-\(tag)", "forge_provenance": provenance]
+        )
+        let undeclared = try makeCompleteModel(
+            under: root,
+            directoryName: "build-c-\(tag)",
+            runtime: ["model_id": "Acme/Base", "forge_provenance": provenance]
+        )
+        let library = ModelLibrary(primaryDirectory: root.path)
+        XCTAssertEqual(recordedSource(of: undeclared), "Acme/Base")
+
+        let names = Dictionary(
+            uniqueKeysWithValues: library.discoverCompleteModels().map { ($0.path, $0.displayName) }
+        )
+
+        XCTAssertEqual(names[publicName.path], "acme-coder-a-\(tag)")
+        XCTAssertEqual(names[servedName.path], "acme-coder-b-\(tag)")
+        XCTAssertEqual(names[undeclared.path], "build-c-\(tag)")
+    }
+
+    // The same install under two roots (same folder name) is one model with an
+    // ordered fallback, as for a duplicated repository. Two different folders
+    // stay two rows even when they declare the same name.
+    func testOnlyTheSameInstallUnderTwoRootsSharesARow() throws {
+        let root = temporaryDirectory()
+        let primary = root.appendingPathComponent("primary", isDirectory: true)
+        let secondary = root.appendingPathComponent("secondary", isDirectory: true)
+        try FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondary, withIntermediateDirectories: true)
+        let tag = String(UUID().uuidString.prefix(8))
+        let first = try makeCompleteModel(under: primary, directoryName: "Local-Build-\(tag)", runtime: nil)
+        let copy = try makeCompleteModel(under: secondary, directoryName: "Local-Build-\(tag)", runtime: nil)
+        let shared = ["public_model_id": "shared-name-\(tag)"]
+        let variantA = try makeCompleteModel(under: primary, directoryName: "Variant-A-\(tag)", runtime: shared)
+        let variantB = try makeCompleteModel(under: secondary, directoryName: "Variant-B-\(tag)", runtime: shared)
+        let library = ModelLibrary(
+            primaryDirectory: primary.path,
+            additionalDirectories: [secondary.path]
+        )
+
+        let rows = MTPLXModelOption.pickerCatalog(customModels: [], modelLibrary: library)
+
+        let install = rows.filter { $0.localCandidates.contains(first.path) }
+        XCTAssertEqual(install.map(\.localCandidates), [[first.path, copy.path]])
+        XCTAssertEqual(install.first?.resolvedReference(in: library), first.path)
+        for variant in [variantA, variantB] {
+            let listing = rows.filter { $0.localCandidates.contains(variant.path) }
+            XCTAssertEqual(listing.map(\.localCandidates), [[variant.path]])
+            XCTAssertEqual(listing.first?.resolvedReference(in: library), variant.path)
+        }
+    }
+
+    // The folder settings.json points at already has its row; discovering it
+    // under a declared name that differs from the folder name adds no second.
+    func testCurrentFolderWithItsOwnDeclaredNameHasOneRow() throws {
+        let root = temporaryDirectory()
+        let tag = String(UUID().uuidString.prefix(8))
+        let folder = try makeCompleteModel(
+            under: root,
+            directoryName: "Acme--Current-\(tag)",
+            runtime: ["public_model_id": "acme-current-build-\(tag)"]
+        )
+        let library = ModelLibrary(primaryDirectory: root.path)
+
+        let rows = MTPLXModelOption.pickerCatalog(
+            customModels: [],
+            currentModel: folder.path,
+            modelLibrary: library
+        )
+
+        XCTAssertEqual(rows.filter { $0.localCandidates.contains(folder.path) }.count, 1)
+    }
+
+    /// The provenance block Forge writes into mtplx_runtime.json, complete
+    /// enough for MTPLXRuntimeMetadata to decode (a partial block decodes to
+    /// nil and would hide the naming path under test).
+    private func forgeProvenance(source: String) -> [String: Any] {
+        [
+            "source_repo": source,
+            "source_format": "bf16_native",
+            "forge_recipe": [
+                "body_bits": 4,
+                "body_group_size": 64,
+                "body_mode": "affine",
+                "mtp_policy": "keep_bf16",
+            ],
+            "forge_inputs": [String: String](),
+            "forged_at": "2026-09-22T15:03:46-07:00",
+            "mtplx_version": "2.12.0",
+            "forged_locally": true,
+        ]
+    }
+
+    private func recordedSource(of model: URL) -> String? {
+        MTPLXRuntimeMetadata.read(
+            at: model.appendingPathComponent("mtplx_runtime.json").path
+        )?.forgeProvenance?.sourceRepo
+    }
+
     private func makeCompleteModel(
         under root: URL,
         directoryName: String,
         publicModelID: String
     ) throws -> URL {
+        try makeCompleteModel(
+            under: root,
+            directoryName: directoryName,
+            runtime: ["public_model_id": publicModelID]
+        )
+    }
+
+    private func makeCompleteModel(
+        under root: URL,
+        directoryName: String,
+        runtime: [String: Any]?
+    ) throws -> URL {
         let model = root.appendingPathComponent(directoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
         try "{}".write(to: model.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
         try "{}".write(to: model.appendingPathComponent("tokenizer.json"), atomically: true, encoding: .utf8)
-        try "{\"public_model_id\":\"\(publicModelID)\"}".write(
-            to: model.appendingPathComponent("mtplx_runtime.json"),
-            atomically: true,
-            encoding: .utf8
-        )
+        if let runtime {
+            try JSONSerialization.data(withJSONObject: runtime)
+                .write(to: model.appendingPathComponent("mtplx_runtime.json"))
+        }
         try Data([0]).write(to: model.appendingPathComponent("mtp.safetensors"))
         try Data([0]).write(to: model.appendingPathComponent("model.safetensors"))
         return model

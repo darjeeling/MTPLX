@@ -168,6 +168,12 @@ public struct ModelLibrary: Equatable, Sendable {
             .appendingPathComponent(String(path.dropFirst(2)), isDirectory: true)
     }
 
+    /// The name a folder is listed under: the public name the pack declares
+    /// for itself, else the folder name. Never the source it was built from:
+    /// `forge_provenance.source_repo` names the source repo or folder, which
+    /// every build of that source shares, so a 4-bit and a 6-bit build of one
+    /// source got one name and one picker row, and an official download was
+    /// listed a second time under its base model's name.
     private func modelReference(
         metadata: MTPLXRuntimeMetadata?,
         directoryName: String
@@ -175,8 +181,6 @@ public struct ModelLibrary: Equatable, Sendable {
         let candidates: [String?] = [
             metadata?.publicModelID,
             metadata?.rawJSON["served_model_id"] as? String,
-            metadata?.rawJSON["model_id"] as? String,
-            metadata?.forgeProvenance?.sourceRepo,
         ]
         if let value = candidates.compactMap({ $0 })
             .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })

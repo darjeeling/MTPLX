@@ -506,6 +506,17 @@ All notable user-facing changes to MTPLX. The format is based on
 - **Activity and Cache show every saved prefix.** Several prefixes saved
   from one conversation shared one row identity, which hid entries the
   engine still held. Rows are now keyed by the session and the token hash.
+- **Each model folder keeps its own name and row in the model list.** The
+  list named a local folder after the first of `public_model_id`,
+  `served_model_id`, `model_id` and `forge_provenance.source_repo`, and
+  every build of a source records that source. Two builds of one source,
+  such as a 4-bit and a 6-bit, shared one row named after the source,
+  which launched whichever build was found first, and a downloaded
+  official pack that records its base model, such as Qwen 3.8 27B
+  Optimized Speed, was listed again under that base model. A folder is
+  now named by `public_model_id` or `served_model_id`, else by its folder
+  name, and keeps its own row; the same folder name under two model
+  folders still shares one row, first folder first.
 - **Setup uses the runtime and model defaults it selected.** An app runtime
   started from another MTPLX folder could import that folder's package
   first and report the wrong version; the runtime wrapper now runs Python
