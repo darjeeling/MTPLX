@@ -39,7 +39,9 @@ no larger than this pack's 8,834,412,216 bytes (`TIGHT_MACHINE_MAX_WEIGHTS_BYTES
 and to a larger pack only when its runtime contract carries its own measured
 memory table (`memory_evidence`) for those exact weights, with a completed run
 inside the budget that the rule admitted. The published Bonsai pack carries its
-table as well. Every plan that funds the floor is unchanged.
+table as well. A pack that can fund the floor keeps it unless dropping it
+gives a larger window, capped at what the rule could grant, so a lighter pack
+never plans less context than a heavier one. No catalog model's window changes.
 
 ## Running the memory table
 
