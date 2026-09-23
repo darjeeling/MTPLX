@@ -49,6 +49,14 @@ from mlx.utils import tree_flatten
 from mlx_lm.models import qwen3_5 as _qwen3_5
 from mlx_lm.models.base import BaseModelArgs
 
+from ..kernels.hadamard_rotate import rotate as fused_hadamard_rotate
+from ..kernels.ternary_qmv import (
+    plan as ternary_plan,
+    run as ternary_run,
+    ternary_layout,
+    worthwhile as ternary_worthwhile,
+)
+
 MODEL_TYPE = "prism_hadamard_qwen35"
 SUPPORTED_SCHEMA_VERSIONS = (2,)
 SUPPORTED_BLOCKS = (512, 1024, 2048, 4096)
@@ -111,6 +119,10 @@ def hadamard_rotate(
         raise _refuse(
             f"Hadamard block {block} does not divide activation width {width}"
         )
+    fused = fused_hadamard_rotate(x, signs, block, inverse=inverse)
+    if fused is not None:
+        # Same bits as the chain below, in one dispatch.
+        return fused
     dtype = x.dtype
     y = x.astype(mx.float32)
     if not inverse:
@@ -194,6 +206,11 @@ class HadamardQuantizedLinear(nn.Module):
         if self.block:
             self.signs = mx.ones((input_dims,), dtype=mx.float32)
         self._rotation: _SharedRotation | None = None
+        # Set by Model.post_weight_load once the loaded biases are proven to
+        # be exactly -scales (Prism's ternary layout), with the kernel's
+        # launch plan for this matrix.
+        self._ternary = False
+        self._ternary_plan = None
         self.freeze()
 
     def rotate(self, x: mx.array) -> mx.array:
@@ -205,8 +222,16 @@ class HadamardQuantizedLinear(nn.Module):
         return hadamard_rotate(x, self["signs"], self.block)
 
     def __call__(self, x: mx.array) -> mx.array:
+        rotated = self.rotate(x)
+        planned = self._ternary_plan
+        if planned is not None:
+            # Verify and decode rows (M <= 4) on the ternary kernel; it
+            # declines every other shape and the stock matmul below runs.
+            out = ternary_run(planned, rotated, self["weight"], self["scales"])
+            if out is not None:
+                return out
         return mx.quantized_matmul(
-            self.rotate(x),
+            rotated,
             self["weight"],
             scales=self["scales"],
             biases=self["biases"],
@@ -546,6 +571,7 @@ class Model(_qwen3_5.Model):
             )
         report["hadamard_config"] = self._check_rotation_metadata(path)
         report["shared_rotation_groups"] = self._arm_shared_rotations()
+        report["ternary_layout_modules"] = self._arm_ternary_kernels()
         report["float_dtypes"] = self._check_float_dtypes()
         report["packed_modules"] = len(self._prism_records)
         object.__setattr__(self, "_prism_post_load_report", report)
@@ -674,6 +700,29 @@ class Model(_qwen3_5.Model):
                     module._rotation = shared
                 groups += 1
         return groups
+
+    def _arm_ternary_kernels(self) -> int:
+        """Mark every packed projection whose biases are exactly -scales.
+
+        Only those matrices may take the ternary kernel: it folds the bias
+        into the code (a weight is scale * (code - 1)), which is exact for
+        that layout and wrong for any other affine 2-bit matrix. Matrices
+        too small to beat stock (the key and value projections) keep stock.
+        """
+
+        armed = 0
+        for _record, module in self._packed_modules():
+            if not isinstance(module, HadamardQuantizedLinear):
+                continue
+            planned = None
+            if ternary_worthwhile(int(module["weight"].shape[0])) and ternary_layout(
+                module["scales"], module["biases"]
+            ):
+                planned = ternary_plan(module["weight"], module["scales"])
+            module._ternary_plan = planned
+            module._ternary = planned is not None
+            armed += int(module._ternary)
+        return armed
 
     def _check_float_dtypes(self) -> list[str]:
         """No bfloat16 anywhere: the pack is float16 scaled on every chip."""

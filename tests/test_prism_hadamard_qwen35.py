@@ -258,6 +258,108 @@ def test_shared_and_per_module_rotation_are_bit_identical(pack, monkeypatch):
     assert np.array_equal(_logits(shared), _logits(separate))
 
 
+def _decode_windows(model, rows: int) -> list[np.ndarray]:
+    """Prefill four tokens, then walk the rest of IDS in verify windows of ``rows``."""
+
+    cache = model.make_cache()
+    out = model(mx.array([IDS[0][:4]]), cache=cache)
+    mx.eval(out)
+    windows = []
+    for start in range(4, len(IDS[0]) - rows + 1, rows):
+        logits = model(mx.array([IDS[0][start : start + rows]]), cache=cache)
+        mx.eval(logits)
+        windows.append(np.asarray(logits.astype(mx.float32)))
+    return windows
+
+
+def test_every_packed_projection_is_proven_ternary(pack, monkeypatch):
+    from mtplx.kernels import ternary_qmv
+
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
+    model, report = _load(pack.path)
+    linears = [
+        m for _r, m in model._packed_modules() if isinstance(m, ph.HadamardQuantizedLinear)
+    ]
+    assert linears and report["ternary_layout_modules"] == len(linears)
+    assert all(m._ternary for m in linears)
+
+
+def test_matrices_too_small_to_win_keep_the_stock_matmul(pack):
+    from mtplx.kernels import ternary_qmv
+
+    model, report = _load(pack.path)
+    linears = [
+        m for _r, m in model._packed_modules() if isinstance(m, ph.HadamardQuantizedLinear)
+    ]
+    big = [m for m in linears if int(m["weight"].shape[0]) >= ternary_qmv.MIN_N]
+    assert big and len(big) < len(linears)
+    assert report["ternary_layout_modules"] == len(big)
+    big_ids = {id(m) for m in big}
+    assert all(m._ternary == (id(m) in big_ids) for m in linears)
+
+
+def test_a_non_ternary_matrix_keeps_the_stock_matmul(pack, tmp_path, monkeypatch):
+    from mtplx.kernels import ternary_qmv
+
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
+    path = _copy_pack(pack, tmp_path / "pack")
+    target = "language_model." + pack.module_paths[0] + ".biases"
+    _rewrite_tensors(path, lambda t: t.__setitem__(target, t[target] * 0.5))
+    model, report = _load(path)
+    linears = [
+        m for _r, m in model._packed_modules() if isinstance(m, ph.HadamardQuantizedLinear)
+    ]
+    assert report["ternary_layout_modules"] == len(linears) - 1
+
+
+def test_fused_rotation_keeps_the_model_bit_identical(pack, monkeypatch):
+    from mtplx.kernels import hadamard_rotate
+
+    model, _ = _load(pack.path)
+    monkeypatch.setenv(hadamard_rotate.ENV, "0")
+    prefill_off, windows_off = _logits(model), _decode_windows(model, 2)
+    monkeypatch.setenv(hadamard_rotate.ENV, "1")
+    served = hadamard_rotate.counters()["served"]
+    prefill_on, windows_on = _logits(model), _decode_windows(model, 2)
+    assert hadamard_rotate.counters()["served"] > served
+    assert np.array_equal(prefill_off, prefill_on)
+    assert all(np.array_equal(a, b) for a, b in zip(windows_off, windows_on))
+
+
+def _log_softmax64(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float64)
+    x = x - x.max(-1, keepdims=True)
+    return x - np.log(np.exp(x).sum(-1, keepdims=True))
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4])
+def test_ternary_kernel_keeps_verify_windows_in_stocks_numerical_class(pack, monkeypatch, rows):
+    """Same next-token law as stock at every window row, within float16 rounding.
+
+    The kernel sums in a different float32 order than stock's qmv kernels, so
+    logits are not bit-identical; on this random two-layer pack stock itself
+    moves by up to about 2% of the logit range between its M = 1 and M = 2
+    kernels. The bar is the distribution: the same argmax and a KL far below
+    anything sampling can see.
+    """
+    from mtplx.kernels import ternary_qmv
+
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
+    model, _ = _load(pack.path)
+    monkeypatch.setenv(ternary_qmv.ENV, "0")
+    stock = _decode_windows(model, rows)
+    monkeypatch.setenv(ternary_qmv.ENV, "1")
+    served = ternary_qmv.counters()["served"]
+    mine = _decode_windows(model, rows)
+    assert ternary_qmv.counters()["served"] > served
+    for a, b in zip(stock, mine):
+        assert (a.argmax(-1) == b.argmax(-1)).all()
+        la, lb = _log_softmax64(a), _log_softmax64(b)
+        kl = (np.exp(la) * (la - lb)).sum(-1)
+        assert float(kl.max()) < 1e-3
+        assert float(np.abs(a - b).max()) / float(np.abs(a).max()) < 0.03
+
+
 def test_float_policy_is_float16_with_no_bfloat16_anywhere(pack):
     from mlx.utils import tree_flatten
 
