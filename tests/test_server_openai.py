@@ -1986,6 +1986,8 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
     argv = ["--warmup-tokens", "0", "--rate-limit", str(rate_limit)]
     if api_key:
         argv.extend(["--api-key", api_key])
+    # The default --model is the Qwen 3.8 27B, so the launch sampler is that
+    # family's own 1.0 / 0.95 / 20, the same values /health reports.
     args = parse_args(argv)
     return SimpleNamespace(
         args=args,
@@ -2572,7 +2574,7 @@ def test_openai_server_health_metrics_and_models_fake_state():
     assert health.json()["profile"]["model_id"] == "mtplx-test-model"
     assert health.json()["profile"]["profile_default_model_id"] != "mtplx-test-model"
     assert health.json()["profile"]["sampler"] == {
-        "temperature": 0.6,
+        "temperature": 1.0,
         "top_p": 0.95,
         "top_k": 20,
     }
@@ -2634,6 +2636,138 @@ def test_openai_server_health_profile_sampler_reports_active_override():
         "top_p": 0.95,
         "top_k": 20,
     }
+
+
+_FAMILY_SAMPLER = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
+_CODING_SAMPLER = {"temperature": 0.6, "top_p": 0.95, "top_k": 20}
+# case -> (folder, config model_type, mtplx_runtime.json, sampler served).
+# Test names stay free of family markers: pytest puts the test name in
+# tmp_path, and a marker there would decide the family instead of the pack.
+_DIRECT_BOOT_PACKS = {
+    # Bonsai 2, a Qwen 3.8-27B derivative on the prism model type, in a
+    # folder with no family marker: the pack's own runtime family decides.
+    "bonsai-2": (
+        "pack",
+        "prism_hadamard_qwen35",
+        {"model_family": "qwen3_8", "sampler": _FAMILY_SAMPLER},
+        _FAMILY_SAMPLER,
+    ),
+    "qwen-3.8-27b": (
+        "Qwen3.8-27B-MTPLX-Optimized-Speed",
+        "qwen3_5",
+        {"sampler": _FAMILY_SAMPLER},
+        _FAMILY_SAMPLER,
+    ),
+    "qwen-3.6-27b": (
+        "Qwen3.6-27B-MTPLX-Optimized-Speed",
+        "qwen3_5",
+        {"sampler": _CODING_SAMPLER},
+        _CODING_SAMPLER,
+    ),
+    # A 3.5 pack stamped 1.0 keeps the coding sampler: only a family that
+    # owns its sampler resolves one, a pack stamp alone never does.
+    "qwen-3.5-stamped-1.0": (
+        "Qwen3.5-4B-MTPLX-Optimized-Speed",
+        "qwen3_5",
+        {"sampler": _FAMILY_SAMPLER},
+        _CODING_SAMPLER,
+    ),
+}
+
+
+def _direct_boot_pack(tmp_path: Path, case: str) -> tuple[Path, dict]:
+    folder, model_type, runtime, expected = _DIRECT_BOOT_PACKS[case]
+    pack = tmp_path / folder
+    pack.mkdir()
+    (pack / "config.json").write_text(
+        json.dumps(
+            {"model_type": model_type, "text_config": {"model_type": "qwen3_5_text"}}
+        ),
+        encoding="utf-8",
+    )
+    (pack / "mtplx_runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
+    return pack, expected
+
+
+def _launch_sampler(args) -> dict:
+    return {"temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k}
+
+
+@pytest.mark.parametrize("case", sorted(_DIRECT_BOOT_PACKS))
+def test_direct_daemon_boot_serves_the_family_sampler(tmp_path, case):
+    """A daemon started as `python -m mtplx.server.openai` with no sampler
+    flags serves what `mtplx serve` would inject. Bonsai 2 started this way
+    sampled every request at 0.6 while /health said 1.0 (2026-09-22)."""
+
+    pack, expected = _direct_boot_pack(tmp_path, case)
+
+    args = parse_args(["--model", str(pack), "--warmup-tokens", "0"])
+
+    assert _launch_sampler(args) == expected
+
+
+def test_direct_daemon_boot_keeps_explicit_sampler_flags(tmp_path):
+    pack, _expected = _direct_boot_pack(tmp_path, "bonsai-2")
+
+    typed = parse_args(
+        ["--model", str(pack), "--warmup-tokens", "0", "--temperature", "0.7"]
+    )
+    assert _launch_sampler(typed) == {"temperature": 0.7, "top_p": 0.95, "top_k": 20}
+
+    # `mtplx serve` forwards a config.toml pin as a flag. A pin equal to the
+    # generic default still wins: presence decides, not the value.
+    pinned = parse_args(
+        [
+            "--model",
+            str(pack),
+            "--warmup-tokens",
+            "0",
+            "--temperature",
+            "0.6",
+            "--top-p",
+            "0.9",
+            "--top-k",
+            "40",
+        ]
+    )
+    assert _launch_sampler(pinned) == {"temperature": 0.6, "top_p": 0.9, "top_k": 40}
+
+
+@pytest.mark.parametrize("case", ["bonsai-2", "qwen-3.6-27b"])
+def test_direct_daemon_health_matches_the_request_sampler(tmp_path, monkeypatch, case):
+    pack, expected = _direct_boot_pack(tmp_path, case)
+    state = _fake_state()
+    state.args = parse_args(
+        ["--model", str(pack), "--warmup-tokens", "0", "--rate-limit", "0"]
+    )
+    state.runtime.tokenizer = CaptureTokenizer()
+    captured: dict[str, object] = {}
+
+    def fake_run_generation(_state, _prompt_ids, **kwargs):
+        captured.update(kwargs)
+        return _fake_generation("READY")
+
+    monkeypatch.setattr(openai, "_run_generation", fake_run_generation)
+    client = TestClient(create_app(state))
+
+    health = client.get("/health").json()
+    sampling = health["startup"]["model_controls"]["sampling"]
+    assert {key: sampling[key] for key in expected} == expected
+    assert health["profile"]["sampler"] == expected
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-mtplx-cache-mode": "bypass"},
+        json={"messages": [{"role": "user", "content": "Say READY"}], "max_tokens": 4},
+    )
+
+    assert response.status_code == 200
+    stats = captured["request_observability"]
+    assert {
+        "temperature": stats["effective_temperature"],
+        "top_p": stats["effective_top_p"],
+        "top_k": stats["effective_top_k"],
+    } == expected
 
 
 def test_chat_completion_response_reports_served_model_when_request_model_is_stale(
@@ -3169,7 +3303,7 @@ def test_chat_request_controls_are_server_owned_without_override(monkeypatch):
     assert response.status_code == 200
     assert captured["generation_mode"] == "mtp"
     assert captured["depth"] == 3
-    assert captured["temperature"] == 0.6
+    assert captured["temperature"] == 1.0
     assert captured["top_p"] == 0.95
     assert captured["top_k"] == 20
     _messages, template_kwargs = state.runtime.tokenizer.calls[0]
@@ -4116,7 +4250,7 @@ def test_completion_request_controls_are_server_owned_without_override(monkeypat
     # Server-owned controls resolve to the launch sampler at the prologue
     # (shared RequestPolicy path, same as chat) — the client's 0.01/0.2/1
     # must never reach generation.
-    assert captured["temperature"] == 0.6
+    assert captured["temperature"] == 1.0
     assert captured["top_p"] == 0.95
     assert captured["top_k"] == 20
     stats = captured["request_observability"]
@@ -4134,7 +4268,7 @@ def test_completion_request_controls_are_server_owned_without_override(monkeypat
         "top_p",
         "top_k",
     ]
-    assert stats["effective_temperature"] == 0.6
+    assert stats["effective_temperature"] == 1.0
     assert stats["effective_top_p"] == 0.95
     assert stats["effective_top_k"] == 20
 
@@ -9301,7 +9435,7 @@ def test_opencode_chitchat_preserves_agent_tools_without_direct_reply_contract(
     assert stats["opencode_prompt_contract_profile"] == "opencode_agent"
     assert stats["transcript_replaced_client_system_messages"] == 0
     assert stats["sampler_policy"] == "opencode_default_sampler"
-    assert stats["effective_temperature"] == 0.6
+    assert stats["effective_temperature"] == 1.0
     assert stats["effective_top_p"] == 0.95
     assert stats["effective_top_k"] == 20
     # F9: server-injected sampler normalization is launch_default OWNERSHIP,

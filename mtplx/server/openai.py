@@ -99,6 +99,7 @@ from mtplx.backends.descriptors import (
     REASONING_FAMILY_OVERRIDE_LANES,
     reasoning_family_override_applies,
     reasoning_policy_for_model,
+    sampler_defaults_for_model,
     set_draft_control_arg,
     sync_backend_arg_aliases,
     target_distribution_mode_from_args,
@@ -37861,27 +37862,44 @@ def _gemma4_bundle_defaults(
     return sampler, draft_block_size
 
 
-def _model_declared_sampler_defaults(model_ref: str | None) -> dict[str, Any] | None:
-    """Official sampler defaults declared by the model artifact itself.
+def _model_declared_sampler_defaults(
+    model_ref: str | None,
+    descriptor: BackendDescriptor | None = None,
+) -> dict[str, Any] | None:
+    """Sampler defaults the model owns, for a daemon started without flags.
 
-    Scoped to families whose artifact-declared sampler differs from the
-    project-wide 0.6/0.95/20 coding defaults — existing Qwen3.6/Gemma serving
-    defaults are deliberately left untouched (no-regression rule; widening
-    to another family needs its own receipts):
+    ``mtplx serve`` resolves the family sampler before it starts this module
+    and passes it as flags; a daemon started directly (``python -m
+    mtplx.server.openai``, the bench runners) resolves it here, so both entry
+    points serve the same sampler. Scoped to models whose own sampler differs
+    from the project-wide 0.6/0.95/20 coding defaults — existing Qwen3.5/3.6
+    and Gemma serving defaults are deliberately left untouched (no-regression
+    rule; widening to another family needs its own receipts):
 
     - hy_v3: ``generation_config.json`` (Tencent ships 0.9 / 1.0 / off).
-    - qwen4_exp: the pack's ``mtplx_runtime.json`` sampler block. The family
-      law is 1.0/0.95/20 (day-0 eval receipts); until 2026-08-27 requests
-      silently sampled at the generic 0.6 while /health advertised the
-      rebound family default — the drafts mirrored 0.6 too
-      (draft_sampler_resolved_temperature receipt, serve battery 13:04).
+    - Families that own their sampler (``launch_lane.SAMPLER_OWNING_FAMILIES``:
+      qwen3_8 with its Bonsai 2 derivative, and qwen4_exp): the family law
+      from ``sampler_defaults_for_model``, resolved from the same model ref
+      and lane ``descriptor_from_runtime`` uses, so /health's
+      ``model_controls.sampling`` and the requests agree by construction.
+      Until 2026-08-27 qwen4_exp requests silently sampled at the generic
+      0.6 while /health advertised the rebound family default — the drafts
+      mirrored 0.6 too (draft_sampler_resolved_temperature receipt, serve
+      battery 13:04). That fix read the pack's own stamp and covered
+      qwen4_exp only, so qwen3_8 kept the split until 2026-09-22: Bonsai 2
+      started directly sampled every request and its drafts at 0.6 against
+      a /health 1.0. The family law, not a pack stamp, is what ``mtplx
+      serve`` applies; config.json's model_type still names qwen4_exp when
+      the folder name does not.
     """
     if not model_ref:
         return None
+    ref = str(model_ref)
+    inspection: dict[str, Any] | None = None
     try:
         from mtplx.hf_loader import resolve_model_path
 
-        path = resolve_model_path(str(model_ref))
+        path = resolve_model_path(ref)
         config = json.loads((path / "config.json").read_text(encoding="utf-8"))
         mt = str(config.get("model_type", "")).lower()
         tmt = str((config.get("text_config") or {}).get("model_type") or "").lower()
@@ -37889,27 +37907,31 @@ def _model_declared_sampler_defaults(model_ref: str | None) -> dict[str, Any] | 
             gen = json.loads(
                 (path / "generation_config.json").read_text(encoding="utf-8")
             )
-        elif "qwen4_exp" in (mt, tmt) or "qwen4_exp_text" in (mt, tmt):
-            runtime = json.loads(
-                (path / "mtplx_runtime.json").read_text(encoding="utf-8")
-            )
-            gen = runtime.get("sampler")
-            if not isinstance(gen, dict):
-                return None
-        else:
-            return None
+            out: dict[str, Any] = {}
+            if isinstance(gen.get("temperature"), (int, float)):
+                out["temperature"] = float(gen["temperature"])
+            if isinstance(gen.get("top_p"), (int, float)):
+                out["top_p"] = float(gen["top_p"])
+            top_k = gen.get("top_k")
+            if isinstance(top_k, int):
+                # HF convention: top_k -1/0 = disabled; project sampler treats <=0 as off.
+                out["top_k"] = max(0, top_k)
+            return out or None
+        if "qwen4_exp" in (mt, tmt) or "qwen4_exp_text" in (mt, tmt):
+            inspection = {"model_type": "qwen4_exp"}
     except Exception:
+        # No readable metadata here (an uncached HF id, a partial folder):
+        # the family still resolves from the ref, the way /health resolves
+        # it, and the loader reports the missing files itself.
+        pass
+    from mtplx.launch_lane import family_owned_sampler_overrides
+
+    family = model_family_from_inspection(
+        inspection, model_ref=ref, descriptor=descriptor
+    )
+    if not family_owned_sampler_overrides(family):
         return None
-    out: dict[str, Any] = {}
-    if isinstance(gen.get("temperature"), (int, float)):
-        out["temperature"] = float(gen["temperature"])
-    if isinstance(gen.get("top_p"), (int, float)):
-        out["top_p"] = float(gen["top_p"])
-    top_k = gen.get("top_k")
-    if isinstance(top_k, int):
-        # HF convention: top_k -1/0 = disabled; project sampler treats <=0 as off.
-        out["top_k"] = max(0, top_k)
-    return out or None
+    return sampler_defaults_for_model(ref, inspection, descriptor).to_dict()
 
 
 def _apply_backend_server_defaults(
@@ -37922,24 +37944,29 @@ def _apply_backend_server_defaults(
     ) and _model_ref_is_gemma4_pair(getattr(args, "model", None)):
         args.backend_id = GEMMA4_BACKEND
 
-    declared = _model_declared_sampler_defaults(getattr(args, "model", None))
+    sync_backend_arg_aliases(args)
+    backend = descriptor_for_backend_id(getattr(args, "backend_id", None))
+    declared = _model_declared_sampler_defaults(getattr(args, "model", None), backend)
     if declared:
+        applied: dict[str, Any] = {}
         if "temperature" in declared and not _server_flag_present(
             explicit_flags, "temperature", "default-temperature"
         ):
-            args.temperature = declared["temperature"]
+            args.temperature = applied["temperature"] = declared["temperature"]
         if "top_p" in declared and not _server_flag_present(
             explicit_flags, "top-p", "default-top-p"
         ):
-            args.top_p = declared["top_p"]
+            args.top_p = applied["top_p"] = declared["top_p"]
         if "top_k" in declared and not _server_flag_present(explicit_flags, "top-k"):
-            args.top_k = declared["top_k"]
-        LOGGER.info(
-            "[serve-defaults] model-declared sampler defaults applied: %s", declared
-        )
+            args.top_k = applied["top_k"] = declared["top_k"]
+        # `mtplx serve` passes the whole trio as flags, so its daemons log
+        # nothing here; a line means this module chose the value itself.
+        if applied:
+            LOGGER.info(
+                "[serve-defaults] model-declared sampler defaults applied: %s",
+                applied,
+            )
 
-    sync_backend_arg_aliases(args)
-    backend = descriptor_for_backend_id(getattr(args, "backend_id", None))
     required_tool_prompt_mode = backend.required_tool_prompt_mode
     if required_tool_prompt_mode is not None:
         requested_tool_prompt_mode = str(
