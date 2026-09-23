@@ -279,6 +279,10 @@ public struct AutoTuner: Sendable {
                     for: modelPath,
                     environment: self.processEnvironment
                 )
+                // `mtplx tune` pins fans only when asked. This flow readies
+                // fan control above and tells the user it is preparing max
+                // fans, so it asks; the CLI still degrades to auto fans when
+                // the ramp cannot be verified.
                 process.arguments = [
                     "tune",
                     "--model", modelPath,
@@ -286,6 +290,7 @@ public struct AutoTuner: Sendable {
                     "--json",
                     "--yes",
                     "--retune",
+                    "--max",
                     "--output-dir", outputDir.path,
                     "--run-id", String(runID),
                 ]

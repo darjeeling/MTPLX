@@ -2772,8 +2772,10 @@ def _run_verify(
         str(prompt_suite),
         "--yes",
     ]
+    # Tune pins fans only when asked, so a build without --max leaves them on
+    # automatic; --max keeps the strict verified-ramp behavior.
     if max_fans:
-        command.append("--require-max-fans")
+        command.extend(["--max", "--require-max-fans"])
     if isinstance(mtp_contract, dict):
         base_hidden_variant = mtp_contract.get("base_hidden_variant")
         hidden_variant = mtp_contract.get("hidden_variant")

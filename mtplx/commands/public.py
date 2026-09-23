@@ -3704,6 +3704,19 @@ def _parse_tune_candidate_values(
     return values
 
 
+def _tune_fans_requested(args: Any) -> bool:
+    """Whether this tune run was asked to pin the fans at max.
+
+    Pinning is opt-in, the same as every other command's ``--max``: ``--max``
+    asks for it and ``--require-max-fans`` asks for it strictly. Forge's
+    verify step runs tune as a child and passes these only when the user gave
+    ``forge --max``; the start wizard and the app ask explicitly because
+    their tuning screens tell the user the fans will get loud.
+    """
+
+    return bool(getattr(args, "max", False) or getattr(args, "require_max_fans", False))
+
+
 def cmd_tune_public(args: Any) -> int:
     if getattr(args, "_tune_candidate", None):
         return _cmd_tune_candidate(args)
@@ -3720,6 +3733,9 @@ def _cmd_bench_tune(args: Any) -> int:
     cli_flags = getattr(child, "_cli_flags", set()) or set()
     if "max-tokens" not in cli_flags:
         child.max_tokens = TUNE_DEFAULT_MAX_TOKENS
+    # bench spells the fan request --max/--fanmax (dest "fanmax"), the same
+    # flag its prefill ladder honors; tune pins fans only when asked.
+    child.max = bool(getattr(args, "fanmax", False))
     return _cmd_tune(
         child,
         action="bench tune",
@@ -3883,11 +3899,10 @@ def _cmd_tune(
             _print_tune_human(payload, verbose=verbose)
         return 0
 
-    from mtplx.thermal import MaxSession
-
     def _emit(line: str) -> None:
         print(line, file=sys.stderr, flush=True)
 
+    fans_requested = _tune_fans_requested(args)
     if not json_output:
         _emit(f"[tune] model: {runtime_model}")
         for note in model_source_notes:
@@ -3904,33 +3919,50 @@ def _cmd_tune(
         _emit(
             "[tune] close heavy apps now for cleaner results before measurements start"
         )
-        _emit("[tune] fans may get loud during tuning and will be restored afterward")
-    max_session = MaxSession(log=_emit)
-    fans_pinned = bool(max_session.start())
-    if not fans_pinned:
-        verified = max_session.thermal.get("verified") or {}
-        if bool(getattr(args, "require_max_fans", False)):
-            return _tune_error(
-                "verified max-fan mode did not start and --require-max-fans is set",
-                detail=verified.get("message"),
-                actionable=verified.get("actionable"),
-                thermal=max_session.thermal,
-                json_output=json_output,
-            )
-        # Onboarding has to finish on every Mac. Pinned fans give the
-        # cleanest timing, but a depth measured on auto fans still beats
-        # a dead setup wizard (a real M5 Max user hit exactly this when
-        # the helper could not verify a ramp). Continue unpinned and
-        # record the honesty flag in the summary; --require-max-fans
-        # keeps the strict behavior for benchmarking.
-        if not json_output:
-            _emit("[tune] fan pinning unavailable; tuning with fans on auto")
-            reason = verified.get("message")
-            if reason:
-                _emit(f"[tune]   reason: {reason}")
-            actionable = verified.get("actionable")
-            if actionable:
-                _emit(f"[tune]   to enable pinned-fan tuning later: {actionable}")
+        if fans_requested:
+            _emit("[tune] fans may get loud during tuning and will be restored afterward")
+        else:
+            _emit("[tune] fans stay on automatic; pass --max to pin them for cleaner timing")
+    max_session: Any | None = None
+    thermal: dict[str, Any] = {
+        "requested": False,
+        "enabled": False,
+        "start": None,
+        "verified": None,
+        "restore": None,
+    }
+    fans_pinned = False
+    if fans_requested:
+        from mtplx.thermal import MaxSession
+
+        max_session = MaxSession(log=_emit)
+        fans_pinned = bool(max_session.start())
+        thermal = max_session.thermal
+        thermal["requested"] = True
+        if not fans_pinned:
+            verified = max_session.thermal.get("verified") or {}
+            if bool(getattr(args, "require_max_fans", False)):
+                return _tune_error(
+                    "verified max-fan mode did not start and --require-max-fans is set",
+                    detail=verified.get("message"),
+                    actionable=verified.get("actionable"),
+                    thermal=max_session.thermal,
+                    json_output=json_output,
+                )
+            # Onboarding has to finish on every Mac. Pinned fans give the
+            # cleanest timing, but a depth measured on auto fans still beats
+            # a dead setup wizard (a real M5 Max user hit exactly this when
+            # the helper could not verify a ramp). Continue unpinned and
+            # record the honesty flag in the summary; --require-max-fans
+            # keeps the strict behavior for benchmarking.
+            if not json_output:
+                _emit("[tune] fan pinning unavailable; tuning with fans on auto")
+                reason = verified.get("message")
+                if reason:
+                    _emit(f"[tune]   reason: {reason}")
+                actionable = verified.get("actionable")
+                if actionable:
+                    _emit(f"[tune]   to enable pinned-fan tuning later: {actionable}")
 
     try:
         if not json_output:
@@ -3953,7 +3985,8 @@ def _cmd_tune(
             collect_telemetry=collect_telemetry,
         )
     finally:
-        max_session.stop()
+        if max_session is not None:
+            max_session.stop()
 
     hardware, software, backend, state_key, key_material = _resolve_tune_state_context()
     payload = _tune_payload(
@@ -3967,17 +4000,25 @@ def _cmd_tune(
         hardware=hardware,
         software=software,
         backend=backend,
-        thermal=max_session.thermal,
+        thermal=thermal,
         state_key=state_key,
         diagnostics={
             "telemetry_enabled": collect_telemetry,
             "telemetry_env": TUNE_TELEMETRY_ENV,
             "model_source_notes": model_source_notes,
+            "fans_requested": fans_requested,
             "fans_pinned": fans_pinned,
         },
     )
+    payload["fans_requested"] = fans_requested
     payload["fans_pinned"] = fans_pinned
-    if not fans_pinned:
+    if not fans_requested:
+        payload["fans_note"] = (
+            "Tuned with fans on auto; pinning was not requested (pass --max "
+            "for pinned-fan timing). Results are valid for how this Mac "
+            "actually runs."
+        )
+    elif not fans_pinned:
         payload["fans_note"] = (
             "Tuned with fans on auto; pinned-fan timing was unavailable. "
             "Results are valid for how this Mac actually runs."
@@ -4570,7 +4611,15 @@ def _tune_dry_run_payload(
         "output": str(output_path),
         "state_path": str(_tune_state_path()),
         "save_default": save_default,
-        "fan_control": "verified max-fan required before model load",
+        "fan_control": (
+            "verified max fans required before model load (--require-max-fans)"
+            if bool(getattr(args, "require_max_fans", False))
+            else (
+                "fans pinned at max while tuning when verifiable (--max)"
+                if _tune_fans_requested(args)
+                else "fans stay on automatic (pass --max to pin them)"
+            )
+        ),
         "diagnostics": {
             "telemetry_enabled": collect_telemetry,
             "telemetry_env": TUNE_TELEMETRY_ENV,
@@ -14370,6 +14419,9 @@ def _quickstart_apply_tuned_depth(
         retune=False,
         unsafe_force_unverified=bool(getattr(args, "unsafe_force_unverified", False)),
         yes=True,
+        # Tune pins fans only when asked. The offer screen the user accepts
+        # before this runs says the fans may get loud, so the wizard asks.
+        max=True,
     )
     context = _tune_state_context_for_args(tune_args)
     if context is None:

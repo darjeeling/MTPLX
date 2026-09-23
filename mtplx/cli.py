@@ -3035,9 +3035,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="Confirm unsafe non-interactive actions"
     )
     tune_p.add_argument(
+        "--max",
+        action="store_true",
+        help=(
+            "Pin fans at verified max while tuning for cleaner timing; they are "
+            "restored afterward. Without it the fans stay on automatic."
+        ),
+    )
+    tune_p.add_argument(
         "--require-max-fans",
         action="store_true",
-        help="Fail before tuning if verified max-fan mode cannot start.",
+        help="Like --max, but fail before tuning if verified max-fan mode cannot start.",
     )
     tune_p.add_argument(
         "--temperature", type=float, default=0.6, help=argparse.SUPPRESS

@@ -1267,8 +1267,10 @@ def test_quickstart_tuning_prompt_can_save_and_apply(monkeypatch):
     )
     monkeypatch.setattr(public, "_load_tune_record", lambda _key: next(records))
 
-    def fake_tune(*_args, **_kwargs):
-        calls.append(True)
+    def fake_tune(tune_args, **_kwargs):
+        # Tune pins fans only when asked; the offer the user just accepted
+        # says the fans may get loud, so the wizard asks.
+        calls.append(public._tune_fans_requested(tune_args))
         return 0
 
     monkeypatch.setattr(public, "_cmd_tune", fake_tune)

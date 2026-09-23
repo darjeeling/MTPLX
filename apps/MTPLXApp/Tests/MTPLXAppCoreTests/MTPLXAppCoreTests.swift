@@ -9445,6 +9445,10 @@ final class MTPLXAppCoreTests: XCTestCase {
         let commands = try String(contentsOf: log, encoding: .utf8)
         XCTAssertTrue(commands.contains("--retune"), commands)
         XCTAssertTrue(commands.contains("--profile turbo"), commands)
+        // The CLI tune pins fans only when asked; the app's tuning asks.
+        let tuneLine = commands.split(separator: "\n").first { $0.hasPrefix("tune ") }
+        XCTAssertNotNil(tuneLine, commands)
+        XCTAssertTrue(tuneLine?.split(separator: " ").contains("--max") == true, commands)
     }
 
     func testAutoTunerParsesGemmaBlockCandidates() throws {

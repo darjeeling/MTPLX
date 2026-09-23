@@ -4295,6 +4295,7 @@ def test_tune_retune_starts_max_fans_before_slow_diagnostics(
         dry_run=False,
         cache_dir=None,
         retune=True,
+        max=True,
         depths="1",
         max_tokens=1,
         limit=1,
@@ -4327,6 +4328,227 @@ def test_tune_retune_starts_max_fans_before_slow_diagnostics(
     assert code == 0
     assert payload["best"]["depth"] == 1
     assert order[:3] == ["max-start", "candidates", "max-stop"]
+
+
+def _fake_9b_tune_pack(tmp_path: Path) -> Path:
+    model_dir = tmp_path / "Youssofal--Qwen3.5-9B-MTPLX-Optimized-Speed"
+    model_dir.mkdir()
+    (model_dir / "mtplx_runtime.json").write_text(
+        json.dumps(
+            {
+                "arch_id": "qwen3-next-mtp",
+                "mtplx_version": "1.0.0",
+                "public_model_id": "mtplx-qwen35-9b-optimized-speed",
+                "hub": {"repo_id": "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return model_dir
+
+
+def _stub_tune_measurements(monkeypatch, tmp_path: Path, calls: list[str]) -> None:
+    """Everything a tune run touches past model resolution, without a model."""
+
+    def fake_run_candidates(*_args, **_kwargs):
+        calls.append("candidates")
+        return [
+            {"candidate": "ar", "mode": "AR", "depth": None, "tok_s": 10.0, "quality_passed": True},
+            {
+                "candidate": "1",
+                "mode": "D1",
+                "depth": 1,
+                "tok_s": 12.0,
+                "quality_passed": True,
+                "acceptance_by_depth": [0.8],
+            },
+        ]
+
+    monkeypatch.setattr(public, "_run_tune_candidates", fake_run_candidates)
+    monkeypatch.setattr(public, "_apple_hardware_context", lambda: {"chip": "Apple M5 Max"})
+    monkeypatch.setattr(public, "_software_context", lambda: {"mtplx_version": "1.0.0"})
+    monkeypatch.setattr(public, "_mlx_backend_context", lambda: {"stock_mlx_likely": True})
+    monkeypatch.setenv("MTPLX_TUNE_STATE", str(tmp_path / "tune-state.json"))
+
+
+def _recording_max_session(calls: list[str], *, starts: bool = True) -> type:
+    class RecordingMaxSession:
+        def __init__(self, **_kwargs):
+            calls.append("max-init")
+            self.thermal = {
+                "enabled": starts,
+                "verified": {"ok": starts, "message": "actual RPM never ramped"},
+            }
+
+        def start(self):
+            calls.append("max-start")
+            return starts
+
+        def stop(self):
+            calls.append("max-stop")
+            return {"ok": True}
+
+    return RecordingMaxSession
+
+
+def test_tune_leaves_fans_on_automatic_unless_asked(tmp_path, monkeypatch, capsys):
+    # Forge verify runs `mtplx tune` as a child. On 2026-09-22 a MiMo build
+    # without --max pinned both fans at max for a minute because tune opened
+    # a MaxSession on every run. Pinning is now opt-in.
+    model_dir = _fake_9b_tune_pack(tmp_path)
+    calls: list[str] = []
+    _stub_tune_measurements(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr("mtplx.thermal.MaxSession", _recording_max_session(calls))
+    args = build_parser().parse_args(
+        [
+            "tune",
+            "--model",
+            str(model_dir),
+            "--json",
+            "--retune",
+            "--no-save",
+            "--output-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "no-fans",
+            "--depths",
+            "1",
+            "--yes",
+        ]
+    )
+    args._cli_flags = {"model"}
+
+    code = public.cmd_tune_public(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert calls == ["candidates"]
+    assert payload["fans_requested"] is False
+    assert payload["fans_pinned"] is False
+    assert payload["thermal"]["requested"] is False
+    assert payload["thermal"]["enabled"] is False
+    assert "not requested" in payload["fans_note"]
+
+
+@pytest.mark.parametrize("flag", ["--max", "--require-max-fans"])
+def test_tune_pins_fans_when_asked(tmp_path, monkeypatch, capsys, flag):
+    model_dir = _fake_9b_tune_pack(tmp_path)
+    calls: list[str] = []
+    _stub_tune_measurements(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr("mtplx.thermal.MaxSession", _recording_max_session(calls))
+    args = build_parser().parse_args(
+        [
+            "tune",
+            "--model",
+            str(model_dir),
+            "--json",
+            "--retune",
+            "--no-save",
+            "--output-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "fans",
+            "--depths",
+            "1",
+            "--yes",
+            flag,
+        ]
+    )
+    args._cli_flags = {"model"}
+
+    code = public.cmd_tune_public(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert calls == ["max-init", "max-start", "candidates", "max-stop"]
+    assert payload["fans_requested"] is True
+    assert payload["fans_pinned"] is True
+    assert payload["thermal"]["requested"] is True
+    assert "fans_note" not in payload
+
+
+def test_tune_max_degrades_to_auto_fans_but_require_max_fans_fails_closed(
+    tmp_path, monkeypatch, capsys
+):
+    model_dir = _fake_9b_tune_pack(tmp_path)
+    calls: list[str] = []
+    _stub_tune_measurements(monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(
+        "mtplx.thermal.MaxSession", _recording_max_session(calls, starts=False)
+    )
+    base = [
+        "tune",
+        "--model",
+        str(model_dir),
+        "--json",
+        "--retune",
+        "--no-save",
+        "--output-dir",
+        str(tmp_path / "runs"),
+        "--depths",
+        "1",
+        "--yes",
+    ]
+
+    soft = build_parser().parse_args([*base, "--run-id", "soft", "--max"])
+    soft._cli_flags = {"model"}
+    assert public.cmd_tune_public(soft) == 0
+    soft_payload = json.loads(capsys.readouterr().out)
+    assert calls == ["max-init", "max-start", "candidates", "max-stop"]
+    assert soft_payload["fans_requested"] is True
+    assert soft_payload["fans_pinned"] is False
+    assert "unavailable" in soft_payload["fans_note"]
+
+    calls.clear()
+    strict = build_parser().parse_args([*base, "--run-id", "strict", "--require-max-fans"])
+    strict._cli_flags = {"model"}
+    assert public.cmd_tune_public(strict) != 0
+    assert calls == ["max-init", "max-start"]
+    assert "--require-max-fans" in capsys.readouterr().out
+
+
+def test_tune_parser_fan_flags_default_off():
+    parser = build_parser()
+
+    assert parser.parse_args(["tune"]).max is False
+    assert parser.parse_args(["tune"]).require_max_fans is False
+    assert parser.parse_args(["tune", "--max"]).max is True
+    assert public._tune_fans_requested(parser.parse_args(["tune"])) is False
+    assert public._tune_fans_requested(parser.parse_args(["tune", "--max"])) is True
+    assert (
+        public._tune_fans_requested(parser.parse_args(["tune", "--require-max-fans"]))
+        is True
+    )
+
+
+@pytest.mark.parametrize("argv,requested", [([], False), (["--max"], True), (["--fanmax"], True)])
+def test_bench_tune_passes_its_fan_flag_to_tune(monkeypatch, argv, requested):
+    seen: list[bool] = []
+
+    def fake_tune(child, **_kwargs):
+        seen.append(public._tune_fans_requested(child))
+        return 0
+
+    monkeypatch.setattr(public, "_cmd_tune", fake_tune)
+    args = build_parser().parse_args(["bench", "tune", *argv])
+
+    assert public._cmd_bench_tune(args) == 0
+    assert seen == [requested]
+
+
+def test_tune_dry_run_reports_whether_fans_will_be_pinned(capsys):
+    base = [
+        "tune",
+        "--model",
+        "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
+        "--dry-run",
+        "--json",
+    ]
+
+    assert main(base) == 0
+    assert "automatic" in json.loads(capsys.readouterr().out)["fan_control"]
+    assert main([*base, "--max"]) == 0
+    assert "--max" in json.loads(capsys.readouterr().out)["fan_control"]
 
 
 def test_bench_tune_dry_run_can_disable_telemetry(capsys):

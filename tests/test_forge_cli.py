@@ -1232,6 +1232,93 @@ def test_forge_verify_only_requires_verified_ramp_when_requested(
         )
 
     assert ("--require-max-fans" in captured["command"]) is max_fans
+    assert ("--max" in captured["command"]) is max_fans
+
+
+@pytest.mark.parametrize("max_fans", [False, True])
+def test_forge_verify_tune_child_pins_fans_only_with_forge_max(
+    tmp_path, monkeypatch, capsys, max_fans
+):
+    # 2026-09-22: a MiMo `forge build` without --max pinned the fans at max
+    # from 15:02:45 to 15:03:45, because the tune child opened a MaxSession on
+    # every run. Run the exact child command forge builds through tune.
+    from mtplx.commands import public
+
+    model_dir = tmp_path / "Youssofal--Qwen3.5-9B-MTPLX-Optimized-Speed"
+    _write_json(
+        model_dir / "mtplx_runtime.json",
+        {
+            "arch_id": "qwen3-next-mtp",
+            "mtplx_version": "1.0.0",
+            "public_model_id": "mtplx-qwen35-9b-optimized-speed",
+            "hub": {"repo_id": "Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed"},
+        },
+    )
+    captured: dict[str, list[str]] = {}
+
+    class FinishedProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return FinishedProcess()
+
+    monkeypatch.setattr(forge.subprocess, "Popen", fake_popen)
+    with pytest.raises(forge.ForgeError, match="mtplx tune failed"):
+        forge._run_verify(model_dir, tmp_path / "run", max_fans=max_fans)
+    command = captured["command"]
+    assert command[1:4] == ["-P", "-m", "mtplx.cli"]
+
+    events: list[str] = []
+
+    class RecordingMaxSession:
+        def __init__(self, **_kwargs):
+            events.append("max-init")
+            self.thermal = {"enabled": True}
+
+        def start(self):
+            events.append("max-start")
+            return True
+
+        def stop(self):
+            events.append("max-stop")
+            return {"ok": True}
+
+    def fake_run_candidates(*_args, **_kwargs):
+        events.append("candidates")
+        return [
+            {"candidate": "ar", "mode": "AR", "depth": None, "tok_s": 10.0, "quality_passed": True},
+            {
+                "candidate": "1",
+                "mode": "D1",
+                "depth": 1,
+                "tok_s": 12.0,
+                "quality_passed": True,
+                "acceptance_by_depth": [0.8],
+            },
+        ]
+
+    monkeypatch.setattr("mtplx.thermal.MaxSession", RecordingMaxSession)
+    monkeypatch.setattr(public, "_run_tune_candidates", fake_run_candidates)
+    monkeypatch.setattr(public, "_apple_hardware_context", lambda: {"chip": "Apple M5 Max"})
+    monkeypatch.setattr(public, "_software_context", lambda: {"mtplx_version": "1.0.0"})
+    monkeypatch.setattr(public, "_mlx_backend_context", lambda: {"stock_mlx_likely": True})
+    monkeypatch.setenv("MTPLX_TUNE_STATE", str(tmp_path / "tune-state.json"))
+    args = build_parser().parse_args(command[4:])
+    args._cli_flags = {"model"}
+
+    assert public.cmd_tune_public(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    if max_fans:
+        assert events == ["max-init", "max-start", "candidates", "max-stop"]
+        assert args.require_max_fans is True
+    else:
+        assert events == ["candidates"]
+    assert payload["fans_requested"] is max_fans
 
 
 def test_contract_calibration_fails_closed_on_probe_failure(tmp_path, monkeypatch):
