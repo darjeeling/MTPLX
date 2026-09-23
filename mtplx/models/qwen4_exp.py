@@ -693,8 +693,37 @@ class SigmoidRMSNormGated(nn.Module):
         x = mx.fast.rms_norm(hidden_states, self.weight, self.eps)
         if gate is None:
             return x.astype(hidden_states.dtype)
+        if _gdn_gated_norm_fused_applies(hidden_states, x, gate):
+            # Prefill width: the gate below as one bit-identical pass
+            # (mtplx.kernels.gdn_gated_norm).
+            from mtplx.kernels.gdn_gated_norm import sigmoid_gate
+
+            return sigmoid_gate(x, gate)
         g = mx.sigmoid(gate.astype(mx.float32))
         return (g * x.astype(mx.float32)).astype(hidden_states.dtype)
+
+
+#: GDN norms over at least this many rows take the fused sigmoid gate.
+_GDN_GATED_NORM_MIN_ROWS = 32
+
+
+def _gdn_gated_norm_fused_applies(hidden_states, x, gate) -> bool:
+    """The fused output gate for prefill-width GDN norms (on by default;
+    ``MTPLX_QWEN4_GDN_GATED_NORM=0`` keeps the stock expression)."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_GDN_GATED_NORM") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if hidden_states.dtype != mx.bfloat16 or hidden_states.ndim < 3:
+        return False
+    rows = 1
+    for dim in hidden_states.shape[:-2]:
+        rows *= int(dim)
+    if rows < _GDN_GATED_NORM_MIN_ROWS or current_attention_phase() != "prefill":
+        return False
+    from mtplx.kernels.gdn_gated_norm import gated_eligible
+
+    return gated_eligible(x, gate)
 
 
 #: GDN forwards at least this wide run the fused prefill prework.
