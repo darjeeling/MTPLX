@@ -15,8 +15,12 @@ products are exact in float32 (a small integer times a float16 value) and
 every sum is float32. The result is therefore the same mathematical dot
 product as stock with a different float32 summation order; it rounds to the
 same float16 value in the vast majority of outputs and never differs by more
-than float32 rounding before the final float16 cast. Parity against stock is
-measured, not assumed (``scripts``/receipts in the Bonsai night report).
+than float32 rounding before the final float16 cast. Measured on the real pack
+over 1,630 teacher-forced verify positions (2026-09-23): mean KL to Prism's
+float32 logits 2.92e-6 against stock's 3.02e-6 (the pack stamps 4.0e-6), one
+top-1 change at an exact float16 tie that Prism itself separates by 0.0024
+logits, and identical greedy continuations on three prompts. On by default;
+``MTPLX_BONSAI_TERNARY_QMV=0`` restores stock ``mx.quantized_matmul``.
 
 The decode trick and the row layout follow mlx-serve's ``qmv2.zig``
 (ddalcu/mlx-serve, Apache-2.0), re-implemented here as an
@@ -138,7 +142,7 @@ _SOURCE = """
 
 
 def enabled() -> bool:
-    return (os.environ.get(ENV, "0").strip().lower()) in {"1", "true", "yes", "on"}
+    return (os.environ.get(ENV, "1").strip().lower()) not in {"0", "false", "no", "off"}
 
 
 def counters() -> dict[str, int]:
@@ -210,6 +214,78 @@ def eligible(x: mx.array, w: mx.array, scales: mx.array) -> bool:
     if tuple(scales.shape) != (n, k // GROUP_SIZE):
         return False
     return True
+
+
+class Plan:
+    """Launch parameters of one proven-ternary matrix, validated once when it is armed.
+
+    A verify round runs the kernel on about 370 matrices; the model calls
+    ``run`` with the plan so each call checks only the activation (dtype, row
+    count, width) instead of re-deriving the whole contract: about 2 us less
+    host time per launch (lazy graph build, measured 5.8 -> 3.7 us on a busy
+    machine), about 0.8 ms per round of GPU-idle host time. The geometry
+    (and its ``MTPLX_TERNARY_QMV_GEOMETRY`` override) is fixed when the plan
+    is made.
+    """
+
+    __slots__ = ("n", "k", "r", "sg", "grid", "threadgroup", "calls")
+
+    def __init__(self, n: int, k: int, r: int, sg: int) -> None:
+        self.n = n
+        self.k = k
+        self.r = r
+        self.sg = sg
+        self.grid = (32 * sg, n // (r * sg), 1)
+        self.threadgroup = (32 * sg, 1, 1)
+        # rows -> (kernel, template, output shapes), filled on first use.
+        self.calls: list = [None] * (MAX_ROWS + 1)
+
+
+def plan(w: mx.array, scales: mx.array) -> Plan | None:
+    """Launch plan for a ternary matrix, or None when its shape is out of contract."""
+
+    if w.dtype != mx.uint32 or scales.dtype != mx.float16 or w.ndim != 2:
+        return None
+    n = int(w.shape[0])
+    k = int(w.shape[1]) * 16
+    if k % 512:
+        return None
+    r, sg = _geometry(n)
+    if n % (r * sg):
+        return None
+    if tuple(scales.shape) != (n, k // GROUP_SIZE):
+        return None
+    return Plan(n, k, r, sg)
+
+
+def run(p: Plan, x: mx.array, w: mx.array, scales: mx.array) -> mx.array | None:
+    """``ternary_qmv`` for a planned matrix: same kernel, same bits, fewer host checks."""
+
+    if not enabled() or x.dtype != mx.float16:
+        _COUNTS["declined"] += 1
+        return None
+    shape = x.shape
+    if not shape or shape[-1] != p.k:
+        _COUNTS["declined"] += 1
+        return None
+    rows = x.size // p.k
+    if rows < 1 or rows > MAX_ROWS:
+        _COUNTS["declined"] += 1
+        return None
+    call = p.calls[rows]
+    if call is None:
+        call = p.calls[rows] = (_kernel(rows, p.r, p.sg), [("M", rows)], [(rows, p.n)])
+    kernel, template, out_shapes = call
+    out = kernel(
+        inputs=[x.reshape(rows, p.k), w, scales],
+        template=template,
+        grid=p.grid,
+        threadgroup=p.threadgroup,
+        output_shapes=out_shapes,
+        output_dtypes=[mx.float16],
+    )[0]
+    _COUNTS["served"] += 1
+    return out.reshape(*shape[:-1], p.n)
 
 
 def ternary_qmv(x: mx.array, w: mx.array, scales: mx.array) -> mx.array | None:

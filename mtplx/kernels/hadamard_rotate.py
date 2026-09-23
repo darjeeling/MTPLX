@@ -22,7 +22,10 @@ Element ``e`` of a block lives in register ``p`` of lane ``l`` of simdgroup
 ``g`` with ``e = (32 g + l) * 8 + p``: distances 1-4 are register
 butterflies, 8-128 are ``simd_shuffle_xor`` butterflies and 256-512 go
 through one threadgroup exchange. The exactness claim is tested against the
-MLX chain on real activations (``tests/test_prism_hadamard_rotate.py``).
+MLX chain (``tests/test_prism_bonsai_kernels.py``) and on the real pack: every
+one of 1,630 teacher-forced verify positions (code, prose, reasoning) returns
+bit-identical logits. On by default; ``MTPLX_PRISM_FUSED_ROTATION=0`` restores
+the four-op MLX chain.
 """
 
 from __future__ import annotations
@@ -100,7 +103,7 @@ _COUNTS = {"served": 0, "declined": 0}
 
 
 def enabled() -> bool:
-    return (os.environ.get(ENV, "0").strip().lower()) in {"1", "true", "yes", "on"}
+    return (os.environ.get(ENV, "1").strip().lower()) not in {"0", "false", "no", "off"}
 
 
 def counters() -> dict[str, int]:

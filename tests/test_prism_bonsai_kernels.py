@@ -159,11 +159,57 @@ def test_ternary_gemv_geometry_never_changes_the_bits(monkeypatch, geometry):
     assert bool(mx.array_equal(default.view(mx.uint16), tuned.view(mx.uint16)).item())
 
 
+@pytest.mark.parametrize("rows", [1, 2, 3, 4])
+def test_planned_run_returns_the_same_bits_as_the_checked_call(monkeypatch, rows):
+    from mtplx.kernels import ternary_qmv as tq
+
+    monkeypatch.setenv(tq.ENV, "1")
+    w, s, _ = _ternary_matrix(2048, 5120, seed=20 + rows)
+    x = _activations((1, rows, 5120), seed=30 + rows)
+    p = tq.plan(w, s)
+    assert p is not None and (p.n, p.k) == (2048, 5120)
+    a = tq.ternary_qmv(x, w, s)
+    b = tq.run(p, x, w, s)
+    assert b is not None and b.shape == a.shape
+    assert bool(mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item())
+    # Out of contract activations decline, like the checked call.
+    assert tq.run(p, x.astype(mx.bfloat16), w, s) is None
+    assert tq.run(p, _activations((1, 5, 5120), seed=1), w, s) is None
+    assert tq.run(p, _activations((1, 2, 1024), seed=1), w, s) is None
+    monkeypatch.setenv(tq.ENV, "0")
+    assert tq.run(p, x, w, s) is None
+
+
+def test_plan_refuses_shapes_outside_the_contract():
+    from mtplx.kernels import ternary_qmv as tq
+
+    w, s, _ = _ternary_matrix(256, 1024, seed=3)
+    assert tq.plan(w, s) is not None
+    w2, s2, _ = _ternary_matrix(256, 1152, seed=3)
+    assert tq.plan(w2, s2) is None  # K not a multiple of 512
+    assert tq.plan(w, s.astype(mx.float32)) is None
+    assert tq.plan(w, s[:, :4]) is None
+
+
 def test_only_matrices_large_enough_to_win_are_worthwhile():
     from mtplx.kernels import ternary_qmv as tq
 
     assert not tq.worthwhile(1024)  # Bonsai's key and value projections
     assert tq.worthwhile(5120) and tq.worthwhile(17408) and tq.worthwhile(248320)
+
+
+def test_both_kernels_are_on_by_default_and_zero_turns_them_off(monkeypatch):
+    from mtplx.kernels import hadamard_rotate as hr
+    from mtplx.kernels import ternary_qmv as tq
+
+    for module in (hr, tq):
+        monkeypatch.delenv(module.ENV, raising=False)
+        assert module.enabled()
+        for off in ("0", "false", "off", "no"):
+            monkeypatch.setenv(module.ENV, off)
+            assert not module.enabled()
+        monkeypatch.setenv(module.ENV, "1")
+        assert module.enabled()
 
 
 def test_ternary_gemv_declines_outside_its_contract(monkeypatch):

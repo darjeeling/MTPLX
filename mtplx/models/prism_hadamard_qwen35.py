@@ -50,7 +50,12 @@ from mlx_lm.models import qwen3_5 as _qwen3_5
 from mlx_lm.models.base import BaseModelArgs
 
 from ..kernels.hadamard_rotate import rotate as fused_hadamard_rotate
-from ..kernels.ternary_qmv import ternary_layout, ternary_qmv, worthwhile as ternary_worthwhile
+from ..kernels.ternary_qmv import (
+    plan as ternary_plan,
+    run as ternary_run,
+    ternary_layout,
+    worthwhile as ternary_worthwhile,
+)
 
 MODEL_TYPE = "prism_hadamard_qwen35"
 SUPPORTED_SCHEMA_VERSIONS = (2,)
@@ -202,8 +207,10 @@ class HadamardQuantizedLinear(nn.Module):
             self.signs = mx.ones((input_dims,), dtype=mx.float32)
         self._rotation: _SharedRotation | None = None
         # Set by Model.post_weight_load once the loaded biases are proven to
-        # be exactly -scales (Prism's ternary layout).
+        # be exactly -scales (Prism's ternary layout), with the kernel's
+        # launch plan for this matrix.
         self._ternary = False
+        self._ternary_plan = None
         self.freeze()
 
     def rotate(self, x: mx.array) -> mx.array:
@@ -216,10 +223,11 @@ class HadamardQuantizedLinear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         rotated = self.rotate(x)
-        if self._ternary:
+        planned = self._ternary_plan
+        if planned is not None:
             # Verify and decode rows (M <= 4) on the ternary kernel; it
             # declines every other shape and the stock matmul below runs.
-            out = ternary_qmv(rotated, self["weight"], self["scales"])
+            out = ternary_run(planned, rotated, self["weight"], self["scales"])
             if out is not None:
                 return out
         return mx.quantized_matmul(
@@ -706,10 +714,13 @@ class Model(_qwen3_5.Model):
         for _record, module in self._packed_modules():
             if not isinstance(module, HadamardQuantizedLinear):
                 continue
-            module._ternary = bool(
-                ternary_worthwhile(int(module["weight"].shape[0]))
-                and ternary_layout(module["scales"], module["biases"])
-            )
+            planned = None
+            if ternary_worthwhile(int(module["weight"].shape[0])) and ternary_layout(
+                module["scales"], module["biases"]
+            ):
+                planned = ternary_plan(module["weight"], module["scales"])
+            module._ternary_plan = planned
+            module._ternary = planned is not None
             armed += int(module._ternary)
         return armed
 
