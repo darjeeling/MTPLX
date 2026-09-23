@@ -73,7 +73,7 @@ Qwen 3.8 Flash Next is Qwen's 125B-A6B preview of the Qwen4 architecture: a hybr
 
 - `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed`: dynamic 4-bit with the sparse-attention projections at 8-bit. 115.1 GB download including the 32 GB n-gram table, about 83 GB resident.
 - `Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed`: flat 4-bit, the quickest build. 106.3 GB download, about 74 GB resident.
-- `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality`: 8-bit group-64 body and MTP head, BF16 structural tensors, and a 4-bit group-32 n-gram table. 169.96 GB download (169,958,537,441 bytes); the weights need about 128.5 GiB. It has not yet been run on a 256 GB Mac, and its speed has not been measured.
+- `Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality`: 8-bit group-64 body and MTP head, BF16 structural tensors, and a 4-bit group-32 n-gram table. 169.96 GB download (169,958,537,520 bytes); the weights need about 128.5 GiB. It has not yet been run on a 256 GB Mac, and its speed has not been measured.
 
 The n-gram table streams from SSD on every Mac, so only the weights stay in memory. Context window 262,144 tokens; 261,120-token prompts decode. Image input works. In the app, pick "Qwen 3.8 Flash-Next Optimized Speed"; from the terminal:
 

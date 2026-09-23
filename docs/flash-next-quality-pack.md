@@ -2,7 +2,7 @@
 
 The published pack is
 [Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality](https://huggingface.co/Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality)
-(169,958,537,441 bytes in 57 files) and needs MTPLX 2.12.0 or later. When it
+(169,958,537,520 bytes in 57 files) and needs MTPLX 2.12.0 or later. When it
 serves, MTPLX streams the n-gram table from SSD on every Mac, so the weights
 need about 128.5 GiB. This page describes how the pack is built.
 

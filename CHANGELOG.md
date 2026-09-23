@@ -37,7 +37,7 @@ All notable user-facing changes to MTPLX. The format is based on
   its own result into the pack and
   `scripts/build_flash_next_quality_pack.sh` builds, verifies with a full
   load and tests chat, a tool call and an image in one command. The
-  published pack is 169,958,537,441 bytes in 57 files, and its weights need
+  published pack is 169,958,537,520 bytes in 57 files, and its weights need
   about 128.5 GiB with the n-gram table on SSD. It has not yet been run on a
   256 GB Mac, so on 256 GB and 512 GB Macs it is listed second, after
   Flash-Next Optimized Speed.

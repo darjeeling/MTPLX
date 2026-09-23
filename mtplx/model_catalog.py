@@ -307,7 +307,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         # Recipe: body/MTP 8-bit group 64, BF16 structural tensors, n-gram 4-bit group 32.
         # Planner need at 128K with the n-gram table streamed from SSD (calculated,
         # not yet measured on a 256 GB Mac).
-        size_bytes=169_958_537_441, peak_memory_gib=136.4,
+        size_bytes=169_958_537_520, peak_memory_gib=136.4,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
             "mtplx-flash-next-optimized-quality",
