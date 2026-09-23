@@ -697,6 +697,15 @@ class SigmoidRMSNormGated(nn.Module):
         return (g * x.astype(mx.float32)).astype(hidden_states.dtype)
 
 
+#: GDN forwards at least this wide run the fused prefill prework.
+_GDN_PREFILL_PREWORK_MIN_ROWS = 32
+
+
+def _gdn_prefill_prework_enabled() -> bool:
+    raw = (os.environ.get("MTPLX_QWEN4_GDN_PREFILL_PREWORK") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
     """qwen3_5's GDN with the family's output gate activation (sigmoid) and
     the reference q/k normalization.
@@ -797,6 +806,20 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
             q = q_f.reshape(B, S, self.num_k_heads, self.head_k_dim)
             k = k_f.reshape(B, S, self.num_k_heads, self.head_k_dim)
             v = v_f.reshape(B, S, self.num_v_heads, self.head_v_dim)
+            state = cache[1] if cache else None
+        elif self._prefill_prework_applies(B, S, mask, cache, qkv, conv_state):
+            # Prefill width: conv + silu + q/k l2norm as one kernel over the
+            # q|k|v stream, bit-identical to the chain below
+            # (mtplx.kernels.gdn_prefill_prework).  The pre-conv stream is
+            # never built; a boundary capture builds it on demand.
+            from mtplx.kernels.gdn_prefill_prework import gdn_prefill_prework
+
+            q, k, v = gdn_prefill_prework(
+                qkv, conv_state, self.conv1d.weight, self.head_k_dim**-0.5
+            )
+            if cache is not None:
+                # The last kernel - 1 rows of [conv_state, qkv].
+                cache[0] = mx.contiguous(qkv[:, -(self.conv_kernel_size - 1) :, :])
             state = cache[1] if cache else None
         else:
             conv_input = mx.concatenate([conv_state, qkv], axis=1)
@@ -941,6 +964,31 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
         # dispatch raises — pack contracts arm the env, so the device gate
         # must sit here (issue #400). Cached one-shot probe.
         return device_supports_gdn_conv_norm()
+
+    def _prefill_prework_applies(self, B, S, mask, cache, qkv, conv_state) -> bool:
+        # Prefill-width conv+silu+l2norm (MTPLX_QWEN4_GDN_PREFILL_PREWORK,
+        # default on): family geometry, dense rows, no conv bias, no ragged
+        # lengths, outside the verify capture scope.  Bit-identical to the
+        # staged chain, so the gate only has to keep other shapes off it.
+        if B != 1 or S < _GDN_PREFILL_PREWORK_MIN_ROWS or mask is not None:
+            return False
+        if self.training or not _gdn_prefill_prework_enabled():
+            return False
+        if current_attention_phase() != "prefill" or _VERIFY_CAPTURE.get():
+            return False
+        if cache is not None and getattr(cache, "lengths", None) is not None:
+            return False
+        if self.conv_dim != 10240 or self.key_dim != 2048 or self.conv_kernel_size != 4:
+            return False
+        if self.head_k_dim != 128 or self.head_v_dim != 128:
+            return False
+        if self.num_k_heads != 16 or self.num_v_heads != 48:
+            return False
+        if getattr(self.conv1d, "bias", None) is not None:
+            return False
+        from mtplx.kernels.gdn_prefill_prework import prework_eligible
+
+        return prework_eligible(qkv, conv_state, self.conv1d.weight)
 
     def _fused_conv_norm_rows_applies(self, B, S, mask, cache) -> bool:
         # Verify-width conv+silu+l2norm (MTPLX_FUSED_CONVNORM_VERIFY): the
