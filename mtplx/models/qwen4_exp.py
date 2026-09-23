@@ -621,6 +621,18 @@ def _hc_write_compile_applies(hyper: mx.array) -> bool:
     return rows >= _HC_COMPILE_MIN_ROWS
 
 
+def _hc_prefill_read_enabled() -> bool:
+    """The fused hyper-connection READ at prefill width (mtplx.kernels.hc_prefill).
+
+    On by default; ``MTPLX_QWEN4_HC_PREFILL_READ=0`` restores the eager chain
+    (the rollback and the A/B arm).  The kernel admits only the family's own
+    geometry and bf16 weights, so everything else keeps the eager chain.
+    """
+
+    raw = (os.environ.get("MTPLX_QWEN4_HC_PREFILL_READ") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 @lru_cache(maxsize=None)
 def _hc_compiled_write(hc_count: int, hidden_size: int):
     """The hyper-connection write as one fused kernel at prefill width.
@@ -1094,6 +1106,16 @@ class GatedResidual(nn.Module):
                 return mixed
             inject = inject.reshape(*hyper_input.shape[:-1], self.hc_count)
             return mixed, hyper_input, inject
+        if (
+            hyper_input.ndim == 3
+            and hyper_input.shape[-2] >= _HC_COMPILE_MIN_ROWS
+            and _hc_prefill_read_enabled()
+        ):
+            from mtplx.kernels.hc_prefill import hc_prefill_read
+
+            prefill = hc_prefill_read(self, hyper_input)
+            if prefill is not None:
+                return prefill
         normed = self.hc_norm(hyper_input)
         mix = nn.silu(self.input_mix_weight_down(normed) / self.hc_count)
         mix = mx.sigmoid(self.input_mix_weight_up(mix))
