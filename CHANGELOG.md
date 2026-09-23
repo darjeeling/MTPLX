@@ -108,6 +108,13 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Changed
 
+- **`mtplx tune` pins the fans only when asked.** It pinned them at
+  maximum on every run, so Forge's verification did too, even without
+  `--max`. Tune now pins them only with its new `--max` flag or
+  `--require-max-fans`, and Forge passes them only when it is given
+  `--max`. The app's tuning and `mtplx start` still ask for maximum fans;
+  a bare `mtplx tune` leaves them on automatic.
+
 - **Speed: Flash-Next prompt processing and long-context decode.** 2.11.3
   against 2.12.0 on the same M5 Max and Python runtime, alternating boots,
   fans at maximum, the GPU memory limit raised to 120 GiB
@@ -219,6 +226,37 @@ All notable user-facing changes to MTPLX. The format is based on
   files, so it is unaffected. Records are now `capture_version` 2.
 
 ### Fixed
+
+- **Long exact loops stop, on every model.** The repetition stop only
+  caught blocks of up to 96 tokens, so a 4-bit test build of a 9B model
+  repeated a 1,323-token block 73 times and ran to 100,912 tokens with no
+  answer, and another run repeated a 129-token block 94 times. Any exact
+  loop with a period of 97 to 8,192 tokens now stops once three whole
+  copies are in, never before token 768, at 0.4 to 1.5 microseconds per
+  step. Replayed through the server, the 129-token loop stops at 5,202
+  tokens with the reason `long_cycle`. Across 1,928 normal outputs and
+  files (8.48 million tokens) it never fired.
+
+- **A server started without `mtplx serve` uses each model's own
+  sampler.** `python -m mtplx.server.openai` sampled Qwen 3.8, Bonsai 2
+  and Flash-Next at temperature 0.6 while `/health` reported 1.0. With no
+  sampler flags it now uses 1.0, top-p 0.95 and top-k 20, as `mtplx serve`
+  and the app already did. Explicit flags win, and Qwen 3.5 and 3.6 stay
+  at 0.6.
+
+- **Forge keeps a draft head's declared settings unless the evidence is
+  clear.** Calibration switched a grafted Qwen 3.5 9B head to `pre_norm`
+  on one prompt and six tokens in which every option accepted nothing. A
+  switch now needs at least 4 prompts, 48 draft rounds per option and a
+  lead of 0.25 accepted tokens per round, and an inconclusive calibration
+  is recorded in `mtplx_runtime.json`. The probe samples 8 prompts and 4
+  windows, 49 s on the Qwen 3.5 9B pack including the model load.
+
+- **The memory planner never gives a lighter model less context.** On a 16
+  GB Mac a 7.53 GiB pack planned 12,288 tokens while an 8.08 GiB pack
+  planned 20,480. A lighter pack now drops the cache floor when that gives
+  it more context, up to what the tight-machine rule can grant. No catalog
+  model's window changes.
 
 - **Eager BF16 verification uses the attention-gate rounding already used by compiled verification.** This affects the shared gated full-attention path in BF16 Qwen3-Next, Qwen 3.5, 3.6 and 3.8 models, including their MoE variants. It applies when verification runs eagerly: dense image requests, contexts beyond the compiled route's 32,768-token limit, buffer-growth fallbacks, warm-restore rounds before compilation, and eager copy, repair or final-save forwards within an otherwise compiled request. The compiled text verify graph, prompt processing and plain decoding keep their existing numerics. Float16 and float32 gates are unchanged, including Bonsai's float16 path. Gemma 4 and Flash-Next use different attention implementations and are unchanged by this fix. Five exact gate tests cover the BF16 contract and the unchanged dtypes and phases.
 
@@ -389,13 +427,13 @@ All notable user-facing changes to MTPLX. The format is based on
   per verify call tile total `accepted_by_depth` and `drafted_by_depth`
   when a payload carries no flat totals. The server has sent the flat
   totals since 2.11.3, and an emitted total still wins.
-- **`MTPLX_AR_PIPELINE` gives the same tokens as the classic AR loop**
-  (PR #507, David Tai). The pipelined AR path drew the first output token
-  from the request's NumPy generator and every later token from a separate
-  `mx.random` stream, so one request with one seed gave a different
-  continuation depending on whether the path engaged. The flag now shares
-  the classic loop's per-token draw, and a new test holds the two token
-  sequences equal at temperature 1.0, top-p 0.95, top-k 20.
+- **Plain decoding has one path (PR #507, David Tai).** David Tai found
+  that the pipelined AR path drew the first output token from the
+  request's NumPy generator and every later token from a separate
+  `mx.random` stream, so one seed gave a different continuation depending
+  on whether the path engaged, and his change made the two agree. After
+  this release's n-gram change no model offers the pipelined mode, so the
+  path and its `MTPLX_AR_PIPELINE` switch are removed.
 - **A draft head taken from a raw checkpoint no longer drafts backwards**
   (PR #511, Stuart Rowlands). Hugging Face checkpoints store the MTP head's
   RMSNorm gains zero-centred. mlx-lm restores the +1.0 convention on the
