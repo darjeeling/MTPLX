@@ -62,6 +62,10 @@ def _hermetic_mtplx_state(monkeypatch, tmp_path_factory):
         "MTPLX_SYSTEM_MEMORY_ABORT_FLOOR_BYTES",
         "MTPLX_SYSTEM_MEMORY_SHED_FLOOR_BYTES",
         "MTPLX_SYSTEM_MEMORY_REHEARSAL_AVAILABLE_BYTES",
+        # The server writes the budget into os.environ at startup, so a test
+        # that boots it with --memory-budget would size every later test's
+        # session bank against that budget instead of the machine's RAM.
+        "MTPLX_MEMORY_BUDGET",
     ):
         monkeypatch.delenv(name, raising=False)
     # `mtplx doctor` reads the app's failed-start report (#504). A developer
