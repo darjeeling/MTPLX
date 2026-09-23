@@ -182,6 +182,37 @@ def test_packs_inside_the_measured_envelope_are_admitted_tight():
     assert bonsai.context_window_resolved == 8192
 
 
+def test_a_lighter_pack_never_plans_a_smaller_window_than_a_heavier_one():
+    # 2026-09-22 on 16 GiB: the MiMo 9B mixed-precision test build (7.53
+    # GiB, the Qwen3.5-9B geometry) planned 12,288 tokens and the heavier
+    # 8.08 GiB Qwen3.5-9B 6-bit pack 20,480. The lighter one funds the bank
+    # floor (12 - 7.53 - 3 - 1 leaves 0.47 GiB of KV), so it never reached
+    # the tight rule, which only the heavier pack needed (0.67 GiB of KV).
+    def plan(weights: int):
+        return plan_memory(
+            total_ram_bytes=16 * GIB,
+            model_weights_bytes=weights,
+            kv_bytes_per_token=32_768,
+            model_max_context=262_144,
+        )
+
+    lighter = plan(8_081_087_720)
+    heavier = plan(8_674_988_799)
+    assert heavier.tight_machine and heavier.context_window_resolved == 20_480
+    assert lighter.context_window_resolved >= heavier.context_window_resolved
+    # The lighter pack yields its floor too and takes the most the tight
+    # rule grants any pack: one block plus the floor net of the margin
+    # (0.875 GiB of KV, 28,671 tokens), block-aligned to 24,576.
+    assert lighter.tight_machine and lighter.bank_floor_bytes == 0
+    assert lighter.context_window_resolved == 24_576
+    assert any("the window stops at 24576 tokens" in note for note in lighter.notes)
+    # A pack whose floor-funded window already reaches that keeps its floor
+    # and its window (the 7.10 GiB mixed 4-bit build).
+    m0 = plan(7_626_136_774)
+    assert not m0.tight_machine and m0.bank_floor_bytes == BANK_FLOOR_BYTES
+    assert m0.context_window_resolved == 28_672
+
+
 def test_a_pack_heavier_than_bonsai_is_admitted_tight_only_with_its_own_table():
     # A 16 GB pack on the one budget where only the tight arithmetic fits it
     # (18.75 GiB: 0.6 GiB of KV after weights and the tight transient).

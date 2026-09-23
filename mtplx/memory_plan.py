@@ -392,10 +392,11 @@ class MemoryPlan:
 
     # The runtime transient and the bank floor this plan was solved with.
     # Both equal the module constants on every machine that funds the
-    # bank floor (the 128 GB resolution does not move by a byte); on a
-    # tight machine (``tight_machine``) the transient carries the measured
-    # margin and the floor is zero: the warm cache yields fully to live KV
-    # and restores come from the SSD tier.
+    # bank floor with at least the tight rule's largest window (the 128 GB
+    # resolution does not move by a byte); on a tight machine
+    # (``tight_machine``) the transient carries the measured margin and
+    # the floor is zero: the warm cache yields fully to live KV and
+    # restores come from the SSD tier.
     runtime_transients_bytes: int = RUNTIME_TRANSIENTS_BYTES
     bank_floor_bytes: int = BANK_FLOOR_BYTES
     tight_machine: bool = False
@@ -484,7 +485,10 @@ def plan_memory(
     simulated with --memory-budget alike. A machine that cannot fund the
     bank floor still runs a pack no heavier than the measured one
     (``TIGHT_MACHINE_MAX_WEIGHTS_BYTES``), or a pack that stamps its own
-    tight-machine peaks (``tight_machine_measured``).
+    tight-machine peaks (``tight_machine_measured``). A lighter such pack
+    whose floor leaves it less context than that rule grants a heavier
+    one yields its floor too, so a lighter pack never plans a smaller
+    window than a heavier pack of the same geometry.
     """
     if total_ram_bytes is None or int(total_ram_bytes) <= 0:
         return _unavailable("total_ram_unknown")
@@ -544,12 +548,11 @@ def plan_memory(
     kv_budget = usable - weights - RUNTIME_TRANSIENTS_BYTES - BANK_FLOOR_BYTES
     fit_raw = _align_down(max(0, kv_budget) // per_token)
     model_fits = fit_raw >= CONTEXT_FLOOR_TOKENS
+    model_cap = int(model_max_context) if model_max_context else None
     transients = RUNTIME_TRANSIENTS_BYTES
     bank_floor = BANK_FLOOR_BYTES
     tight_machine = False
-    if not model_fits and (
-        tight_machine_measured or weights <= TIGHT_MACHINE_MAX_WEIGHTS_BYTES
-    ):
+    if tight_machine_measured or weights <= TIGHT_MACHINE_MAX_WEIGHTS_BYTES:
         # Tight machine: the resident session bank yields. The refusal
         # above charges the 1 GiB bank floor as if it were a physical need;
         # it is a clamp on the warm cache, and a machine that cannot fund
@@ -562,11 +565,35 @@ def plan_memory(
         # peaks were byte-identical for off and q8), so this fit counts KV
         # at its dense width. Admit with the bank floor at zero and the
         # measured margin; the SSD tier keeps restores working.
+        #
+        # A pack the floor refuses is short of one block of KV with it, so
+        # the most this rule grants is that block plus the floor net of the
+        # margin, at the dense rate (``tight_ceiling``). A lighter pack whose
+        # floor leaves it less than that yields its floor as well and takes
+        # that window; otherwise a heavier pack plans more context than a
+        # lighter one (2026-09-22: a 7.53 GiB MiMo build planned 12,288
+        # tokens on 16 GiB while the 8.08 GiB Qwen3.5-9B planned 20,480).
+        # Stopping at the ceiling keeps the window monotonic in pack size,
+        # and a pack whose floor-funded window reaches it keeps its floor.
         tight_transients = RUNTIME_TRANSIENTS_BYTES + TIGHT_MACHINE_MARGIN_BYTES
         tight_per_token = kv_per_token + aux_pt + transient_pt
         tight_budget = usable - weights - tight_transients
-        tight_fit = _align_down(max(0, tight_budget) // tight_per_token)
-        if tight_fit >= CONTEXT_FLOOR_TOKENS:
+        tight_ceiling = _align_down(
+            (
+                CONTEXT_FLOOR_TOKENS * per_token
+                - 1
+                + BANK_FLOOR_BYTES
+                - TIGHT_MACHINE_MARGIN_BYTES
+            )
+            // tight_per_token
+        )
+        tight_own = _align_down(max(0, tight_budget) // tight_per_token)
+        tight_fit = min(tight_own, tight_ceiling)
+        if (
+            tight_fit >= CONTEXT_FLOOR_TOKENS
+            and tight_fit > fit_raw
+            and (model_cap is None or fit_raw < model_cap)
+        ):
             model_fits = True
             tight_machine = True
             fit_raw = tight_fit
@@ -582,6 +609,12 @@ def plan_memory(
                 f" GiB + runtime {tight_transients / GIB:.2f} GiB leave "
                 f"{tight_budget / GIB:.2f} GiB for KV under the "
                 f"{usable / GIB:.1f} GiB engine budget"
+                + (
+                    f"; the window stops at {tight_ceiling} tokens, the most "
+                    "this rule grants a pack that cannot fund the floor"
+                    if tight_own > tight_ceiling
+                    else ""
+                )
             )
     if not model_fits:
         notes.append(
@@ -597,7 +630,6 @@ def plan_memory(
         )
         fit_raw = CONTEXT_FLOOR_TOKENS
 
-    model_cap = int(model_max_context) if model_max_context else None
     context_fit = fit_raw if model_cap is None else min(fit_raw, model_cap)
     machine_bound = model_cap is not None and fit_raw < model_cap
 
