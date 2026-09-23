@@ -1049,8 +1049,20 @@ private struct ModelRemovalCandidate: Identifiable {
 // quieter Brand.wash opacity-0.04 stripe that the selection fill
 // composites on top of, so hovering the selected row still reads as
 // "selected" but with a subtle lift.
+//
+// Every trailing icon (both checks, the restart arrow, the spinner and
+// the trash) is drawn centred in one 28 pt accessory slot that ends on
+// the row's 14 pt inset, so all of them share one vertical axis. The
+// slot sits inside the select button, which keeps the check part of the
+// row's tap target. The trash is a separate button that
+// ModelRowRemovalAccessory lays over the same slot.
 
-private struct ModelRowView: View {
+struct ModelRowView: View {
+    /// Side of the trailing accessory slot every row state draws into.
+    static let accessorySlot: CGFloat = 28
+    /// The row's horizontal inset. The accessory slot ends on it.
+    static let horizontalInset: CGFloat = 14
+
     let displayName: String
     let detail: String
     let isInstalled: Bool
@@ -1069,67 +1081,58 @@ private struct ModelRowView: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Button(action: action) {
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 9) {
-                            // .middle: builds of one model differ at the end of
-                            // their names (6-bit, a test suffix), which a tail
-                            // cut hides. Single-line, untracked text, the same
-                            // shape AttachmentCard ships; the macOS 26 layout
-                            // spin needs tracking or several lines.
-                            Text(displayName)
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundStyle(selected ? Brand.typeHi : Brand.typeBody)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .help(displayName)
-                            statusBadge
-                        }
-                        Text(detail)
-                            .font(.caption2)
-                            .foregroundStyle(Brand.typeTertiary)
-                            .lineLimit(2)
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        // .middle: builds of one model differ at the end of
+                        // their names (6-bit, a test suffix), which a tail
+                        // cut hides. Single-line, untracked text, the same
+                        // shape AttachmentCard ships; the macOS 26 layout
+                        // spin needs tracking or several lines.
+                        Text(displayName)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(selected ? Brand.typeHi : Brand.typeBody)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(displayName)
+                        statusBadge
                     }
-                    Spacer(minLength: 10)
-                    if removalAction == nil {
-                        trailingIcon
-                    }
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(Brand.typeTertiary)
+                        .lineLimit(2)
                 }
-                .contentShape(Rectangle())
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 10)
+                // The ZStack keeps the slot a single view, so an empty
+                // slot still holds its 28 points.
+                ZStack { trailingIcon }
+                    .frame(width: Self.accessorySlot, height: Self.accessorySlot)
             }
-            .buttonStyle(.plain)
-            .contextMenu {
-                if canRemoveFromPicker {
-                    Button(tr("Remove from picker"), role: .destructive, action: removeAction)
-                }
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if canRemoveFromPicker {
+                Button(tr("Remove from picker"), role: .destructive, action: removeAction)
             }
             if let removalAction {
-                Button(action: removalAction) {
-                    Group {
-                        if applying || removing {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.76)
-                        } else {
-                            Image(systemName: "trash")
-                                .font(.system(size: 12, weight: .semibold))
-                                .symbolRenderingMode(.monochrome)
-                        }
-                    }
-                    .foregroundStyle(Brand.danger)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(tr("Remove downloaded files"))
-                .accessibilityLabel(tr("Remove the %@ download", displayName))
+                Button(tr("Remove downloaded files"), role: .destructive, action: removalAction)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Self.horizontalInset)
         .padding(.vertical, 11)
+        .overlay(alignment: .trailing) {
+            if let removalAction {
+                ModelRowRemovalAccessory(
+                    displayName: displayName,
+                    busy: applying || removing,
+                    motionEnabled: motionEnabled,
+                    action: removalAction
+                )
+            }
+        }
         .contentShape(Rectangle())
         // Two flat full-width fills stacked: hover sits on top of
         // the selection tint so a hovered selected row reads as
@@ -1162,9 +1165,12 @@ private struct ModelRowView: View {
         }
     }
 
+    /// What the accessory slot shows. The spinner comes first. Otherwise
+    /// a row with a removable download leaves the slot empty, and
+    /// ModelRowRemovalAccessory reveals its trash there on hover.
     @ViewBuilder
     private var trailingIcon: some View {
-        if applying {
+        if applying || removing {
             ProgressView()
                 .controlSize(.small)
                 .scaleEffect(0.76)
@@ -1174,7 +1180,7 @@ private struct ModelRowView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .symbolRenderingMode(.monochrome)
                 .foregroundStyle(Brand.accentChrome)
-        } else {
+        } else if removalAction == nil {
             Image(systemName: restartRequired ? "arrow.clockwise" : "checkmark.circle")
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(.monochrome)
@@ -1203,6 +1209,50 @@ private struct ModelRowView: View {
                 Capsule(style: .continuous)
                     .strokeBorder(tint.opacity(0.35), lineWidth: 0.5)
             )
+    }
+}
+
+// MARK: - ModelRowRemovalAccessory
+//
+// The "remove download" control of an installed row, and that row's
+// trailing hover zone: full row height and 56 pt wide (the accessory
+// slot plus the row inset on each side), laid over the row's trailing
+// edge. The trash is framed exactly like ModelRowView's accessory slot,
+// so it sits on the same axis as the checks in the other rows. It fades
+// in only while the pointer is in this zone or the button has keyboard
+// focus, and never over the row's spinner. Only the glyph fades: the
+// button keeps its accessibility label and its place in the key view
+// loop, and the row's context menu offers the same removal.
+
+private struct ModelRowRemovalAccessory: View {
+    let displayName: String
+    let busy: Bool
+    let motionEnabled: Bool
+    let action: () -> Void
+
+    @State private var zoneHovered = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let revealed = !busy && (zoneHovered || focused)
+        Button(action: action) {
+            Image(systemName: "trash")
+                .font(.system(size: 12, weight: .semibold))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(Brand.danger)
+                .opacity(revealed ? 1 : 0)
+                .frame(width: ModelRowView.accessorySlot, height: ModelRowView.accessorySlot)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focused($focused)
+        .help(tr("Remove downloaded files"))
+        .accessibilityLabel(tr("Remove the %@ download", displayName))
+        .padding(.horizontal, ModelRowView.horizontalInset)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { zoneHovered = $0 }
+        .animation(motionEnabled ? .smooth(duration: 0.16) : nil, value: revealed)
     }
 }
 
