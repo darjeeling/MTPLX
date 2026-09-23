@@ -621,6 +621,18 @@ def _hc_write_compile_applies(hyper: mx.array) -> bool:
     return rows >= _HC_COMPILE_MIN_ROWS
 
 
+def _hc_prefill_read_enabled() -> bool:
+    """The fused hyper-connection READ at prefill width (mtplx.kernels.hc_prefill).
+
+    On by default; ``MTPLX_QWEN4_HC_PREFILL_READ=0`` restores the eager chain
+    (the rollback and the A/B arm).  The kernel admits only the family's own
+    geometry and bf16 weights, so everything else keeps the eager chain.
+    """
+
+    raw = (os.environ.get("MTPLX_QWEN4_HC_PREFILL_READ") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 @lru_cache(maxsize=None)
 def _hc_compiled_write(hc_count: int, hidden_size: int):
     """The hyper-connection write as one fused kernel at prefill width.
@@ -681,8 +693,46 @@ class SigmoidRMSNormGated(nn.Module):
         x = mx.fast.rms_norm(hidden_states, self.weight, self.eps)
         if gate is None:
             return x.astype(hidden_states.dtype)
+        if _gdn_gated_norm_fused_applies(hidden_states, x, gate):
+            # Prefill width: the gate below as one bit-identical pass
+            # (mtplx.kernels.gdn_gated_norm).
+            from mtplx.kernels.gdn_gated_norm import sigmoid_gate
+
+            return sigmoid_gate(x, gate)
         g = mx.sigmoid(gate.astype(mx.float32))
         return (g * x.astype(mx.float32)).astype(hidden_states.dtype)
+
+
+#: GDN norms over at least this many rows take the fused sigmoid gate.
+_GDN_GATED_NORM_MIN_ROWS = 32
+
+
+def _gdn_gated_norm_fused_applies(hidden_states, x, gate) -> bool:
+    """The fused output gate for prefill-width GDN norms (on by default;
+    ``MTPLX_QWEN4_GDN_GATED_NORM=0`` keeps the stock expression)."""
+
+    raw = (os.environ.get("MTPLX_QWEN4_GDN_GATED_NORM") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if hidden_states.dtype != mx.bfloat16 or hidden_states.ndim < 3:
+        return False
+    rows = 1
+    for dim in hidden_states.shape[:-2]:
+        rows *= int(dim)
+    if rows < _GDN_GATED_NORM_MIN_ROWS or current_attention_phase() != "prefill":
+        return False
+    from mtplx.kernels.gdn_gated_norm import gated_eligible
+
+    return gated_eligible(x, gate)
+
+
+#: GDN forwards at least this wide run the fused prefill prework.
+_GDN_PREFILL_PREWORK_MIN_ROWS = 32
+
+
+def _gdn_prefill_prework_enabled() -> bool:
+    raw = (os.environ.get("MTPLX_QWEN4_GDN_PREFILL_PREWORK") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
@@ -785,6 +835,20 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
             q = q_f.reshape(B, S, self.num_k_heads, self.head_k_dim)
             k = k_f.reshape(B, S, self.num_k_heads, self.head_k_dim)
             v = v_f.reshape(B, S, self.num_v_heads, self.head_v_dim)
+            state = cache[1] if cache else None
+        elif self._prefill_prework_applies(B, S, mask, cache, qkv, conv_state):
+            # Prefill width: conv + silu + q/k l2norm as one kernel over the
+            # q|k|v stream, bit-identical to the chain below
+            # (mtplx.kernels.gdn_prefill_prework).  The pre-conv stream is
+            # never built; a boundary capture builds it on demand.
+            from mtplx.kernels.gdn_prefill_prework import gdn_prefill_prework
+
+            q, k, v = gdn_prefill_prework(
+                qkv, conv_state, self.conv1d.weight, self.head_k_dim**-0.5
+            )
+            if cache is not None:
+                # The last kernel - 1 rows of [conv_state, qkv].
+                cache[0] = mx.contiguous(qkv[:, -(self.conv_kernel_size - 1) :, :])
             state = cache[1] if cache else None
         else:
             conv_input = mx.concatenate([conv_state, qkv], axis=1)
@@ -901,7 +965,7 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
             return y.reshape(B, S, -1)
 
         out = self.norm(out, z)
-        return self.out_proj(out.reshape(B, S, -1))
+        return _linear(self.out_proj, out.reshape(B, S, -1))
 
     def _fused_conv_norm_applies(self, B, S, mask, cache) -> bool:
         # Fused conv+silu+l2norm (MTPLX_FUSED_GDN_CONVNORM): the decode-row
@@ -929,6 +993,31 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
         # dispatch raises — pack contracts arm the env, so the device gate
         # must sit here (issue #400). Cached one-shot probe.
         return device_supports_gdn_conv_norm()
+
+    def _prefill_prework_applies(self, B, S, mask, cache, qkv, conv_state) -> bool:
+        # Prefill-width conv+silu+l2norm (MTPLX_QWEN4_GDN_PREFILL_PREWORK,
+        # default on): family geometry, dense rows, no conv bias, no ragged
+        # lengths, outside the verify capture scope.  Bit-identical to the
+        # staged chain, so the gate only has to keep other shapes off it.
+        if B != 1 or S < _GDN_PREFILL_PREWORK_MIN_ROWS or mask is not None:
+            return False
+        if self.training or not _gdn_prefill_prework_enabled():
+            return False
+        if current_attention_phase() != "prefill" or _VERIFY_CAPTURE.get():
+            return False
+        if cache is not None and getattr(cache, "lengths", None) is not None:
+            return False
+        if self.conv_dim != 10240 or self.key_dim != 2048 or self.conv_kernel_size != 4:
+            return False
+        if self.head_k_dim != 128 or self.head_v_dim != 128:
+            return False
+        if self.num_k_heads != 16 or self.num_v_heads != 48:
+            return False
+        if getattr(self.conv1d, "bias", None) is not None:
+            return False
+        from mtplx.kernels.gdn_prefill_prework import prework_eligible
+
+        return prework_eligible(qkv, conv_state, self.conv1d.weight)
 
     def _fused_conv_norm_rows_applies(self, B, S, mask, cache) -> bool:
         # Verify-width conv+silu+l2norm (MTPLX_FUSED_CONVNORM_VERIFY): the
@@ -1094,6 +1183,16 @@ class GatedResidual(nn.Module):
                 return mixed
             inject = inject.reshape(*hyper_input.shape[:-1], self.hc_count)
             return mixed, hyper_input, inject
+        if (
+            hyper_input.ndim == 3
+            and hyper_input.shape[-2] >= _HC_COMPILE_MIN_ROWS
+            and _hc_prefill_read_enabled()
+        ):
+            from mtplx.kernels.hc_prefill import hc_prefill_read
+
+            prefill = hc_prefill_read(self, hyper_input)
+            if prefill is not None:
+                return prefill
         normed = self.hc_norm(hyper_input)
         mix = nn.silu(self.input_mix_weight_down(normed) / self.hc_count)
         mix = mx.sigmoid(self.input_mix_weight_up(mix))
@@ -1206,7 +1305,60 @@ class SparseMoeBlock(_Qwen3NextSparseMoeBlock):
             ).reshape(x.shape)
             shared = mx.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
             return (y + shared).astype(x.dtype)
+        if _moe_prefill_combine_applies(self, x):
+            return self._prefill_call(x)
         return super().__call__(x)
+
+    def _prefill_call(self, x: mx.array) -> mx.array:
+        """The parent's forward with the combine tail as one kernel.
+
+        Routing, experts and the shared expert are the parent's own ops
+        (mlx_lm Qwen3NextSparseMoeBlock); only the unsort -> weight -> sum
+        -> + shared tail runs fused, bit-identical to the stock tail
+        (mtplx.kernels.qwen4_moe_prefill_combine).
+        """
+
+        from mtplx.kernels.qwen4_moe_prefill_combine import moe_prefill_combine
+
+        gates = mx.softmax(self.gate(x), axis=-1, precise=True)
+        k = self.top_k
+        inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+        scores = mx.take_along_axis(gates, inds, axis=-1)
+        if self.norm_topk_prob:
+            scores = scores / scores.sum(axis=-1, keepdims=True)
+        y_sorted, inv_order = self.switch_mlp.sorted_experts(x, inds)
+        shared = mx.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
+        rows = inds.size // k
+        out = moe_prefill_combine(
+            y_sorted, inv_order, scores.reshape(rows, k), shared.reshape(rows, -1)
+        )
+        return out.reshape(x.shape)
+
+
+#: Forwards at least this wide (prefill chunks) take the fused MoE combine;
+#: decode and verify widths keep their own routes.
+_MOE_PREFILL_COMBINE_MIN_ROWS = 32
+
+
+def _moe_prefill_combine_enabled() -> bool:
+    raw = (os.environ.get("MTPLX_QWEN4_MOE_PREFILL_COMBINE") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _moe_prefill_combine_applies(block, x: mx.array) -> bool:
+    """The fused MoE combine for prefill-width forwards (on by default;
+    ``MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`` keeps the stock tail)."""
+
+    if x.ndim < 2 or x.dtype != mx.bfloat16:
+        return False
+    rows = x.size // x.shape[-1]
+    if rows < _MOE_PREFILL_COMBINE_MIN_ROWS or rows * block.top_k < 64:
+        return False
+    if getattr(block, "sharding_group", None) is not None:
+        return False
+    if not isinstance(block.switch_mlp, _FusedGateUpSwitchGLU):
+        return False
+    return _moe_prefill_combine_enabled()
 
 
 class _FusedGateUpSwitchGLU(nn.Module):
@@ -1267,6 +1419,86 @@ class _FusedGateUpSwitchGLU(nn.Module):
             x = _scatter_unsort(x, inv_order, indices.shape)
         return x.squeeze(-2)
 
+    def sorted_experts(self, x, indices):
+        """The expert outputs in expert-sorted order, ``[rows * top_k, hidden]``,
+        with the inverse permutation that unsorts them: ``__call__`` for the
+        sorted regime (64 or more routed rows) minus its final unsort."""
+
+        from mlx_lm.models.switch_layers import _gather_sort
+
+        x = mx.expand_dims(x, (-2, -3))
+        x, idx, inv_order = _gather_sort(x, indices)
+        gate, up = self._gu(x, idx, sorted_indices=True)
+        y = self.down_proj(nn.silu(gate) * up, idx, sorted_indices=True)
+        return y.reshape(y.shape[0], -1), inv_order
+
+
+#: Prefill forwards at least this wide run their dense quantized projections as
+#: one dequantize plus a dense GEMM (MTPLX_QWEN4_PREFILL_DQ_GEMM).
+_PREFILL_DQ_GEMM_MIN_ROWS = 2048
+
+
+def _prefill_dq_gemm_applies(x: mx.array) -> bool:
+    """Dequantize-then-GEMM for the wide prefill projections, on by default.
+
+    At 2,048 rows and more MLX's quantized matmul already dequantizes each
+    weight tile and accumulates the same bf16 products in the same order as a
+    dense GEMM over the dequantized matrix: the two are bit-identical on every
+    Flash-Next projection shape (4-bit g32 and 8-bit g64, 2,048 and 4,096
+    rows; tests/test_qwen4_prefill_dq_gemm.py pins it).  Taking the dense
+    GEMM lets MLX schedule the one-off dequantize apart from the matmul, which
+    measured 1-4% faster through mtplx serve.  Decode and verify widths keep
+    the quantized matmul.  ``MTPLX_QWEN4_PREFILL_DQ_GEMM=0`` turns it off.
+    """
+
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_DQ_GEMM") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    rows = 1
+    for dim in x.shape[:-1]:
+        rows *= int(dim)
+    return rows >= _PREFILL_DQ_GEMM_MIN_ROWS and current_attention_phase() == "prefill"
+
+
+def _projection(x, weight, scales, biases, *, group_size, bits, mode):
+    """``x @ W.T`` for a quantized W, through the prefill lane when it applies."""
+
+    if _prefill_dq_gemm_applies(x):
+        dense = mx.dequantize(
+            weight, scales, biases, group_size=group_size, bits=bits, mode=mode
+        )
+        return mx.matmul(x, dense.T)
+    return mx.quantized_matmul(
+        x,
+        weight,
+        scales,
+        biases,
+        transpose=True,
+        group_size=group_size,
+        bits=bits,
+        mode=mode,
+    )
+
+
+def _linear(module, x):
+    """``module(x)``, with the prefill lane for a bias-free QuantizedLinear."""
+
+    if (
+        isinstance(module, nn.QuantizedLinear)
+        and "bias" not in module
+        and _prefill_dq_gemm_applies(x)
+    ):
+        return _projection(
+            x,
+            module.weight,
+            module.scales,
+            module.get("biases"),
+            group_size=module.group_size,
+            bits=module.bits,
+            mode=getattr(module, "mode", "affine"),
+        )
+    return module(x)
+
 
 class _FusedGateUpMLP(nn.Module):
     """Shared-expert MLP with gate_proj+up_proj as one quantized matmul
@@ -1284,18 +1516,17 @@ class _FusedGateUpMLP(nn.Module):
         self.down_proj = down_proj
 
     def __call__(self, x) -> mx.array:
-        gu = mx.quantized_matmul(
+        gu = _projection(
             x,
             self.gu_weight,
             self.gu_scales,
             self.gu_biases,
-            transpose=True,
             group_size=self.group_size,
             bits=self.bits,
             mode=self.mode,
         )
         gate, up = mx.split(gu, 2, axis=-1)
-        return self.down_proj(nn.silu(gate) * up)
+        return _linear(self.down_proj, nn.silu(gate) * up)
 
 
 class _FusedGDNInProj(nn.Module):
@@ -1319,12 +1550,11 @@ class _FusedGDNInProj(nn.Module):
         self._splits = list(splits)  # cumulative row offsets: qkv|z|b|a
 
     def __call__(self, x):
-        y = mx.quantized_matmul(
+        y = _projection(
             x,
             self.weight,
             self.scales,
             self.biases,
-            transpose=True,
             group_size=self.group_size,
             bits=self.bits,
             mode=self.mode,
@@ -1707,6 +1937,34 @@ def _sdpa_head_chunked(q, k, v, *, scale, mask, heads_per_chunk: int):
                 )
             )
     return mx.concatenate(outs, axis=1)
+
+
+#: Prefill forwards at least this wide take the fused masked-softmax route
+#: for their dense-band attention.
+_QSA_DENSE_BAND_SDPA_MIN_ROWS = 32
+
+
+def _qsa_dense_band_sdpa_applies(q: mx.array, k: mx.array, mask) -> bool:
+    """The dense band's SDPA with the mask inside the score GEMM, opt-in.
+
+    Only prefill forwards of 32 rows or more whose stock call is MLX's unfused
+    fallback (head dim 256, boolean ``[1, 1, S, T]`` mask; see
+    ``qsa_dense_band_sdpa.dense_band_eligible``).  Bit-identical to the stock
+    call in the unit tests and at the stock call's peak memory plus one
+    ``[S, T]`` bf16 plane; it stays opt-in until a whole-model parity run on
+    real prompts confirms it.  ``MTPLX_QSA_DENSE_BAND_SDPA=1`` turns it on.
+    """
+
+    raw = (os.environ.get("MTPLX_QSA_DENSE_BAND_SDPA") or "0").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    if q.ndim != 4 or int(q.shape[2]) < _QSA_DENSE_BAND_SDPA_MIN_ROWS:
+        return False
+    if current_attention_phase() != "prefill":
+        return False
+    from mtplx.kernels.qsa_dense_band_sdpa import dense_band_eligible
+
+    return dense_band_eligible(q, k, mask)
 
 
 def _verify_sdpa(q, k, v, *, scale, mask):
@@ -4370,7 +4628,7 @@ class Attention(nn.Module):
             )
             if out is not None:
                 out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
-                return self.o_proj(out * mx.sigmoid(gate))
+                return _linear(self.o_proj, out * mx.sigmoid(gate))
 
             # Static unsupported geometry falls back exactly.  Once the
             # supported kernel is dispatched, failures propagate instead of
@@ -4419,9 +4677,18 @@ class Attention(nn.Module):
         else:
             mask = None
 
-        out = _verify_sdpa(q, k, v, scale=self.scale, mask=mask)
+        if _qsa_dense_band_sdpa_applies(q, k, mask):
+            # Wide prefill below the sparse crossover: MLX's own fallback
+            # with the boolean mask applied in the score GEMM instead of a
+            # separate where pass (bit-identical;
+            # mtplx.kernels.qsa_dense_band_sdpa).
+            from mtplx.kernels.qsa_dense_band_sdpa import dense_band_sdpa
+
+            out = dense_band_sdpa(q, k, v, scale=self.scale, mask=mask)
+        else:
+            out = _verify_sdpa(q, k, v, scale=self.scale, mask=mask)
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
-        return self.o_proj(out * mx.sigmoid(gate))
+        return _linear(self.o_proj, out * mx.sigmoid(gate))
 
 
 _MASK64 = (1 << 64) - 1
