@@ -62,6 +62,7 @@ from mlx_lm.models.qwen3_next import (
     Qwen3NextSparseMoeBlock as _Qwen3NextSparseMoeBlock,
 )
 
+from mtplx import nax_detect
 from mtplx.attention_context import current_attention_phase
 from mtplx.runtime_options import qwen4_opdiet_enabled, qwen4_verify_glue_enabled
 
@@ -1439,25 +1440,39 @@ _PREFILL_DQ_GEMM_MIN_ROWS = 2048
 
 
 def _prefill_dq_gemm_applies(x: mx.array) -> bool:
-    """Dequantize-then-GEMM for the wide prefill projections, on by default.
+    """Dequantize-then-GEMM for the wide prefill projections, on M5-class GPUs.
 
-    At 2,048 rows and more MLX's quantized matmul already dequantizes each
-    weight tile and accumulates the same bf16 products in the same order as a
-    dense GEMM over the dequantized matrix: the two are bit-identical on every
-    Flash-Next projection shape (4-bit g32 and 8-bit g64, 2,048 and 4,096
-    rows; tests/test_qwen4_prefill_dq_gemm.py pins it).  Taking the dense
+    On a tensor-unit (NAX) GPU at 2,048 rows and more, MLX's quantized matmul
+    and a dense GEMM over the dequantized matrix are bit-identical on the
+    Flash-Next projection shapes (4-bit g32 and 8-bit g64, 2,048 and 4,096
+    rows; tests/test_qwen4_prefill_dq_gemm.py pins it), and taking the dense
     GEMM lets MLX schedule the one-off dequantize apart from the matmul, which
-    measured 1-4% faster through mtplx serve.  Decode and verify widths keep
-    the quantized matmul.  ``MTPLX_QWEN4_PREFILL_DQ_GEMM=0`` turns it off.
+    measured 1-4% faster through mtplx serve on an M5 Max.
+
+    Both halves of that are M5 receipts.  An M1 to M4 runs other kernels on
+    each side (MLX's non-tensor-unit quantized matmul against its steel
+    GEMM), writes a bf16 copy of every weight per call (84 MB for a GDN
+    in_proj), and ``mx.dequantize`` rounds through a bf16 fused multiply-add
+    that the GPU compiler may split into two roundings, where the quantized
+    matmul rounds once from float.  So unset means on only where
+    ``mtplx.nax_detect.nax_available()`` holds (read per call, so
+    ``MTPLX_FORCE_GPU_FAMILY_FALLBACK=1`` rehearses the other Macs).  Decode
+    and verify widths always keep the quantized matmul.
+    ``MTPLX_QWEN4_PREFILL_DQ_GEMM=1`` forces the lane on any Mac (the A/B
+    arm); ``=0`` turns it off everywhere.
     """
 
-    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_DQ_GEMM") or "1").strip().lower()
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_DQ_GEMM") or "").strip().lower()
     if raw in {"0", "false", "no", "off"}:
         return False
     rows = 1
     for dim in x.shape[:-1]:
         rows *= int(dim)
-    return rows >= _PREFILL_DQ_GEMM_MIN_ROWS and current_attention_phase() == "prefill"
+    if rows < _PREFILL_DQ_GEMM_MIN_ROWS or current_attention_phase() != "prefill":
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return nax_detect.nax_available()
 
 
 def _projection(x, weight, scales, biases, *, group_size, bits, mode):
