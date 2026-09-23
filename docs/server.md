@@ -280,6 +280,13 @@ mtplx openwebui docker-command
 That helper disables Open WebUI's Ollama probe and background task generations
 so MTPLX only serves visible chat turns by default.
 
+Leave Open WebUI's Controls (temperature, top P, top K and the rest) on
+Default. A value left on Default is not sent, so MTPLX applies the sampler and
+reasoning settings it uses for the loaded model, the ones the dashboard shows.
+A value changed in Open WebUI is sent with every request; see
+[Who controls connected-app settings](api.md#who-controls-connected-app-settings)
+for when MTPLX follows it (#513).
+
 For Anthropic Messages-compatible clients, point the client base URL at the
 bare server root — no `/v1` suffix:
 
