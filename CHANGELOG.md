@@ -524,6 +524,14 @@ All notable user-facing changes to MTPLX. The format is based on
   now named by `public_model_id` or `served_model_id`, else by its folder
   name, and keeps its own row; the same folder name under two model
   folders still shares one row, first folder first.
+- **The inference panel no longer pins a 2,048-token prompt chunk.** The
+  panel showed 2,048 when nothing was stored and sent it with every live
+  settings change, which the app saved, so later launches passed
+  `--prefill-chunk-tokens 2048` and skipped Flash-Next's 4,096-token chunk
+  on M5. `GET /v1/mtplx/settings` now reports an unpinned chunk as null with
+  a read-only `prefill_chunk_tokens_default`, `POST` accepts 0 or `auto` to
+  unpin, the panel has an Auto option, and a saved 2,048 yields to the
+  engine once.
 - **Setup uses the runtime and model defaults it selected.** An app runtime
   started from another MTPLX folder could import that folder's package
   first and report the wrong version; the runtime wrapper now runs Python
