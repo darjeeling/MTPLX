@@ -1862,6 +1862,32 @@ def _sdpa_head_chunked(q, k, v, *, scale, mask, heads_per_chunk: int):
     return mx.concatenate(outs, axis=1)
 
 
+#: Prefill forwards at least this wide take the fused masked-softmax route
+#: for their dense-band attention.
+_QSA_DENSE_BAND_SDPA_MIN_ROWS = 32
+
+
+def _qsa_dense_band_sdpa_applies(q: mx.array, k: mx.array, mask) -> bool:
+    """The dense band's SDPA without the materialized ``where``, on by default.
+
+    Only prefill forwards of 32 rows or more whose stock call is MLX's unfused
+    fallback (head dim 256, boolean ``[1, 1, S, T]`` mask; see
+    ``qsa_dense_band_sdpa.dense_band_eligible``).  The result is bit-identical
+    to the stock call.  ``MTPLX_QSA_DENSE_BAND_SDPA=0`` keeps the stock call.
+    """
+
+    raw = (os.environ.get("MTPLX_QSA_DENSE_BAND_SDPA") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if q.ndim != 4 or int(q.shape[2]) < _QSA_DENSE_BAND_SDPA_MIN_ROWS:
+        return False
+    if current_attention_phase() != "prefill":
+        return False
+    from mtplx.kernels.qsa_dense_band_sdpa import dense_band_eligible
+
+    return dense_band_eligible(q, k, mask)
+
+
 def _verify_sdpa(q, k, v, *, scale, mask):
     """SDPA that stays on the fused kernel across the small-q_len verify band.
 
@@ -4572,7 +4598,15 @@ class Attention(nn.Module):
         else:
             mask = None
 
-        out = _verify_sdpa(q, k, v, scale=self.scale, mask=mask)
+        if _qsa_dense_band_sdpa_applies(q, k, mask):
+            # Wide prefill below the sparse crossover: MLX's own fallback
+            # with the boolean mask folded into the softmax (bit-identical;
+            # mtplx.kernels.qsa_dense_band_sdpa).
+            from mtplx.kernels.qsa_dense_band_sdpa import dense_band_sdpa
+
+            out = dense_band_sdpa(q, k, v, scale=self.scale, mask=mask)
+        else:
+            out = _verify_sdpa(q, k, v, scale=self.scale, mask=mask)
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
         return _linear(self.o_proj, out * mx.sigmoid(gate))
 
