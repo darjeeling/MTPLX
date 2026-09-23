@@ -413,6 +413,38 @@ def test_settings_post_mutates_mutable_keys():
     assert body["generation_mode"] == "ar"
 
 
+def test_settings_get_reports_an_unpinned_prefill_chunk_as_none(monkeypatch):
+    # The served default is not a pin: echoing it back from the app pinned
+    # 2,048 on every Flash-Next launch and skipped the family's wide chunk.
+    monkeypatch.delenv("MTPLX_PREFILL_CHUNK_SIZE_DENSE", raising=False)
+    monkeypatch.delenv("MTPLX_PREFILL_CHUNK_SIZE", raising=False)
+    monkeypatch.setenv("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", "4096")
+    state = _fake_state()
+    state.args.prefill_chunk_tokens = None
+    body = TestClient(create_app(state)).get("/v1/mtplx/settings").json()
+    assert body["prefill_chunk_tokens"] is None
+    assert body["prefill_chunk_tokens_default"] == 4096
+
+
+def test_settings_post_zero_or_auto_unpins_the_prefill_chunk(monkeypatch):
+    monkeypatch.delenv("MTPLX_QWEN4_PREFILL_WIDE_CHUNK", raising=False)
+    for unpin in (0, "auto"):
+        state = _fake_state()
+        client = TestClient(create_app(state))
+        assert client.post(
+            "/v1/mtplx/settings", json={"prefill_chunk_tokens": 2048}
+        ).status_code == 200
+        assert state.args.prefill_chunk_tokens == 2048
+        response = client.post(
+            "/v1/mtplx/settings", json={"prefill_chunk_tokens": unpin}
+        )
+        assert response.status_code == 200
+        assert state.args.prefill_chunk_tokens is None
+        body = response.json()
+        assert body["prefill_chunk_tokens"] is None
+        assert body["prefill_chunk_tokens_default"] == 2048
+
+
 def test_settings_post_rejects_restart_required_keys():
     client = TestClient(create_app(_fake_state()))
     response = client.post("/v1/mtplx/settings", json={"profile": "safe"})

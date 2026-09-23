@@ -253,6 +253,10 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
     /// (legacy default profile -> "auto"; 250 ms stream cadence -> 100).
     public var profileLegacyDefaultMigrated: Bool
     public var streamCadenceMigrated: Bool
+    /// One-shot guard for the 2026-09-23 prefill-chunk migration: builds
+    /// before it saved the inference panel's 2,048 fallback as if the user
+    /// had chosen it (see `sanitize`).
+    public var prefillChunkFallbackMigrated: Bool
     /// OpenAI-style presence penalty (0 = exact no-op; Qwen recommends 0
     /// for coding). Round-trips through the daemon's live settings like
     /// temperature/topP/topK.
@@ -407,6 +411,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         samplerLegacyTripleMigrated: Bool = false,
         profileLegacyDefaultMigrated: Bool = false,
         streamCadenceMigrated: Bool = false,
+        prefillChunkFallbackMigrated: Bool = false,
         presencePenalty: Double? = nil,
         reasoning: String? = nil,
         reasoningEffort: String? = nil,
@@ -483,6 +488,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         self.samplerLegacyTripleMigrated = samplerLegacyTripleMigrated
         self.profileLegacyDefaultMigrated = profileLegacyDefaultMigrated
         self.streamCadenceMigrated = streamCadenceMigrated
+        self.prefillChunkFallbackMigrated = prefillChunkFallbackMigrated
         self.presencePenalty = presencePenalty
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
@@ -758,6 +764,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         case samplerLegacyTripleMigrated = "sampler_legacy_triple_migrated"
         case profileLegacyDefaultMigrated = "profile_legacy_default_migrated"
         case streamCadenceMigrated = "stream_cadence_migrated"
+        case prefillChunkFallbackMigrated = "prefill_chunk_fallback_migrated"
         case presencePenalty = "presence_penalty"
         case reasoning
         case reasoningEffort = "reasoning_effort"
@@ -859,6 +866,7 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
         samplerLegacyTripleMigrated = field(Bool.self, .samplerLegacyTripleMigrated) ?? false
         profileLegacyDefaultMigrated = field(Bool.self, .profileLegacyDefaultMigrated) ?? false
         streamCadenceMigrated = field(Bool.self, .streamCadenceMigrated) ?? false
+        prefillChunkFallbackMigrated = field(Bool.self, .prefillChunkFallbackMigrated) ?? false
         presencePenalty = field(Double.self, .presencePenalty)
         reasoning = field(String.self, .reasoning)
         reasoningEffort = field(String.self, .reasoningEffort)
@@ -1086,6 +1094,21 @@ public struct MTPLXAppConfiguration: Codable, Equatable, Sendable {
                 topK = nil
             }
             samplerLegacyTripleMigrated = true
+        }
+        // Prefill-chunk migration (2026-09-23): the inference panel showed
+        // 2,048 when nothing was stored and put that fallback into every
+        // live-settings push, which the app then saved, so one temperature
+        // change launched every later daemon with --prefill-chunk-tokens
+        // 2048. That pins the model's forward chunk and skips the family's
+        // own memory-gated width (4,096 rows for Flash-Next on M5, measured
+        // faster). A stored 2,048 is the fingerprint of the fallback; it
+        // yields back to the engine's choice once. A value chosen after
+        // this migration sticks.
+        if !prefillChunkFallbackMigrated {
+            if prefillChunkTokens == 2048 {
+                prefillChunkTokens = nil
+            }
+            prefillChunkFallbackMigrated = true
         }
     }
 

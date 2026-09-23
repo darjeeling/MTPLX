@@ -1204,6 +1204,23 @@ def _served_prefill_chunk_default(args: argparse.Namespace) -> int:
     return 2048
 
 
+def _served_prefill_chunk_auto(args: argparse.Namespace) -> int:
+    """The chunk an unpinned long request plans with: the family's wide chunk
+    where one is stamped (granted per request against live memory, falling back
+    to the served default), else the served default."""
+
+    default = _served_prefill_chunk_default(args)
+    try:
+        from mtplx.generation import _prefill_chunk_env_is_pinned
+
+        wide = int(os.environ.get("MTPLX_QWEN4_PREFILL_WIDE_CHUNK") or 0)
+        if wide > default and not _prefill_chunk_env_is_pinned():
+            return wide
+    except (ImportError, ValueError):
+        pass
+    return default
+
+
 def _served_family_env_stamp(args: argparse.Namespace) -> dict[str, str]:
     try:
         from mtplx.backends.family_settings import TENSOR_UNIT_GPU, family_env_stamp
@@ -1846,7 +1863,8 @@ class MTPLXSettingsUpdate(BaseModel):
     enable_thinking: bool | None = None
     reasoning_parser: str | None = None
     reasoning_effort: str | None = None
-    prefill_chunk_tokens: int | None = None
+    # A pinned chunk in rows, or 0 / "auto" to hand it back to the engine.
+    prefill_chunk_tokens: int | str | None = None
     draft_temperature: float | None = None
     draft_top_p: float | None = None
     draft_top_k: int | None = None
@@ -17305,6 +17323,7 @@ DASHBOARD_READ_ONLY_SETTINGS_KEYS: tuple[str, ...] = (
     "model_controls",
     "model_family",
     "ok",
+    "prefill_chunk_tokens_default",
     "preserve_thinking",
     "preserve_thinking_effective",
     "reasoning_history_mode",
@@ -17779,6 +17798,12 @@ def _thermal_health_payload(
 def _coerce_setting(name: str, value: Any) -> Any:
     """Apply minimal type coercion so JSON ``"3"`` becomes int ``3``."""
 
+    if name == "prefill_chunk_tokens" and str(value).strip().lower() in {"0", "auto"}:
+        # 0 (or "auto") unpins the chunk: requests go back to the served
+        # family's own plan, which for Flash-Next on tensor-unit GPUs is the
+        # memory-gated wide chunk (generation.qwen4_wide_prefill_chunk_tokens).
+        return 0
+
     if name in {
         "depth",
         "top_k",
@@ -17958,6 +17983,8 @@ def _mtplx_apply_settings_payload(
                     status_code=400,
                     detail="generation_mode 'mtp' requires a runtime loaded with MTP",
                 )
+            if key == "prefill_chunk_tokens" and value == 0:
+                value = None
             if key in {"presence_penalty", "frequency_penalty"}:
                 # The live-settings surface uses the plain OpenAI field names;
                 # the server args store them as the CLI's --default-*-penalty
@@ -18205,10 +18232,12 @@ def _mtplx_current_settings(state: "ServerState") -> dict[str, Any]:
             if getattr(state, "draft_sampler", None) is not None
             else None
         ),
-        "prefill_chunk_tokens": int(
-            getattr(args, "prefill_chunk_tokens", None)
-            or _served_prefill_chunk_default(args)
-        ),
+        # The chunk a launch flag or a live setting pinned, else None: the
+        # engine chooses per request.  Reporting the served default here made
+        # the app echo it back as a pin (2,048 on every Flash-Next launch,
+        # which skipped the family's measured 4,096-row width).
+        "prefill_chunk_tokens": getattr(args, "prefill_chunk_tokens", None) or None,
+        "prefill_chunk_tokens_default": _served_prefill_chunk_auto(args),
         "ssd_session_cache": str(getattr(args, "ssd_session_cache", "off") or "off"),
         "ssd_session_cache_dir": str(
             getattr(args, "ssd_session_cache_dir", "~/.mtplx/session-bank")

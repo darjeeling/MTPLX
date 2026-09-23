@@ -135,6 +135,9 @@ struct InferenceParamsOverlay: View, Equatable {
     // there is no apply-bar warning to make the user think prefill
     // requires a restart. It doesn't.
     @State private var prefillChunk: Int = 2048
+    // False while the engine chooses the chunk (nothing pinned): the slider
+    // then shows the engine's default and no push carries a chunk.
+    @State private var prefillChunkPinned: Bool = false
 
     // Context window draft — restart required (daemon `--context-window`).
     // Slider runs 4 096 … model max, snaps to 1 024-token increments.
@@ -161,6 +164,7 @@ struct InferenceParamsOverlay: View, Equatable {
         let clientControlError: String?
         let fanMode: String
         let prefillChunk: Int
+        let prefillChunkPinned: Bool
         let contextWindow: Int
         let contextWindowDirty: Bool
         let kvQuantization: String
@@ -230,6 +234,7 @@ struct InferenceParamsOverlay: View, Equatable {
             clientControlError: clientControlError,
             fanMode: fanMode,
             prefillChunk: prefillChunk,
+            prefillChunkPinned: prefillChunkPinned,
             contextWindow: contextWindow,
             contextWindowDirty: contextWindowDirty,
             kvQuantization: kvQuantization,
@@ -997,7 +1002,8 @@ struct InferenceParamsOverlay: View, Equatable {
                 range: 256...32768,
                 step: 256,
                 valueText: { v in
-                    Text(Int(v.rounded()), format: .number) + Text(tr(" tok"))
+                    (prefillChunkPinned ? Text(verbatim: "") : Text(tr("Auto")) + Text(verbatim: " "))
+                        + Text(Int(v.rounded()), format: .number) + Text(tr(" tok"))
                 },
                 hapticPattern: .alignment,
                 onCommit: { commitPrefill() }
@@ -1101,21 +1107,26 @@ struct InferenceParamsOverlay: View, Equatable {
     @ViewBuilder
     private var prefillPresetChips: some View {
         HStack(spacing: 6) {
+            contextChip(label: tr("Auto"), isOn: !prefillChunkPinned) {
+                guard prefillChunkPinned else { return }
+                Haptics.tick(.alignment)
+                resetPrefillToAuto()
+            }
             ForEach([2048, 4096, 8192, 16384], id: \.self) { preset in
                 Button {
-                    guard prefillChunk != preset else { return }
+                    guard !prefillChunkPinned || prefillChunk != preset else { return }
                     prefillChunk = preset
                     Haptics.tick(.alignment)
                     commitPrefill()
                 } label: {
                     Text("\(preset)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(prefillChunk == preset ? Brand.bgOuter : Brand.typeBody)
+                        .foregroundStyle(prefillChunkPinned && prefillChunk == preset ? Brand.bgOuter : Brand.typeBody)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(prefillChunk == preset
+                                .fill(prefillChunkPinned && prefillChunk == preset
                                       ? AnyShapeStyle(Brand.typeBody)
                                       : AnyShapeStyle(Color.clear))
                                 .overlay(
@@ -1369,6 +1380,7 @@ struct InferenceParamsOverlay: View, Equatable {
     /// per step. Failure to persist or push live silently no-ops; the
     /// next slider release retries.
     private func commitPrefill() {
+        prefillChunkPinned = true
         let live = currentLiveSettingsDraft()
 
         var config = backend.configuration
@@ -1422,7 +1434,10 @@ struct InferenceParamsOverlay: View, Equatable {
             draft.reasoningEffort = nil
             draft.enableThinking = nil
         }
-        draft.prefillChunkTokens = prefillChunk
+        // Only a chunk the user pinned rides a push; otherwise the engine
+        // keeps its own (memory-gated) choice. Sending the displayed default
+        // here once pinned 2,048 on every daemon after any sampler change.
+        draft.prefillChunkTokens = prefillChunkPinned ? prefillChunk : nil
         // Force the response-length cap to null on every live commit so the
         // daemon never truncates a reply. Generation stops on EOS or when
         // the context window is exhausted — nothing in between.
@@ -1525,6 +1540,7 @@ struct InferenceParamsOverlay: View, Equatable {
         fanMode = MTPLXFanMode.normalized(
             snapshot.currentFanMode ?? snapshot.configuration.fanMode
         ).rawValue
+        prefillChunkPinned = pinnedPrefillChunk != nil
         prefillChunk = currentPrefillChunk
         contextWindow = currentContextWindow
         contextWindowDirty = false
@@ -1565,10 +1581,34 @@ struct InferenceParamsOverlay: View, Equatable {
         )
     }
 
-    private var currentPrefillChunk: Int {
+    /// The chunk the user pinned (live daemon first, then the saved
+    /// configuration), or nil while the engine chooses.
+    private var pinnedPrefillChunk: Int? {
         compatibleSettings?.prefillChunkTokens
             ?? snapshot.configuration.prefillChunkTokens
+    }
+
+    private var currentPrefillChunk: Int {
+        pinnedPrefillChunk
+            ?? compatibleSettings?.prefillChunkTokensDefault
             ?? 2048
+    }
+
+    /// Hand the chunk back to the engine: forget the saved value and push 0,
+    /// which a running daemon reads as "use your own choice".
+    private func resetPrefillToAuto() {
+        prefillChunkPinned = false
+        prefillChunk = compatibleSettings?.prefillChunkTokensDefault ?? 2048
+        var live = currentLiveSettingsDraft()
+        live.prefillChunkTokens = 0
+
+        var config = backend.configuration
+        config.prefillChunkTokens = nil
+
+        try? backend.saveSettings(config)
+        Task {
+            try? await backend.updateLiveSettings(live)
+        }
     }
 
     private var currentKVQuantization: String {

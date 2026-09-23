@@ -2290,7 +2290,8 @@ public final class MTPLXBackendStore: ObservableObject {
             next.reasoningEffort = reasoningEffort
         }
         if let prefillChunkTokens = settings.prefillChunkTokens {
-            next.prefillChunkTokens = prefillChunkTokens
+            // 0 is the push that hands the chunk back to the engine.
+            next.prefillChunkTokens = prefillChunkTokens > 0 ? prefillChunkTokens : nil
         }
         if let policy = settings.managedClientControls, ["app", "client"].contains(policy) {
             next.controlClientSettings = policy == "app"
