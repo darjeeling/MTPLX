@@ -25,8 +25,17 @@ The decode trick and the row layout follow mlx-serve's ``qmv2.zig``
 Contract (``ternary_qmv`` returns None on any miss, the caller keeps stock):
   * ``x``: float16, ``[..., K]`` with at most ``MAX_ROWS`` rows in total;
   * ``w``: uint32 ``[N, K/16]``; ``scales``: float16 ``[N, K/128]``;
-  * ``K % 512 == 0`` and ``N % ROWS_PER_THREADGROUP == 0``;
+  * ``K % 512 == 0`` and ``N`` a multiple of the rows one threadgroup covers;
   * the caller has proven ``biases == -scales`` for this matrix once.
+
+Geometry (2026-09-23 sweep on the pack's own matrices, M5 Max, 16-call
+bursts): two rows per simdgroup and eight simdgroups per threadgroup beat
+stock by 1.15-1.25x on the MLP and linear-attention projections at M = 1
+and 2 (four rows per simdgroup spills registers and runs at half of
+stock); the vocabulary head prefers four simdgroups (1.16x at M = 1, 1.39x
+at M = 2). Matrices with fewer than ``MIN_N`` outputs (the 1024-row key and
+value projections) have too few threadgroups to fill the GPU and stay on
+stock; the model arms the kernel only for ``worthwhile`` shapes.
 """
 
 from __future__ import annotations
@@ -40,9 +49,11 @@ ENV = "MTPLX_BONSAI_TERNARY_QMV"
 MAX_ROWS = 4
 GROUP_SIZE = 128
 BITS = 2
-ROWS_PER_SIMDGROUP = 4
+ROWS_PER_SIMDGROUP = 2
 SIMDGROUPS = 8
-ROWS_PER_THREADGROUP = ROWS_PER_SIMDGROUP * SIMDGROUPS
+HEAD_SIMDGROUPS = 4
+HEAD_MIN_N = 65536
+MIN_N = 2048
 
 _COUNTS = {"served": 0, "declined": 0}
 
@@ -134,8 +145,8 @@ def counters() -> dict[str, int]:
     return dict(_COUNTS)
 
 
-def _geometry() -> tuple[int, int]:
-    """(rows per simdgroup, simdgroups per threadgroup); env override for tuning."""
+def _geometry(n: int) -> tuple[int, int]:
+    """(rows per simdgroup, simdgroups per threadgroup) for ``n`` outputs; env override for tuning."""
 
     raw = (os.environ.get("MTPLX_TERNARY_QMV_GEOMETRY") or "").strip()
     if raw:
@@ -145,7 +156,15 @@ def _geometry() -> tuple[int, int]:
                 return r, sg
         except ValueError:
             pass
+    if n >= HEAD_MIN_N:
+        return ROWS_PER_SIMDGROUP, HEAD_SIMDGROUPS
     return ROWS_PER_SIMDGROUP, SIMDGROUPS
+
+
+def worthwhile(n: int) -> bool:
+    """True when a matrix with ``n`` outputs is large enough to beat stock."""
+
+    return int(n) >= MIN_N
 
 
 @lru_cache(maxsize=None)
@@ -183,9 +202,9 @@ def eligible(x: mx.array, w: mx.array, scales: mx.array) -> bool:
         rows *= int(d)
     if rows < 1 or rows > MAX_ROWS:
         return False
-    if k % 512 or int(w.shape[1]) * 16 != k or n % ROWS_PER_THREADGROUP:
+    if k % 512 or int(w.shape[1]) * 16 != k:
         return False
-    r, sg = _geometry()
+    r, sg = _geometry(n)
     if n % (r * sg):
         return False
     if tuple(scales.shape) != (n, k // GROUP_SIZE):
@@ -205,7 +224,7 @@ def ternary_qmv(x: mx.array, w: mx.array, scales: mx.array) -> mx.array | None:
     for d in x.shape[:-1]:
         rows *= int(d)
     x2 = x.reshape(rows, k)
-    r, sg = _geometry()
+    r, sg = _geometry(n)
     out = _kernel(rows, r, sg)(
         inputs=[x2, w, scales],
         template=[("M", rows)],

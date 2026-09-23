@@ -50,7 +50,7 @@ from mlx_lm.models import qwen3_5 as _qwen3_5
 from mlx_lm.models.base import BaseModelArgs
 
 from ..kernels.hadamard_rotate import rotate as fused_hadamard_rotate
-from ..kernels.ternary_qmv import ternary_layout, ternary_qmv
+from ..kernels.ternary_qmv import ternary_layout, ternary_qmv, worthwhile as ternary_worthwhile
 
 MODEL_TYPE = "prism_hadamard_qwen35"
 SUPPORTED_SCHEMA_VERSIONS = (2,)
@@ -698,14 +698,18 @@ class Model(_qwen3_5.Model):
 
         Only those matrices may take the ternary kernel: it folds the bias
         into the code (a weight is scale * (code - 1)), which is exact for
-        that layout and wrong for any other affine 2-bit matrix.
+        that layout and wrong for any other affine 2-bit matrix. Matrices
+        too small to beat stock (the key and value projections) keep stock.
         """
 
         armed = 0
         for _record, module in self._packed_modules():
             if not isinstance(module, HadamardQuantizedLinear):
                 continue
-            module._ternary = ternary_layout(module["scales"], module["biases"])
+            module._ternary = bool(
+                ternary_worthwhile(int(module["weight"].shape[0]))
+                and ternary_layout(module["scales"], module["biases"])
+            )
             armed += int(module._ternary)
         return armed
 

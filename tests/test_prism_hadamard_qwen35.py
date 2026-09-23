@@ -272,7 +272,10 @@ def _decode_windows(model, rows: int) -> list[np.ndarray]:
     return windows
 
 
-def test_every_packed_projection_is_proven_ternary(pack):
+def test_every_packed_projection_is_proven_ternary(pack, monkeypatch):
+    from mtplx.kernels import ternary_qmv
+
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
     model, report = _load(pack.path)
     linears = [
         m for _r, m in model._packed_modules() if isinstance(m, ph.HadamardQuantizedLinear)
@@ -281,7 +284,24 @@ def test_every_packed_projection_is_proven_ternary(pack):
     assert all(m._ternary for m in linears)
 
 
-def test_a_non_ternary_matrix_keeps_the_stock_matmul(pack, tmp_path):
+def test_matrices_too_small_to_win_keep_the_stock_matmul(pack):
+    from mtplx.kernels import ternary_qmv
+
+    model, report = _load(pack.path)
+    linears = [
+        m for _r, m in model._packed_modules() if isinstance(m, ph.HadamardQuantizedLinear)
+    ]
+    big = [m for m in linears if int(m["weight"].shape[0]) >= ternary_qmv.MIN_N]
+    assert big and len(big) < len(linears)
+    assert report["ternary_layout_modules"] == len(big)
+    big_ids = {id(m) for m in big}
+    assert all(m._ternary == (id(m) in big_ids) for m in linears)
+
+
+def test_a_non_ternary_matrix_keeps_the_stock_matmul(pack, tmp_path, monkeypatch):
+    from mtplx.kernels import ternary_qmv
+
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
     path = _copy_pack(pack, tmp_path / "pack")
     target = "language_model." + pack.module_paths[0] + ".biases"
     _rewrite_tensors(path, lambda t: t.__setitem__(target, t[target] * 0.5))
@@ -324,6 +344,7 @@ def test_ternary_kernel_keeps_verify_windows_in_stocks_numerical_class(pack, mon
     """
     from mtplx.kernels import ternary_qmv
 
+    monkeypatch.setattr(ternary_qmv, "MIN_N", 0)
     model, _ = _load(pack.path)
     monkeypatch.setenv(ternary_qmv.ENV, "0")
     stock = _decode_windows(model, rows)

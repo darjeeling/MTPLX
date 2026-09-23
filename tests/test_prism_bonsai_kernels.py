@@ -124,6 +124,48 @@ def test_ternary_gemv_matches_stock_within_float32_rounding(monkeypatch, rows, n
         assert float(mx.mean((mine == stock).astype(mx.float32)).item()) >= 0.99
 
 
+@pytest.mark.parametrize("rows", [1, 2])
+def test_ternary_gemv_head_geometry_matches_stock(monkeypatch, rows):
+    from mtplx.kernels import ternary_qmv as tq
+
+    monkeypatch.setenv(tq.ENV, "1")
+    n, k = tq.HEAD_MIN_N, 1024
+    w, s, b = _ternary_matrix(n, k, seed=rows)
+    x = _activations((1, rows, k), seed=10 + rows)
+    stock = mx.quantized_matmul(x, w, scales=s, biases=b, transpose=True, group_size=128, bits=2)
+    mine = tq.ternary_qmv(x, w, s)
+    assert mine is not None and mine.shape == stock.shape
+    wf = mx.dequantize(w, s.astype(mx.float32), b.astype(mx.float32), group_size=128, bits=2)
+    truth = x.astype(mx.float32) @ wf.T
+    err_stock = mx.abs(stock.astype(mx.float32) - truth)
+    err_mine = mx.abs(mine.astype(mx.float32) - truth)
+    assert float(mx.max(err_mine).item()) <= 1.05 * float(mx.max(err_stock).item()) + 1e-6
+
+
+@pytest.mark.parametrize("geometry", ["1x8", "4x8", "2x4", "8x2"])
+def test_ternary_gemv_geometry_never_changes_the_bits(monkeypatch, geometry):
+    # Every output row is summed in the same order whatever the rows per
+    # simdgroup or simdgroups per threadgroup, so tuning is free of numerics.
+    from mtplx.kernels import ternary_qmv as tq
+
+    monkeypatch.setenv(tq.ENV, "1")
+    w, s, _ = _ternary_matrix(1024, 5120, seed=4)
+    x = _activations((1, 2, 5120), seed=5)
+    monkeypatch.delenv("MTPLX_TERNARY_QMV_GEOMETRY", raising=False)
+    default = tq.ternary_qmv(x, w, s)
+    monkeypatch.setenv("MTPLX_TERNARY_QMV_GEOMETRY", geometry)
+    tuned = tq.ternary_qmv(x, w, s)
+    assert default is not None and tuned is not None
+    assert bool(mx.array_equal(default.view(mx.uint16), tuned.view(mx.uint16)).item())
+
+
+def test_only_matrices_large_enough_to_win_are_worthwhile():
+    from mtplx.kernels import ternary_qmv as tq
+
+    assert not tq.worthwhile(1024)  # Bonsai's key and value projections
+    assert tq.worthwhile(5120) and tq.worthwhile(17408) and tq.worthwhile(248320)
+
+
 def test_ternary_gemv_declines_outside_its_contract(monkeypatch):
     from mtplx.kernels import ternary_qmv as tq
 
