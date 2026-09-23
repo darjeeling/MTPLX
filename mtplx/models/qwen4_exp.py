@@ -1228,7 +1228,60 @@ class SparseMoeBlock(_Qwen3NextSparseMoeBlock):
             ).reshape(x.shape)
             shared = mx.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
             return (y + shared).astype(x.dtype)
+        if _moe_prefill_combine_applies(self, x):
+            return self._prefill_call(x)
         return super().__call__(x)
+
+    def _prefill_call(self, x: mx.array) -> mx.array:
+        """The parent's forward with the combine tail as one kernel.
+
+        Routing, experts and the shared expert are the parent's own ops
+        (mlx_lm Qwen3NextSparseMoeBlock); only the unsort -> weight -> sum
+        -> + shared tail runs fused, bit-identical to the stock tail
+        (mtplx.kernels.qwen4_moe_prefill_combine).
+        """
+
+        from mtplx.kernels.qwen4_moe_prefill_combine import moe_prefill_combine
+
+        gates = mx.softmax(self.gate(x), axis=-1, precise=True)
+        k = self.top_k
+        inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+        scores = mx.take_along_axis(gates, inds, axis=-1)
+        if self.norm_topk_prob:
+            scores = scores / scores.sum(axis=-1, keepdims=True)
+        y_sorted, inv_order = self.switch_mlp.sorted_experts(x, inds)
+        shared = mx.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
+        rows = inds.size // k
+        out = moe_prefill_combine(
+            y_sorted, inv_order, scores.reshape(rows, k), shared.reshape(rows, -1)
+        )
+        return out.reshape(x.shape)
+
+
+#: Forwards at least this wide (prefill chunks) take the fused MoE combine;
+#: decode and verify widths keep their own routes.
+_MOE_PREFILL_COMBINE_MIN_ROWS = 32
+
+
+def _moe_prefill_combine_enabled() -> bool:
+    raw = (os.environ.get("MTPLX_QWEN4_MOE_PREFILL_COMBINE") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _moe_prefill_combine_applies(block, x: mx.array) -> bool:
+    """The fused MoE combine for prefill-width forwards (on by default;
+    ``MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`` keeps the stock tail)."""
+
+    if x.ndim < 2 or x.dtype != mx.bfloat16:
+        return False
+    rows = x.size // x.shape[-1]
+    if rows < _MOE_PREFILL_COMBINE_MIN_ROWS or rows * block.top_k < 64:
+        return False
+    if getattr(block, "sharding_group", None) is not None:
+        return False
+    if not isinstance(block.switch_mlp, _FusedGateUpSwitchGLU):
+        return False
+    return _moe_prefill_combine_enabled()
 
 
 class _FusedGateUpSwitchGLU(nn.Module):
@@ -1288,6 +1341,19 @@ class _FusedGateUpSwitchGLU(nn.Module):
         if do_sort:
             x = _scatter_unsort(x, inv_order, indices.shape)
         return x.squeeze(-2)
+
+    def sorted_experts(self, x, indices):
+        """The expert outputs in expert-sorted order, ``[rows * top_k, hidden]``,
+        with the inverse permutation that unsorts them: ``__call__`` for the
+        sorted regime (64 or more routed rows) minus its final unsort."""
+
+        from mlx_lm.models.switch_layers import _gather_sort
+
+        x = mx.expand_dims(x, (-2, -3))
+        x, idx, inv_order = _gather_sort(x, indices)
+        gate, up = self._gu(x, idx, sorted_indices=True)
+        y = self.down_proj(nn.silu(gate) * up, idx, sorted_indices=True)
+        return y.reshape(y.shape[0], -1), inv_order
 
 
 #: Prefill forwards at least this wide run their dense quantized projections as
