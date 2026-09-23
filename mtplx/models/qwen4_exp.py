@@ -1945,17 +1945,14 @@ _QSA_DENSE_BAND_SDPA_MIN_ROWS = 32
 
 
 def _qsa_dense_band_sdpa_applies(q: mx.array, k: mx.array, mask) -> bool:
-    """The dense band's SDPA without the materialized ``where``, opt-in.
+    """The dense band's SDPA with the mask inside the score GEMM, opt-in.
 
     Only prefill forwards of 32 rows or more whose stock call is MLX's unfused
     fallback (head dim 256, boolean ``[1, 1, S, T]`` mask; see
-    ``qsa_dense_band_sdpa.dense_band_eligible``).  The result is bit-identical
-    to the stock call, but it holds one more score plane at its peak: the
-    stock ``where`` and ``softmax`` write into the score buffer MLX donates to
-    them, while a custom kernel's output is always a fresh buffer.  At 4,096
-    rows and 16K of history that is 3.2 GB more peak memory (measured 93.98
-    against 90.70 GB through mtplx serve) for about 13 ms per QSA layer, so it
-    stays off by default.  ``MTPLX_QSA_DENSE_BAND_SDPA=1`` turns it on.
+    ``qsa_dense_band_sdpa.dense_band_eligible``).  Bit-identical to the stock
+    call in the unit tests and at the stock call's peak memory plus one
+    ``[S, T]`` bf16 plane; it stays opt-in until a whole-model parity run on
+    real prompts confirms it.  ``MTPLX_QSA_DENSE_BAND_SDPA=1`` turns it on.
     """
 
     raw = (os.environ.get("MTPLX_QSA_DENSE_BAND_SDPA") or "0").strip().lower()
@@ -4682,7 +4679,8 @@ class Attention(nn.Module):
 
         if _qsa_dense_band_sdpa_applies(q, k, mask):
             # Wide prefill below the sparse crossover: MLX's own fallback
-            # with the boolean mask folded into the softmax (bit-identical;
+            # with the boolean mask applied in the score GEMM instead of a
+            # separate where pass (bit-identical;
             # mtplx.kernels.qsa_dense_band_sdpa).
             from mtplx.kernels.qsa_dense_band_sdpa import dense_band_sdpa
 

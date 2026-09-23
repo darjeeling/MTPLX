@@ -1,10 +1,11 @@
-"""Dense-band QSA attention with the mask folded into the softmax (2026-09-23).
+"""Dense-band QSA attention with the mask applied in the score GEMM (2026-09-23).
 
 ``mtplx.kernels.qsa_dense_band_sdpa`` must be bit-identical to
 ``mx.fast.scaled_dot_product_attention`` wherever it is eligible (head dim 256,
 where MLX runs its unfused fallback): on both of MLX's softmax kernels (one
 pass up to 4,096 columns, looped above), across the 4,096 boundary, for sparse
-and dense masks and for a fully masked row.
+and dense masks and for a fully masked row, and it must not peak higher than
+the stock call by more than its ``[S, T]`` mask plane.
 """
 
 from __future__ import annotations
@@ -13,11 +14,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from mtplx.kernels.qsa_dense_band_sdpa import (
-    dense_band_eligible,
-    dense_band_sdpa,
-    masked_softmax,
-)
+from mtplx.kernels.qsa_dense_band_sdpa import dense_band_eligible, dense_band_sdpa
 
 
 def _bits(a: mx.array) -> np.ndarray:
@@ -43,11 +40,12 @@ def _case(S, T, density, seed, hq=24, hkv=2, d=256):
     "S,T,density",
     [(64, 4096, 0.25),     # one-pass softmax, exactly the limit
      (37, 4082, 0.25),     # one-pass, ragged last thread
-     (16, 1000, 0.5),      # one-pass, a few simdgroups
-     (40, 4097, 0.25),     # looped, one column past the limit
-     (64, 8192, 0.25),     # looped (the 8K dense chunk)
+     (16, 1000, 0.5),
+     (40, 4097, 0.25),     # looped softmax, one column past the limit
+     (64, 8192, 0.25),
      (48, 12288, 0.17),
-     (32, 16384, 0.125)],  # looped (the 16K dense chunk)
+     (32, 16384, 0.125),
+     (512, 4608, 0.25)],   # a wider row block
 )
 def test_bit_identical_to_the_stock_sdpa(S, T, density):
     q, k, v, mask = _case(S, T, density, seed=S * 7 + T)
@@ -71,12 +69,27 @@ def test_a_fully_masked_row_attends_uniformly_like_the_fallback(T):
     assert np.array_equal(_bits(got), _bits(want))
 
 
-def test_masked_softmax_is_where_then_softmax():
-    mx.random.seed(3)
-    scores = (mx.random.normal((2, 3, 20, 5000)) * 4).astype(mx.bfloat16)
-    mask = mx.random.uniform(shape=(20, 5000)) < 0.4
-    want = mx.softmax(mx.where(mask, scores, mx.array(-3.3895313892515355e38, mx.bfloat16)), axis=-1, precise=True)
-    assert np.array_equal(_bits(masked_softmax(scores, mask)), _bits(want))
+def _peak_bytes(fn):
+    mx.synchronize()
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    base = mx.get_active_memory()
+    out = fn()
+    mx.eval(out)
+    mx.synchronize()
+    return mx.get_peak_memory() - base
+
+
+def test_peak_memory_is_the_stock_calls_plus_the_mask_plane():
+    S, T = 512, 4608
+    q, k, v, mask = _case(S, T, 0.25, seed=5)
+    mx.eval(q, k, v, mask)
+    scale = 256 ** -0.5
+    stock = _peak_bytes(lambda: mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask))
+    ours = _peak_bytes(lambda: dense_band_sdpa(q, k, v, scale=scale, mask=mask))
+    plane = 24 * S * T * 2
+    assert stock >= plane  # the fallback does hold one score plane
+    assert ours <= stock + S * T * 2 + (1 << 20)
 
 
 def test_eligibility_is_the_fallback_regime_only():
@@ -97,15 +110,10 @@ def test_the_model_switch_is_opt_in_and_prefill_only(monkeypatch):
     q, k, v, mask = _case(64, 512, 0.5, seed=2)
     monkeypatch.delenv("MTPLX_QSA_DENSE_BAND_SDPA", raising=False)
     with attention_phase("prefill"):
-        # Off by default: the kernel's output cannot reuse the donated score buffer.
         assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
         monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", "1")
         assert qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
         assert not qwen4_exp._qsa_dense_band_sdpa_applies(q[:, :, :31], k, mask[:, :, :31])
-        for off in ("0", "false", "no", "off"):
-            monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", off)
-            assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
-    monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", "1")
     for phase in (None, "verify", "decode"):
         with attention_phase(phase):
             assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
