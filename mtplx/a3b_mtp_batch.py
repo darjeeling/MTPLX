@@ -3088,19 +3088,26 @@ def generate_a3b_mtp_batch(
     cycles = 0
     max_cycles = max(int(request.max_tokens) for request in real) + 2
 
-    # One config per cohort (5 env reads); armed rows share it. The detector
-    # is pre-gated in O(1) below min_tokens, so unarmed-cost is a bool check.
+    # One config per cohort (8 env reads); armed rows share it, and each armed
+    # row owns its long-cycle state (it follows that row's tokens). Unarmed
+    # rows cost a bool check.
     row_repetition: list[RepetitionStopResult | None] = [None for _ in real]
     repetition_config = None
-    detect_repeated_suffix: Any = None
+    row_long_cycle: list[Any] = [None for _ in real]
+    trim_repeated_suffix: Any = None
     if any(request.repetition_stop for request in real):
         from .generation import (
-            _detect_repeated_token_suffix,
+            _long_cycle_stop,
             _repetition_stop_config,
+            _trim_repeated_suffix,
         )
 
         repetition_config = _repetition_stop_config(True)
-        detect_repeated_suffix = _detect_repeated_token_suffix
+        trim_repeated_suffix = _trim_repeated_suffix
+        row_long_cycle = [
+            _long_cycle_stop(repetition_config) if request.repetition_stop else None
+            for request in real
+        ]
 
     def active(row: int) -> bool:
         return row < len(real) and finish[row] is None
@@ -3335,12 +3342,11 @@ def generate_a3b_mtp_batch(
                 and request.repetition_stop
                 and repetition_config is not None
             ):
-                repetition_hit = detect_repeated_suffix(
-                    tokens[row], repetition_config
+                repetition_hit = trim_repeated_suffix(
+                    tokens[row], repetition_config, row_long_cycle[row]
                 )
                 if repetition_hit is not None:
                     row_repetition[row] = repetition_hit
-                    del tokens[row][repetition_hit.trim_start :]
                     finish[row] = "stop"
             pending[row] = next_pending[row] if finish[row] is None else None
             notify_terminal(row, cycles + 1)

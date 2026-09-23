@@ -2794,6 +2794,7 @@ def generate_gemma4_ar(
         GenerationOutput,
         GenerationStats,
         _generation_rate_fields,
+        _long_cycle_stop,
         _repetition_stop_config,
         _sample_from_logits,
         _trim_repeated_suffix,
@@ -2874,6 +2875,7 @@ def generate_gemma4_ar(
     events: list[dict[str, Any]] = []
     pending_token_needs_commit = False
     repetition_config = _repetition_stop_config(bool(repetition_stop))
+    repetition_long_cycle = _long_cycle_stop(repetition_config)
     repetition_result = None
     wire = _Gemma4RepetitionAwareWire(
         tokens,
@@ -2889,13 +2891,15 @@ def generate_gemma4_ar(
         pending_token_needs_commit = True
         events.append({"step": int(step), "token": token})
         wire.emit()
-        repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+        repetition_result = _trim_repeated_suffix(
+            tokens, repetition_config, repetition_long_cycle
+        )
         if repetition_result is not None:
             events.append(
                 {
                     "step": int(step),
                     "repetition_stop": {
-                        "reason": "exact_repeated_token_suffix",
+                        "reason": repetition_result.reason,
                         "block_tokens": repetition_result.block_tokens,
                         "repeats": repetition_result.repeats,
                         "trimmed_tokens": repetition_result.repeated_tokens,
@@ -2985,7 +2989,7 @@ def generate_gemma4_ar(
         peak_memory_bytes=int(mx.get_peak_memory()),
         repetition_stop_triggered=repetition_result is not None,
         repetition_stop_reason=(
-            "exact_repeated_token_suffix" if repetition_result is not None else None
+            repetition_result.reason if repetition_result is not None else None
         ),
         repetition_stop_block_tokens=(
             0 if repetition_result is None else repetition_result.block_tokens
@@ -3043,6 +3047,7 @@ def generate_gemma4_assistant(
         GenerationOutput,
         GenerationStats,
         _generation_rate_fields,
+        _long_cycle_stop,
         _repetition_stop_config,
         _sample_from_logits,
         _trim_repeated_suffix,
@@ -3158,6 +3163,7 @@ def generate_gemma4_assistant(
     pending_primary_needs_commit = False
     safe_to_commit = True
     repetition_config = _repetition_stop_config(bool(repetition_stop))
+    repetition_long_cycle = _long_cycle_stop(repetition_config)
     repetition_result = None
     wire = _Gemma4RepetitionAwareWire(
         tokens,
@@ -3173,13 +3179,15 @@ def generate_gemma4_assistant(
         pending_primary_needs_commit = True
         events.append({"step": len(tokens) - 1, "token": primary, "source": "target"})
         wire.emit()
-        repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+        repetition_result = _trim_repeated_suffix(
+            tokens, repetition_config, repetition_long_cycle
+        )
         if repetition_result is not None:
             events.append(
                 {
                     "step": len(tokens) - 1,
                     "repetition_stop": {
-                        "reason": "exact_repeated_token_suffix",
+                        "reason": repetition_result.reason,
                         "block_tokens": repetition_result.block_tokens,
                         "repeats": repetition_result.repeats,
                         "trimmed_tokens": repetition_result.repeated_tokens,
@@ -3261,13 +3269,15 @@ def generate_gemma4_assistant(
                 accepted_by_depth[depth] += 1
             events.append({"step": len(tokens) - 1, "token": token, "source": "assistant"})
             wire.emit()
-            repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+            repetition_result = _trim_repeated_suffix(
+                tokens, repetition_config, repetition_long_cycle
+            )
             if repetition_result is not None:
                 events.append(
                     {
                         "step": len(tokens) - 1,
                         "repetition_stop": {
-                            "reason": "exact_repeated_token_suffix",
+                            "reason": repetition_result.reason,
                             "block_tokens": repetition_result.block_tokens,
                             "repeats": repetition_result.repeats,
                             "trimmed_tokens": repetition_result.repeated_tokens,
@@ -3417,7 +3427,7 @@ def generate_gemma4_assistant(
         peak_memory_bytes=int(mx.get_peak_memory()),
         repetition_stop_triggered=repetition_result is not None,
         repetition_stop_reason=(
-            "exact_repeated_token_suffix" if repetition_result is not None else None
+            repetition_result.reason if repetition_result is not None else None
         ),
         repetition_stop_block_tokens=(
             0 if repetition_result is None else repetition_result.block_tokens

@@ -3439,6 +3439,12 @@ class RepetitionStopConfig:
     min_repeats: int = 4
     min_block_tokens: int = 1
     max_block_tokens: int = 96
+    # Long-cycle stop (_LongCycleStop): exact loops whose period is above
+    # max_block_tokens and at most max_cycle_tokens fire at
+    # min_cycle_copies whole copies spanning min_cycle_span_tokens or more.
+    max_cycle_tokens: int = 8192
+    min_cycle_copies: int = 3
+    min_cycle_span_tokens: int = 512
 
 
 @dataclass(frozen=True)
@@ -3446,7 +3452,12 @@ class RepetitionStopResult:
     trim_start: int
     block_tokens: int
     repeats: int
+    # Length of the suffix the stop removes (trim_start == len - this).
+    # The long-cycle stop removes nothing and reports 0 here; its period and
+    # copies are block_tokens and repeats.
     repeated_tokens: int
+    # "exact_repeated_token_suffix" (short-block stop) or "long_cycle".
+    reason: str = "exact_repeated_token_suffix"
 
 
 def _repetition_stop_config(enabled: bool) -> RepetitionStopConfig:
@@ -3463,6 +3474,14 @@ def _repetition_stop_config(enabled: bool) -> RepetitionStopConfig:
         min_block_tokens,
         _env_int("MTPLX_REPETITION_STOP_MAX_BLOCK_TOKENS", 96),
     )
+    # A value at or below max_block_tokens leaves the long-cycle stop no
+    # period to cover and turns it off on its own.
+    max_cycle_tokens = _env_int("MTPLX_REPETITION_STOP_MAX_CYCLE_TOKENS", 8192)
+    min_cycle_copies = max(2, _env_int("MTPLX_REPETITION_STOP_MIN_CYCLE_COPIES", 3))
+    min_cycle_span_tokens = max(
+        1,
+        _env_int("MTPLX_REPETITION_STOP_MIN_CYCLE_SPAN_TOKENS", 512),
+    )
     return RepetitionStopConfig(
         enabled=True,
         min_tokens=min_tokens,
@@ -3470,6 +3489,9 @@ def _repetition_stop_config(enabled: bool) -> RepetitionStopConfig:
         min_repeats=min_repeats,
         min_block_tokens=min_block_tokens,
         max_block_tokens=max_block_tokens,
+        max_cycle_tokens=max_cycle_tokens,
+        min_cycle_copies=min_cycle_copies,
+        min_cycle_span_tokens=min_cycle_span_tokens,
     )
 
 
@@ -3758,13 +3780,173 @@ def _detect_repeated_token_suffix(
     return best
 
 
+# Long-cycle stop (2.12.0). The short-block scan above re-slices every block
+# size on every commit, so its cost grows with the longest period it covers
+# (per commit on a 16.9k-token output: 0.018 ms at 96 tokens, 0.28 ms at 512,
+# 3.2 ms at 2,048), and loops longer than 96 tokens went unseen: on
+# 2026-09-22 a 4-bit MiMo 9B build repeated a 1,323-token cycle 72 times
+# (100,912 tokens, no answer) and a 129-token cycle 94 times. This detector
+# does constant work per committed token (0.4 to 1.6 microseconds a commit,
+# AR or three-token MTP rounds).
+_LONG_CYCLE_WINDOW = 32
+_LONG_CYCLE_HASH_BASE = 1_000_003
+_LONG_CYCLE_HASH_MOD = (1 << 61) - 1
+
+
+class _LongCycleStop:
+    """Per-request exact-loop detector for periods above max_block_tokens.
+
+    A rolling hash of the last _LONG_CYCLE_WINDOW committed tokens indexes
+    where each window last ended. A window seen again P tokens later proposes
+    period P, and each proposed period keeps an exact run counter
+    (token[t] == token[t - P]) that the first mismatch drops. The stop fires
+    when a run holds min_cycle_copies whole copies spanning at least
+    min_cycle_span_tokens, and never before min_tokens (the stop's arming
+    point). Hashes only propose; token comparisons decide, so a collision
+    costs a few comparisons and can never fire.
+
+    It trims nothing: its copies run to thousands of tokens that are already
+    on the wire (the F35 holdback covers only the short-block window), so the
+    response keeps them and the stream and non-stream results stay equal.
+
+    State is bounded by max_cycle_tokens: a ring of the last
+    max_cycle_tokens + 1 window hashes expires index entries as they fall out
+    of range (about 1.2 MB at the 8,192 default).
+    """
+
+    __slots__ = (
+        "_arm_at",
+        "_drop",
+        "_extra_copies",
+        "_hash",
+        "_last",
+        "_min_period",
+        "_min_span",
+        "_ring",
+        "_runs",
+        "_seen",
+        "_width",
+    )
+
+    def __init__(self, config: RepetitionStopConfig) -> None:
+        self._min_period = int(config.max_block_tokens) + 1
+        self._extra_copies = int(config.min_cycle_copies) - 1
+        self._min_span = int(config.min_cycle_span_tokens)
+        self._arm_at = max(1, int(config.min_tokens)) - 1
+        self._width = int(config.max_cycle_tokens) + 1
+        self._drop = pow(
+            _LONG_CYCLE_HASH_BASE, _LONG_CYCLE_WINDOW, _LONG_CYCLE_HASH_MOD
+        )
+        self._reset()
+
+    def _reset(self) -> None:
+        self._seen = 0
+        self._hash = 0
+        # Window hash -> the position where that window last ended.
+        self._last: dict[int, int] = {}
+        # Slot q % width holds the hash of the window that ended at q.
+        self._ring = [0] * self._width
+        # Proposed period -> tokens its run still needs before it fires.
+        self._runs: dict[int, int] = {}
+
+    def _need(self, period: int) -> int:
+        # A run of r tokens at period P ends in (r + P) // P whole copies
+        # spanning r + P tokens.
+        return max(self._extra_copies * period, self._min_span - period)
+
+    def observe(self, tokens: list[int]) -> RepetitionStopResult | None:
+        """Consume every token committed since the last call."""
+        total = len(tokens)
+        if total < self._seen:
+            # The decode loops only grow the list until they stop; a rewind
+            # invalidates the rolling state, so rebuild it from the start.
+            self._reset()
+        start = self._seen
+        if total == start:
+            return None
+        window = _LONG_CYCLE_WINDOW
+        base = _LONG_CYCLE_HASH_BASE
+        mod = _LONG_CYCLE_HASH_MOD
+        drop = self._drop
+        h = self._hash
+        last = self._last
+        ring = self._ring
+        width = self._width
+        runs = self._runs
+        min_period = self._min_period
+        arm_at = self._arm_at
+        fired = 0
+        t = start
+        for t in range(start, total):
+            # int(): a numpy scalar in the list would overflow the hash math.
+            token = int(tokens[t])
+            if runs:
+                for period in list(runs):
+                    if tokens[t - period] != token:
+                        del runs[period]
+                        continue
+                    left = runs[period] - 1
+                    runs[period] = left
+                    if left <= 0 and t >= arm_at and not fired:
+                        fired = period
+            if t >= window:
+                h = (h * base + token - int(tokens[t - window]) * drop) % mod
+            else:
+                h = (h * base + token) % mod
+            if t >= window - 1:
+                slot = t % width
+                stale = ring[slot]
+                if last.get(stale) == t - width:
+                    del last[stale]
+                ring[slot] = h
+                prev = last.get(h)
+                last[h] = t
+                if prev is not None and not fired:
+                    period = t - prev
+                    if period >= min_period and period not in runs:
+                        need = self._need(period)
+                        limit = min(need, prev + 1)
+                        run = 0
+                        while run < limit and tokens[t - run] == tokens[prev - run]:
+                            run += 1
+                        # Fewer than a window of matches is a hash collision.
+                        if run >= window:
+                            runs[period] = need - run
+                            if need <= run and t >= arm_at:
+                                fired = period
+            if fired:
+                break
+        self._hash = h
+        self._seen = t + 1
+        if not fired:
+            return None
+        run = self._need(fired) - runs[fired]
+        return RepetitionStopResult(
+            trim_start=total,
+            block_tokens=fired,
+            repeats=(run + fired) // fired,
+            repeated_tokens=0,
+            reason="long_cycle",
+        )
+
+
+def _long_cycle_stop(config: RepetitionStopConfig) -> _LongCycleStop | None:
+    """Per-request long-cycle detector; None when there is nothing to cover."""
+    if not config.enabled or config.max_cycle_tokens <= config.max_block_tokens:
+        return None
+    return _LongCycleStop(config)
+
+
 def _trim_repeated_suffix(
     tokens: list[int],
     config: RepetitionStopConfig,
+    long_cycle: _LongCycleStop | None = None,
 ) -> RepetitionStopResult | None:
     result = _detect_repeated_token_suffix(tokens, config)
     if result is None:
-        return None
+        # The long-cycle stop keeps its own cursor, so callers that check
+        # once per speculative round still hand it every committed token.
+        return long_cycle.observe(tokens) if long_cycle is not None else None
     del tokens[result.trim_start :]
     return result
 
@@ -8116,6 +8298,7 @@ def generate_ar(
         # desync the grammar matcher; constrained output is schema-shaped.
         repetition_stop = False
     repetition_config = _repetition_stop_config(bool(repetition_stop))
+    repetition_long_cycle = _long_cycle_stop(repetition_config)
     repetition_result: RepetitionStopResult | None = None
     _loop_guard_config = loop_guard_config_from_env(
         bool(loop_guard), tokenizer=getattr(rt, "tokenizer", None)
@@ -8374,13 +8557,15 @@ def generate_ar(
                 # a stop token; end here rather than decode past the document.
                 events.append({"step": step, "constraint_stop": True})
                 break
-        repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+        repetition_result = _trim_repeated_suffix(
+            tokens, repetition_config, repetition_long_cycle
+        )
         if repetition_result is not None:
             events.append(
                 {
                     "step": step,
                     "repetition_stop": {
-                        "reason": "exact_repeated_token_suffix",
+                        "reason": repetition_result.reason,
                         "block_tokens": repetition_result.block_tokens,
                         "repeats": repetition_result.repeats,
                         "trimmed_tokens": repetition_result.repeated_tokens,
@@ -8555,7 +8740,7 @@ def generate_ar(
         peak_memory_bytes=mx.get_peak_memory(),
         repetition_stop_triggered=repetition_result is not None,
         repetition_stop_reason=(
-            "exact_repeated_token_suffix" if repetition_result is not None else None
+            repetition_result.reason if repetition_result is not None else None
         ),
         repetition_stop_block_tokens=(
             0 if repetition_result is None else repetition_result.block_tokens
@@ -8650,6 +8835,7 @@ def generate_mtp1(
     tokens: list[int] = []
     events: list[dict] = []
     repetition_config = _repetition_stop_config(bool(repetition_stop))
+    repetition_long_cycle = _long_cycle_stop(repetition_config)
     repetition_result: RepetitionStopResult | None = None
     accepted = rejected = drafted = 0
     skipped = 0
@@ -8666,13 +8852,15 @@ def generate_mtp1(
 
     step = 0
     while len(tokens) < max_tokens:
-        repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+        repetition_result = _trim_repeated_suffix(
+            tokens, repetition_config, repetition_long_cycle
+        )
         if repetition_result is not None:
             events.append(
                 {
                     "step": step,
                     "repetition_stop": {
-                        "reason": "exact_repeated_token_suffix",
+                        "reason": repetition_result.reason,
                         "block_tokens": repetition_result.block_tokens,
                         "repeats": repetition_result.repeats,
                         "trimmed_tokens": repetition_result.repeated_tokens,
@@ -9244,7 +9432,7 @@ def generate_mtp1(
         deferred_correction_repairs=deferred_correction_repairs,
         repetition_stop_triggered=repetition_result is not None,
         repetition_stop_reason=(
-            "exact_repeated_token_suffix" if repetition_result is not None else None
+            repetition_result.reason if repetition_result is not None else None
         ),
         repetition_stop_block_tokens=(
             0 if repetition_result is None else repetition_result.block_tokens
@@ -9782,6 +9970,7 @@ def generate_mtpk(
         # desync the grammar matcher; constrained output is schema-shaped.
         repetition_stop = False
     repetition_config = _repetition_stop_config(bool(repetition_stop))
+    repetition_long_cycle = _long_cycle_stop(repetition_config)
     repetition_result: RepetitionStopResult | None = None
     # F35 → 2.8.3: armed uncapped streams hold a detector-window tail off
     # the wire ONLY while the tail shows a forming loop (candidate-gated —
@@ -11506,13 +11695,15 @@ def generate_mtpk(
             compiled_verify_bank.stats["traces"]
             if compiled_verify_bank is not None else 0
         )
-        repetition_result = _trim_repeated_suffix(tokens, repetition_config)
+        repetition_result = _trim_repeated_suffix(
+            tokens, repetition_config, repetition_long_cycle
+        )
         if repetition_result is not None:
             events.append(
                 {
                     "step": step,
                     "repetition_stop": {
-                        "reason": "exact_repeated_token_suffix",
+                        "reason": repetition_result.reason,
                         "block_tokens": repetition_result.block_tokens,
                         "repeats": repetition_result.repeats,
                         "trimmed_tokens": repetition_result.repeated_tokens,
@@ -15405,7 +15596,7 @@ def generate_mtpk(
         owned_attn_kv=tail_owned_attention_kv_stats(cache),
         repetition_stop_triggered=repetition_result is not None,
         repetition_stop_reason=(
-            "exact_repeated_token_suffix" if repetition_result is not None else None
+            repetition_result.reason if repetition_result is not None else None
         ),
         repetition_stop_block_tokens=(
             0 if repetition_result is None else repetition_result.block_tokens
