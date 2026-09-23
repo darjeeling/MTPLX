@@ -1074,11 +1074,17 @@ private struct ModelRowView: View {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .firstTextBaseline, spacing: 9) {
+                            // .middle: builds of one model differ at the end of
+                            // their names (6-bit, a test suffix), which a tail
+                            // cut hides. Single-line, untracked text, the same
+                            // shape AttachmentCard ships; the macOS 26 layout
+                            // spin needs tracking or several lines.
                             Text(displayName)
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                                 .foregroundStyle(selected ? Brand.typeHi : Brand.typeBody)
                                 .lineLimit(1)
-                                .truncationMode(.tail)
+                                .truncationMode(.middle)
+                                .help(displayName)
                             statusBadge
                         }
                         Text(detail)

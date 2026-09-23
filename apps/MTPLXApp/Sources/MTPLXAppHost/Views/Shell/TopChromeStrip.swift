@@ -70,7 +70,14 @@ struct TopChromeStrip: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help(tr("Change model"))
+                    // The label is cut at the end (see above), so the
+                    // tooltip carries the whole name.
+                    .help(
+                        MTPLXModelOption.displayName(
+                            for: activeModelLabel,
+                            customModels: configuration.customModels
+                        ) + "\n" + tr("Change model")
+                    )
                     .opacity(router.modelPickerPresented ? 1 : 0.82)
                     .animation(.smooth(duration: 0.2), value: router.modelPickerPresented)
                 }
