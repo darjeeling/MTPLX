@@ -2394,6 +2394,52 @@ def test_compiled_verify_max_context_parses(monkeypatch):
     assert _compiled_verify_max_context() == 6144
 
 
+def test_compiled_verify_admits_only_a_checked_prism_ternary_bonsai_load(monkeypatch):
+    """Ternary Bonsai 2 (Prism, 2-bit) engages compiled verify only after its
+    loader's float16 checks, including after MTP injection swaps the model's
+    class for a subclass; any other 2-bit trunk stays eager (parity2 0/233
+    divergent rounds and the ABBA receipt are in the Bonsai night report)."""
+    from types import SimpleNamespace
+
+    from mtplx.graphbank import CompiledVerifyBank, _compiled_verify_bits_gate_ok
+    from mtplx.models import prism_hadamard_qwen35 as ph
+
+    monkeypatch.delenv("MTPLX_COMPILED_VERIFY_FORCE", raising=False)
+    proj = SimpleNamespace(bits=2)
+    layers = [SimpleNamespace(self_attn=SimpleNamespace(q_proj=proj))]
+
+    class _Loaded(ph.Model):  # a loaded Prism model without running __init__
+        pass
+
+    class _MTPInjected(_Loaded):  # what mtp_patch.inject_mtp_support swaps in
+        pass
+
+    def prism_runtime(report, records=("a", "b"), cls=_Loaded):
+        model = cls.__new__(cls)
+        object.__setattr__(model, "model", SimpleNamespace(layers=layers))
+        object.__setattr__(model, "_prism_records", list(records))
+        object.__setattr__(model, "_prism_post_load_report", report)
+        return SimpleNamespace(model=model)
+
+    good = {
+        "model_type": "prism_hadamard_qwen35",
+        "packed_modules": 2,
+        "float_dtypes": ["float16", "float32"],
+    }
+    assert _compiled_verify_bits_gate_ok(prism_runtime(dict(good))) is True
+    assert _compiled_verify_bits_gate_ok(prism_runtime(dict(good), cls=_MTPInjected)) is True
+    # The float32 reference mode, an unchecked load and a record mismatch stay eager.
+    assert _compiled_verify_bits_gate_ok(prism_runtime(dict(good, float_dtypes=["float32"]))) is False
+    assert _compiled_verify_bits_gate_ok(prism_runtime(None)) is False
+    assert _compiled_verify_bits_gate_ok(prism_runtime(dict(good, packed_modules=3))) is False
+    assert _compiled_verify_bits_gate_ok(prism_runtime(dict(good), records=())) is False
+    # A generic 2-bit trunk (any other model class) stays eager.
+    generic = SimpleNamespace(model=SimpleNamespace(model=SimpleNamespace(layers=layers)))
+    assert _compiled_verify_bits_gate_ok(generic) is False
+    assert CompiledVerifyBank(generic).permanent_eager is True
+    assert CompiledVerifyBank(prism_runtime(dict(good), cls=_MTPInjected)).permanent_eager is False
+
+
 def test_compiled_verify_quant_bits_gate(monkeypatch):
     """Turbo promotes compiled verify default-on for the measured-win trunks
     (4-bit Speed and, after the 2026-07-04 re-measure with growth-demote +

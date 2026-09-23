@@ -1845,13 +1845,47 @@ def _runtime_trunk_quant_bits(runtime: Any) -> int | None:
         return None
 
 
+def _prism_ternary_fp16_loaded(runtime: Any) -> bool:
+    """True for a Ternary Bonsai (Prism) pack that finished its float16 load checks.
+
+    Its 2-bit trunk is the Prism ternary layout behind in-module Hadamard
+    rotations, not a generic 2-bit affine trunk: the verify graph is the dense
+    Qwen3.5 one with each projection's rotation inside its call. Admission
+    needs the loader's own post-load report (rotation metadata, packed module
+    count, float16 activations with float32 rotation signs).
+    """
+
+    model = getattr(runtime, "model", None)
+    try:
+        from .models.prism_hadamard_qwen35 import Model as _PrismModel
+    except Exception:
+        return False
+    # isinstance, not the exact class: MTP injection swaps the loaded model's
+    # class for a subclass (mtp_patch._MTPLXOuterModel) at load time.
+    if not isinstance(model, _PrismModel):
+        return False
+    report = getattr(model, "_prism_post_load_report", None)
+    records = getattr(model, "_prism_records", ()) or ()
+    return (
+        isinstance(report, dict)
+        and report.get("model_type") == "prism_hadamard_qwen35"
+        and bool(records)
+        and report.get("packed_modules") == len(records)
+        and report.get("float_dtypes") == ["float16", "float32"]
+    )
+
+
 def _compiled_verify_bits_gate_ok(runtime: Any) -> bool:
     if _env_enabled("MTPLX_COMPILED_VERIFY_FORCE"):
         return True
     bits = _runtime_trunk_quant_bits(runtime)
     # Measured-win allowlist: 4-bit and 8-bit affine trunks engage;
     # unquantized (None) passes for test rigs and bf16 research models.
-    # Unmeasured quantizations (e.g. the 6-bit 9B) stay eager.
+    # Unmeasured quantizations (e.g. the 6-bit 9B) stay eager. The Prism
+    # ternary 2-bit trunk (Ternary Bonsai 2) engages after its loader's
+    # float16 checks: parity2 and speed receipts in the Bonsai night report.
+    if bits == 2 and _prism_ternary_fp16_loaded(runtime):
+        return True
     return bits is None or bits in (4, 8)
 
 
