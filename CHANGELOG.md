@@ -17,11 +17,18 @@ All notable user-facing changes to MTPLX. The format is based on
   `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` carries Prism ML's weights
   byte for byte and adds the Qwen3.8-27B draft head, 8.85 GB in total;
   served id `mtplx-bonsai-2-27b-optimized-speed`, minimum engine 2.12.0.
-  The draft head is on by default at depth 1. On an M5 Max it measured
-  50.0 tok/s at 4K and 42.6 at 16K, against 38.8 and 34.3 for plain
-  decoding; the dense 27B measured 49.8 to 52.7 and 49.4 to 50.1 in the
-  same session, so Bonsai matches it at 4K and is slower at 16K, in about
-  half the memory. Reasoning effort is `medium` by default in the app, the
+  The draft head is on by default at depth 1. Two kernels written for the
+  pack make every round cheaper: the Hadamard rotation as one kernel (same
+  bits as the chain it replaces) and a ternary kernel for the verify and
+  decode rows (mean KL to Prism ML's float32 reference 2.92e-6 against
+  stock's 3.02e-6 over 1,630 positions; greedy output identical with the
+  kernels on and off). Verify runs compiled on Bonsai too (0 divergent
+  rounds in 613). On an M5 Max, alternating boots before and after the
+  kernels, 512 tokens: 50.4 -> 64.4 tok/s at 4K (+28%) and 45.2 -> 57.1 at
+  16K (+26%); the dense 27B measured 52.6 and 51.0 in the same session, so
+  Bonsai is now faster than the 4-bit 27B, in about half the memory.
+  `MTPLX_PRISM_FUSED_ROTATION=0` and `MTPLX_BONSAI_TERNARY_QMV=0` turn the
+  kernels off. Reasoning effort is `medium` by default in the app, the
   CLI and every client; `xhigh` is available, and `low` is not offered
   because Prism ML does not support it. On a stopwatch coding task `xhigh`
   spent 577 s and 21,848 reasoning tokens without an answer, while
