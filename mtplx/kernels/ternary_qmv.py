@@ -40,6 +40,13 @@ stock); the vocabulary head prefers four simdgroups (1.16x at M = 1, 1.39x
 at M = 2). Matrices with fewer than ``MIN_N`` outputs (the 1024-row key and
 value projections) have too few threadgroups to fill the GPU and stay on
 stock; the model arms the kernel only for ``worthwhile`` shapes.
+
+Every GPU generation: the kernel is plain SIMD (half and float arithmetic,
+``simd_sum``, no threadgroup memory, 128 or 256 threads, 32-lane simdgroups)
+with no tensor units, so it runs on M1 to M5; the geometry above was tuned on
+an M5 Max only. The load-time self-check (``mtplx.kernel_selfcheck``, lane
+``bonsai_ternary_qmv``) runs it against stock on this GPU and turns it off for
+the process on a mismatch or a build or launch failure.
 """
 
 from __future__ import annotations
@@ -49,7 +56,10 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+from ..kernel_selfcheck import lane_disabled
+
 ENV = "MTPLX_BONSAI_TERNARY_QMV"
+LANE = "bonsai_ternary_qmv"
 MAX_ROWS = 4
 GROUP_SIZE = 128
 BITS = 2
@@ -141,8 +151,16 @@ _SOURCE = """
 """
 
 
-def enabled() -> bool:
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
     return (os.environ.get(ENV, "1").strip().lower()) not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU."""
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 def counters() -> dict[str, int]:
@@ -301,7 +319,16 @@ def ternary_qmv(x: mx.array, w: mx.array, scales: mx.array) -> mx.array | None:
         rows *= int(d)
     x2 = x.reshape(rows, k)
     r, sg = _geometry(n)
-    out = _kernel(rows, r, sg)(
+    out = _launch(x2, w, scales, rows, r, sg)
+    _COUNTS["served"] += 1
+    return out.reshape(*x.shape[:-1], n)
+
+
+def _launch(x2: mx.array, w: mx.array, scales: mx.array, rows: int, r: int, sg: int) -> mx.array:
+    """The kernel on ``[rows, K]`` activations the caller has checked (the self-check probes this)."""
+
+    n = int(w.shape[0])
+    return _kernel(rows, r, sg)(
         inputs=[x2, w, scales],
         template=[("M", rows)],
         grid=(32 * sg, n // (r * sg), 1),
@@ -309,5 +336,3 @@ def ternary_qmv(x: mx.array, w: mx.array, scales: mx.array) -> mx.array | None:
         output_shapes=[(rows, n)],
         output_dtypes=[mx.float16],
     )[0]
-    _COUNTS["served"] += 1
-    return out.reshape(*x.shape[:-1], n)

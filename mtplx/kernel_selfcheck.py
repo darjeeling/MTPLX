@@ -17,9 +17,15 @@ magnitude a broken kernel produces (wrong indexing, bad intrinsic, garbage
 memory). Hot-shape ULP exactness is gated separately by the CI kernel matrix
 and the release exactness gates.
 
+The two Ternary Bonsai (Prism) kernels, the fused Hadamard rotation and the
+ternary GEMV, are plain SIMD as well and run on every GPU generation. They
+are probed whenever a Prism model loads with their switches on, whatever the
+profile: the rotation must return the MLX chain's exact bits, the GEMV must
+agree with stock ``mx.quantized_matmul`` within float16 rounding.
+
 Env:
 - ``MTPLX_KERNEL_SELFCHECK=0`` disables the probe (default: runs whenever a
-  turbo kernel env is active).
+  turbo kernel env is active, and for every Prism model).
 - ``MTPLX_FORCE_GPU_FAMILY_FALLBACK=1`` (handled in ``nax_verify``) forces the
   G17-gated m16 NAX lane off so newer machines can rehearse the exact
   M1-M4 code path.
@@ -51,6 +57,10 @@ _LAST_REPORT: dict[str, Any] = {}
 _QMM_TOLERANCE = 0.1
 _SDPA_TOLERANCE = 0.02
 _NORM_TOLERANCE = 0.02
+# Ternary GEMV vs stock on its fixture (outputs ~N(0, 0.2), all under 1):
+# both sum in float32 and round once to float16, so they differ by a float16
+# step or two (<= 1e-3); a wrong decode or index is off by the output scale.
+_TERNARY_TOLERANCE = 0.02
 
 _K = 1024  # satisfies every lane's K divisibility contract (%256 for m16)
 _N = 1024  # satisfies N%32 (m16/msg) and N%4 (ksplit)
@@ -63,15 +73,20 @@ def _env_on(name: str, *, default: bool = False) -> bool:
     return raw in {"1", "true", "on", "yes"}
 
 
-def selfcheck_enabled() -> bool:
-    """Selfcheck runs by default whenever a turbo kernel lane is active."""
+def selfcheck_enabled(*, prism_ternary: bool = False) -> bool:
+    """Selfcheck runs by default whenever a turbo kernel lane is active.
+
+    ``prism_ternary``: the model is a Prism (Ternary Bonsai) load, whose two
+    kernels run under every profile, so it is checked under every profile.
+    """
     raw = str(os.environ.get("MTPLX_KERNEL_SELFCHECK", "")).strip().lower()
     if raw in {"0", "false", "off", "no"}:
         return False
     if raw in {"1", "true", "on", "yes"}:
         return True
     return (
-        _env_on("MTPLX_NAX_VERIFY")
+        prism_ternary
+        or _env_on("MTPLX_NAX_VERIFY")
         or _env_on("MTPLX_GQA_PACKED_SDPA")
         or _env_on("MTPLX_QWEN_ROW_OWNED_ROUTER")
         or _env_on("MTPLX_QWEN_COMBINE_TAIL")
@@ -456,8 +471,90 @@ def _check_gdn_postconv_headquarter(mx, dtype) -> float:
     return max(differences)
 
 
-def run_kernel_selfcheck(dtype, bits: int, group_size: int) -> dict[str, Any]:
+def _check_prism_fused_rotation(mx) -> float:
+    """Bitwise: the fused rotation must return the MLX chain's exact bits.
+
+    Forward and inverse, three rows of two blocks, with the heavy tails and
+    tiny values a residual stream carries. Any differing bit fails the lane,
+    and so does a build failure (it raises from the eval).
+    """
+    from .kernels import hadamard_rotate as hr
+    from .models.prism_hadamard_qwen35 import mlx_chain_rotate
+
+    mx.random.seed(19)
+    shape = (3, 2 * hr.BLOCK)
+    x = mx.random.normal(shape) * 2.0
+    x = x + (mx.random.uniform(shape=shape) < 0.01) * mx.random.normal(shape) * 300.0
+    x = (x + (mx.random.uniform(shape=shape) < 0.05) * 1e-4).astype(mx.float16)
+    signs = mx.where(
+        mx.random.uniform(shape=(shape[-1],)) < 0.5, -1.0, 1.0
+    ).astype(mx.float32)
+    worst = 0.0
+    for inverse in (False, True):
+        got = hr._launch(x, signs, inverse)
+        want = mlx_chain_rotate(x, signs, hr.BLOCK, inverse=inverse)
+        mx.eval(got, want)
+        if tuple(got.shape) != tuple(want.shape) or got.dtype != want.dtype:
+            return float("inf")
+        if not bool(mx.array_equal(got.view(mx.uint16), want.view(mx.uint16)).item()):
+            # Differing bits at zero distance (signed zeros) still fail.
+            worst = max(worst, _max_abs_diff(mx, got, want) or float("inf"))
+    return worst
+
+
+def _ternary_fixture(mx, n: int, k: int):
+    """A ternary 2-bit/g128 matrix in Prism's layout (biases == -scales)."""
+    mx.random.seed(23)
+    codes = mx.random.randint(0, 3, (n, k)).astype(mx.uint32)
+    shifts = (mx.arange(16, dtype=mx.uint32) * 2)[None, None, :]
+    words = (codes.reshape(n, k // 16, 16) << shifts).sum(axis=-1).astype(mx.uint32)
+    scales = (0.004 + 0.02 * mx.random.uniform(shape=(n, k // 128))).astype(mx.float16)
+    return words, scales, -scales
+
+
+def _check_bonsai_ternary_qmv(mx) -> float:
+    """The ternary GEMV against stock mx.quantized_matmul on a ternary matrix.
+
+    Rows 1 to 4 (decode and verify) in both production geometries (the
+    projections' eight simdgroups and the vocabulary head's four), with
+    K = 1024 so every lane loops twice. Returns the worst difference relative
+    to the output scale; a build failure or a threadgroup MLX refuses on this
+    GPU raises from the eval.
+    """
+    from .kernels import ternary_qmv as tq
+
+    n, k = 2048, 1024
+    w, scales, biases = _ternary_fixture(mx, n, k)
+    worst = 0.0
+    for rows in range(1, tq.MAX_ROWS + 1):
+        x = (mx.random.normal((rows, k)) * 0.5).astype(mx.float16)
+        ref = mx.quantized_matmul(
+            x,
+            w,
+            scales=scales,
+            biases=biases,
+            transpose=True,
+            group_size=tq.GROUP_SIZE,
+            bits=tq.BITS,
+        )
+        for r, sg in (
+            (tq.ROWS_PER_SIMDGROUP, tq.SIMDGROUPS),
+            (tq.ROWS_PER_SIMDGROUP, tq.HEAD_SIMDGROUPS),
+        ):
+            got = tq._launch(x, w, scales, rows, r, sg)
+            if tuple(got.shape) != tuple(ref.shape):
+                return float("inf")
+            scale = max(1.0, float(mx.abs(ref.astype(mx.float32)).max()))
+            worst = max(worst, _max_abs_diff(mx, got, ref) / scale)
+    return worst
+
+
+def run_kernel_selfcheck(
+    dtype, bits: int, group_size: int, *, prism_ternary: bool = False
+) -> dict[str, Any]:
     """Probe every turbo lane that can engage for this model configuration.
+
+    ``prism_ternary`` adds the two Ternary Bonsai kernel lanes (a Prism load).
 
     Returns ``{"lanes": {lane: status}, "dmax": {lane: float}, ...}`` and
     updates the process-wide disable registry: lanes reported ``fallback``
@@ -726,6 +823,31 @@ def run_kernel_selfcheck(dtype, bits: int, group_size: int) -> dict[str, Any]:
         lanes["gdn_postconv_inline_g"] = _STATUS_SKIPPED
         lanes["gdn_postconv_headquarter"] = _STATUS_SKIPPED
 
+    # Ternary Bonsai (Prism) kernels. No tensor units, so no GPU-family gate:
+    # this probe is what stands between an untested GPU generation and a
+    # wrong answer or a failed request. switched_on(), not enabled(): a lane
+    # a previous run turned off must be probed again, not skipped.
+    from .kernels import hadamard_rotate, ternary_qmv
+
+    for lane, switched_on, tolerance, probe in (
+        (
+            hadamard_rotate.LANE,
+            hadamard_rotate.switched_on(),
+            0.0,
+            lambda: _check_prism_fused_rotation(mx),
+        ),
+        (
+            ternary_qmv.LANE,
+            ternary_qmv.switched_on(),
+            _TERNARY_TOLERANCE,
+            lambda: _check_bonsai_ternary_qmv(mx),
+        ),
+    ):
+        if prism_ternary and switched_on:
+            _record(lane, tolerance, probe)
+        else:
+            lanes[lane] = _STATUS_SKIPPED
+
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
     _LANE_STATUS.clear()
@@ -779,13 +901,26 @@ def _model_quant_signature(model: Any):
     return None
 
 
+def _prism_ternary_model(model: Any) -> bool:
+    """A Prism (Ternary Bonsai) load whose loader finished its checks."""
+    if not isinstance(getattr(model, "_prism_post_load_report", None), dict):
+        return False
+    try:
+        from .models.prism_hadamard_qwen35 import Model as _PrismModel
+    except Exception:  # noqa: BLE001 - never block a load; not a Prism load
+        return False
+    # isinstance, not the exact class: MTP injection swaps in a subclass.
+    return isinstance(model, _PrismModel)
+
+
 def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
     """Run the selfcheck for a freshly loaded model if turbo lanes are active.
 
     Called once from ``runtime.load()`` before the runtime is returned; any
     failure inside the probe itself must never break model loading.
     """
-    if not selfcheck_enabled():
+    prism_ternary = _prism_ternary_model(model)
+    if not selfcheck_enabled(prism_ternary=prism_ternary):
         return None
     try:
         signature = _model_quant_signature(model)
@@ -799,7 +934,9 @@ def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
             group_size = 64
         else:
             dtype, bits, group_size = signature
-        report = run_kernel_selfcheck(dtype, bits, group_size)
+        report = run_kernel_selfcheck(
+            dtype, bits, group_size, prism_ternary=prism_ternary
+        )
         fallbacks = sorted(
             lane for lane, status in report["lanes"].items() if status == _STATUS_FALLBACK
         )

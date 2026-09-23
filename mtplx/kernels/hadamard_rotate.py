@@ -26,6 +26,13 @@ MLX chain (``tests/test_prism_bonsai_kernels.py``) and on the real pack: every
 one of 1,630 teacher-forced verify positions (code, prose, reasoning) returns
 bit-identical logits. On by default; ``MTPLX_PRISM_FUSED_ROTATION=0`` restores
 the four-op MLX chain.
+
+Every GPU generation: the kernel is plain SIMD (float and half arithmetic,
+``simd_shuffle_xor``, a 4 KB threadgroup array, 128 threads) with no tensor
+units, so it runs on M1 to M5. Only the M5 has measured it; the load-time
+self-check (``mtplx.kernel_selfcheck``, lane ``prism_fused_rotation``) compares
+its bits with the MLX chain on this GPU and turns it off for the process on
+any difference or build failure.
 """
 
 from __future__ import annotations
@@ -35,7 +42,10 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+from ..kernel_selfcheck import lane_disabled
+
 ENV = "MTPLX_PRISM_FUSED_ROTATION"
+LANE = "prism_fused_rotation"
 BLOCK = 1024
 
 _SOURCE = """
@@ -102,8 +112,16 @@ _SOURCE = """
 _COUNTS = {"served": 0, "declined": 0}
 
 
-def enabled() -> bool:
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
     return (os.environ.get(ENV, "1").strip().lower()) not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU."""
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 def counters() -> dict[str, int]:
@@ -138,8 +156,16 @@ def rotate(x: mx.array, signs: mx.array, block: int, *, inverse: bool = False) -
     ):
         _COUNTS["declined"] += 1
         return None
+    out = _launch(x, signs, inverse)
+    _COUNTS["served"] += 1
+    return out
+
+
+def _launch(x: mx.array, signs: mx.array, inverse: bool) -> mx.array:
+    """The kernel itself, for an input the caller has checked (the self-check probes this)."""
+
     blocks = x.size // BLOCK
-    out = _kernel()(
+    return _kernel()(
         inputs=[x, signs],
         template=[("T", x.dtype), ("INV", bool(inverse))],
         grid=(128 * blocks, 1, 1),
@@ -147,5 +173,3 @@ def rotate(x: mx.array, signs: mx.array, block: int, *, inverse: bool = False) -
         output_shapes=[x.shape],
         output_dtypes=[x.dtype],
     )[0]
-    _COUNTS["served"] += 1
-    return out

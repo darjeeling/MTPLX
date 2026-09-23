@@ -123,6 +123,19 @@ def hadamard_rotate(
     if fused is not None:
         # Same bits as the chain below, in one dispatch.
         return fused
+    return mlx_chain_rotate(x, signs, block, inverse=inverse)
+
+
+def mlx_chain_rotate(
+    x: mx.array, signs: mx.array, block: int, *, inverse: bool = False
+) -> mx.array:
+    """The stock four-op rotation: float32 cast, sign multiply, mx.hadamard_transform, cast.
+
+    The path every rotation takes when the fused kernel declines, and the
+    reference the load-time self-check holds that kernel to, bit for bit.
+    """
+
+    width = int(x.shape[-1])
     dtype = x.dtype
     y = x.astype(mx.float32)
     if not inverse:
