@@ -2243,62 +2243,46 @@ def test_generation_params_marks_server_cap_when_configured(monkeypatch):
     assert limits["context_cap_applied"] is False
 
 
-def test_repetition_stop_arms_for_capped_requests(monkeypatch):
-    """#311: the literal-repetition stop arms on EVERY request. A client cap
-    is a token budget, not a licence to loop — Pi's maxTokens=8192 request
-    burned 5,803 '!' tokens with the old uncapped-only predicate."""
+_REQUEST_SHAPES = (
+    # Uncapped.
+    {"uncapped_response_requested": True, "server_max_response_tokens": None},
+    # Client-capped (the #311 shape).
+    {"uncapped_response_requested": False, "server_max_response_tokens": None},
+    # Server-capped.
+    {"uncapped_response_requested": True, "server_max_response_tokens": 4096},
+)
+
+
+def test_repetition_stop_is_off_by_default_for_every_request(monkeypatch):
+    """2.12.0: the repetition stops cut legitimate repeated code (a Tetris
+    board literal, identical patch hunks), so no request arms them unless the
+    operator opts in. A set-but-empty variable counts as unset."""
     monkeypatch.delenv("MTPLX_UNCAPPED_REPETITION_STOP", raising=False)
     monkeypatch.delenv("MTPLX_REPETITION_STOP", raising=False)
-    assert (
-        _uncapped_repetition_stop_enabled(
-            {
-                "uncapped_response_requested": True,
-                "server_max_response_tokens": None,
-            }
-        )
-        is True
-    )
-    # Capped request (the #311 shape): armed.
-    assert (
-        _uncapped_repetition_stop_enabled(
-            {
-                "uncapped_response_requested": False,
-                "server_max_response_tokens": None,
-            }
-        )
-        is True
-    )
-    # Server-capped: armed.
-    assert (
-        _uncapped_repetition_stop_enabled(
-            {
-                "uncapped_response_requested": True,
-                "server_max_response_tokens": 4096,
-            }
-        )
-        is True
-    )
-    # Both env names disarm; the new one wins over the historical one.
-    monkeypatch.setenv("MTPLX_UNCAPPED_REPETITION_STOP", "off")
-    assert (
-        _uncapped_repetition_stop_enabled(
-            {
-                "uncapped_response_requested": True,
-                "server_max_response_tokens": None,
-            }
-        )
-        is False
-    )
+    for shape in _REQUEST_SHAPES:
+        assert _uncapped_repetition_stop_enabled(dict(shape)) is False
+    monkeypatch.setenv("MTPLX_REPETITION_STOP", "")
+    for shape in _REQUEST_SHAPES:
+        assert _uncapped_repetition_stop_enabled(dict(shape)) is False
+
+
+def test_repetition_stop_opt_in_arms_for_capped_requests(monkeypatch):
+    """#311: once opted in, the stop arms on EVERY request. A client cap is
+    a token budget, not a licence to loop — Pi's maxTokens=8192 request
+    burned 5,803 '!' tokens with the old uncapped-only predicate."""
+    monkeypatch.delenv("MTPLX_UNCAPPED_REPETITION_STOP", raising=False)
     monkeypatch.setenv("MTPLX_REPETITION_STOP", "1")
-    assert (
-        _uncapped_repetition_stop_enabled(
-            {
-                "uncapped_response_requested": False,
-                "server_max_response_tokens": 4096,
-            }
-        )
-        is True
-    )
+    for shape in _REQUEST_SHAPES:
+        assert _uncapped_repetition_stop_enabled(dict(shape)) is True
+    # The historical name opts in too; the new name wins when both are set.
+    monkeypatch.delenv("MTPLX_REPETITION_STOP", raising=False)
+    monkeypatch.setenv("MTPLX_UNCAPPED_REPETITION_STOP", "on")
+    assert _uncapped_repetition_stop_enabled(dict(_REQUEST_SHAPES[1])) is True
+    monkeypatch.setenv("MTPLX_REPETITION_STOP", "off")
+    assert _uncapped_repetition_stop_enabled(dict(_REQUEST_SHAPES[1])) is False
+    monkeypatch.setenv("MTPLX_UNCAPPED_REPETITION_STOP", "off")
+    monkeypatch.setenv("MTPLX_REPETITION_STOP", "1")
+    assert _uncapped_repetition_stop_enabled(dict(_REQUEST_SHAPES[2])) is True
 
 
 def test_repetition_stop_detects_single_token_punctuation_loop():

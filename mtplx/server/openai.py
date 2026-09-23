@@ -23871,25 +23871,33 @@ def _generation_params(
 
 
 def _repetition_stop_enabled(generation_limits: dict[str, Any]) -> bool:
-    """Arm the literal-token-repetition stop on every request (#311).
+    """Whether the literal-token-repetition stops arm for this request.
 
-    The detector fires only on exact repeated token blocks (objectively
-    broken output) — it is not a thinking or length cap, so a client-sent
-    max_tokens is no reason to disarm it: Pi's 8,192-cap request burned
-    5,803 "!" tokens to budget with the guard sitting disabled. The old
-    uncapped-only predicate lived here from the guard's introduction; both
-    env names are honored (new one wins) and the historical name stays as
-    an alias for imports.
+    OFF BY DEFAULT since 2.12.0 (project policy, 2026-07-20: no
+    generation-policy intervention ships on). Exact repetition is not proof
+    of a loop: legitimate code repeats exactly. On 2026-09-22 the short-block
+    stop cut a Tetris board literal, an empty sudoku grid, a 256-entry zero
+    table, 64 identical board <div>s and two correct patches that made the
+    same edit at 5 and 15 call sites (it deletes every copy and ends the
+    turn, so the answer or tool call breaks), and the long-cycle stop cut a
+    platformer map with 8 identical empty rows. A replay over 301,194 saved
+    generations is in outputs/final-20260922/loopstop-replay/.
+
+    MTPLX_REPETITION_STOP=1 opts in; it then arms on every request, capped
+    or not (#311: Pi's 8,192-cap request burned 5,803 "!" tokens with the
+    old uncapped-only predicate). Both env names are honored (new one wins)
+    and the historical name stays as an alias for imports.
     """
     raw = (
         os.environ.get(
             "MTPLX_REPETITION_STOP",
-            os.environ.get("MTPLX_UNCAPPED_REPETITION_STOP", "1"),
+            os.environ.get("MTPLX_UNCAPPED_REPETITION_STOP", "0"),
         )
         .strip()
         .lower()
     )
-    return raw not in _UNCAPPED_RESPONSE_LEASE_DISABLED_VALUES
+    # A set-but-empty variable means "not set", which is off.
+    return bool(raw) and raw not in _UNCAPPED_RESPONSE_LEASE_DISABLED_VALUES
 
 
 # Historical name (pre-#311 the guard armed only for uncapped responses).

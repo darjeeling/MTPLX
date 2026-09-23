@@ -227,15 +227,21 @@ All notable user-facing changes to MTPLX. The format is based on
 
 ### Fixed
 
-- **Long exact loops stop, on every model.** The repetition stop only
-  caught blocks of up to 96 tokens, so a 4-bit test build of a 9B model
-  repeated a 1,323-token block 73 times and ran to 100,912 tokens with no
-  answer, and another run repeated a 129-token block 94 times. Any exact
-  loop with a period of 97 to 8,192 tokens now stops once three whole
-  copies are in, never before token 768, at 0.4 to 1.5 microseconds per
-  step. Replayed through the server, the 129-token loop stops at 5,202
-  tokens with the reason `long_cycle`. Across 1,928 normal outputs and
-  files (8.48 million tokens) it never fired.
+- **The repetition stops are off by default.** In 2.11.3 and earlier the
+  server ended a reply when a block of up to 96 tokens repeated four times
+  in a row, deleting every copy. Code repeats exactly, so it cut a Tetris
+  board literal at its ninth identical row, a correct patch that renamed a
+  type at 15 identical call sites (the tool call never closed), an empty
+  sudoku grid, a 256-entry table of zeros and 64 identical board `<div>`
+  lines. A replay over 301,194 saved replies (104.6 million tokens from the
+  MTPLX app, OpenCode, Hermes, Pi and Codex) found two real patches it
+  would have cut. `MTPLX_REPETITION_STOP=1` turns it back on, together with
+  a new check for exact loops with a period of 97 to 8,192 tokens that ends
+  a loop at three whole copies, never before token 768, at 0.4 to 1.5
+  microseconds per step (a 4-bit 9B test build's 129-token loop stops at
+  5,202 tokens instead of 16,916, reason `long_cycle`). The new check also
+  cuts a platformer map with 8 identical empty rows, which is why it ships
+  off too. Evidence: `tests/test_repetition_stop_legitimate_code.py`.
 
 - **A server started without `mtplx serve` uses each model's own
   sampler.** `python -m mtplx.server.openai` sampled Qwen 3.8, Bonsai 2
