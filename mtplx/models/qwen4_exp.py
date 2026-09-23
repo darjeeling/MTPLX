@@ -1945,16 +1945,21 @@ _QSA_DENSE_BAND_SDPA_MIN_ROWS = 32
 
 
 def _qsa_dense_band_sdpa_applies(q: mx.array, k: mx.array, mask) -> bool:
-    """The dense band's SDPA without the materialized ``where``, on by default.
+    """The dense band's SDPA without the materialized ``where``, opt-in.
 
     Only prefill forwards of 32 rows or more whose stock call is MLX's unfused
     fallback (head dim 256, boolean ``[1, 1, S, T]`` mask; see
     ``qsa_dense_band_sdpa.dense_band_eligible``).  The result is bit-identical
-    to the stock call.  ``MTPLX_QSA_DENSE_BAND_SDPA=0`` keeps the stock call.
+    to the stock call, but it holds one more score plane at its peak: the
+    stock ``where`` and ``softmax`` write into the score buffer MLX donates to
+    them, while a custom kernel's output is always a fresh buffer.  At 4,096
+    rows and 16K of history that is 3.2 GB more peak memory (measured 93.98
+    against 90.70 GB through mtplx serve) for about 13 ms per QSA layer, so it
+    stays off by default.  ``MTPLX_QSA_DENSE_BAND_SDPA=1`` turns it on.
     """
 
-    raw = (os.environ.get("MTPLX_QSA_DENSE_BAND_SDPA") or "1").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
+    raw = (os.environ.get("MTPLX_QSA_DENSE_BAND_SDPA") or "0").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
         return False
     if q.ndim != 4 or int(q.shape[2]) < _QSA_DENSE_BAND_SDPA_MIN_ROWS:
         return False

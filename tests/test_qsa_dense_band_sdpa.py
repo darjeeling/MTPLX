@@ -90,19 +90,22 @@ def test_eligibility_is_the_fallback_regime_only():
     assert not dense_band_eligible(q, k, mx.broadcast_to(mask, (1, 24, 16, 512)))
 
 
-def test_the_model_switch_and_the_prefill_gate(monkeypatch):
+def test_the_model_switch_is_opt_in_and_prefill_only(monkeypatch):
     from mtplx.attention_context import attention_phase
     from mtplx.models import qwen4_exp
 
     q, k, v, mask = _case(64, 512, 0.5, seed=2)
     monkeypatch.delenv("MTPLX_QSA_DENSE_BAND_SDPA", raising=False)
     with attention_phase("prefill"):
+        # Off by default: the kernel's output cannot reuse the donated score buffer.
+        assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
+        monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", "1")
         assert qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
         assert not qwen4_exp._qsa_dense_band_sdpa_applies(q[:, :, :31], k, mask[:, :, :31])
         for off in ("0", "false", "no", "off"):
             monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", off)
             assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
-    monkeypatch.delenv("MTPLX_QSA_DENSE_BAND_SDPA", raising=False)
+    monkeypatch.setenv("MTPLX_QSA_DENSE_BAND_SDPA", "1")
     for phase in (None, "verify", "decode"):
         with attention_phase(phase):
             assert not qwen4_exp._qsa_dense_band_sdpa_applies(q, k, mask)
