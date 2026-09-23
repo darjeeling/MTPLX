@@ -873,7 +873,6 @@ def test_mtp_batch_installs_qwen35b_optimized_kernel_routes_at_construction():
 
 
 _QWEN4_EXP_FAMILY_ENV_DEFAULTS = (
-    "MTPLX_AR_PIPELINE",
     "MTPLX_COMPILED_GDN",
     "MTPLX_FAMILY_CAPTURE_COMMIT",
     "MTPLX_FUSED_HC_V3",

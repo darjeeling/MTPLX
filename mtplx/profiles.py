@@ -309,7 +309,6 @@ def announce_runtime_gated_env(
 MODEL_RUNTIME_ENV_OVERRIDE_KEYS = frozenset(
     {
         *NATIVE_MTP_60_FAST_PATH_ENV,
-        "MTPLX_AR_PIPELINE",
         "MTPLX_COMPILED_GDN",
         "MTPLX_QWEN4EXP_COMPILE",
         "MTPLX_COMPILED_VERIFY_GROWTH_RESERVE",

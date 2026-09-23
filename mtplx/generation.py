@@ -6753,7 +6753,7 @@ def _mx_lazy_shape(
 def _mx_lazy_sample(row: mx.array, config: SamplerConfig, key: mx.array) -> mx.array:
     """Device-side shaped sampling returning a LAZY scalar token array
     (shaping: :func:`_mx_lazy_shape`); a device-sampler primitive, no longer
-    on the decode path (see the MTPLX_AR_PIPELINE note in :func:`generate_ar`).
+    on the decode path.
 
     The randomness stream is mx.random keyed from the caller-supplied key
     instead of the numpy generator, so runs stay deterministic per key but the
@@ -8457,45 +8457,7 @@ def generate_ar(
         in ("1", "true", "yes", "on")
     ) or bool(os.environ.get("MTPLX_EVAL_AUDIT"))
 
-    # ---- MTPLX_AR_PIPELINE: shares the classic sampling path --------------
-    # This flag used to run a software-pipelined decode lane that drew output
-    # token 0 with the request's numpy rng (_sample_from_logits) but every
-    # later token from a device-side mx.random stream (_mx_lazy_sample). The
-    # two streams differ, so MTPLX_AR_PIPELINE=1 produced a DIFFERENT
-    # continuation than the classic AR loop for the same request and seed —
-    # the serial-decoding divergence seen when comparing against mlx-serve.
-    #
-    # Byte-identity with classic requires the numpy draw for EVERY token, and
-    # that draw needs the materialized logits row, which forecloses the lane's
-    # build-ahead overlap — no overlap is left to keep. So the flag now falls
-    # through to the classic loop below and shares its per-token
-    # _sample_from_logits(row, sampler, rng) draw (identical tokens by
-    # construction). The model's pipeline forward-mode is still OFFERED via
-    # set_ar_pipeline_mode, so the flag's gating stays observable and
-    # independent of MTPLX_ASYNC_AR, but it is RELEASED before decode: its only
-    # benefit is eliding host sync on LAZY-token forwards, which the classic
-    # loop (materialized tokens) never issues, and running decode under it is
-    # not validated bit-exact with the classic forward this lane must match.
-    _lane_committed = 0
-    _lane_finished = False
-    _lane_cache_has_final = False
-    _lane_final_row: mx.array | None = None
-    if (
-        _env_truthy("MTPLX_AR_PIPELINE")
-        and constraint is None
-        and float(sampler.temperature) > 0
-        and 1 < int(sampler.top_k or 0) < 4096
-        and not sampler.presence_penalty
-        and not sampler.frequency_penalty
-        and max_tokens > 2
-    ):
-        _set_lane_mode = getattr(rt.model, "set_ar_pipeline_mode", None)
-        if callable(_set_lane_mode) and _set_lane_mode(True):
-            _set_lane_mode(False)
-            events.append({"ar_pipeline": "classic_fallthrough"})
-
-    _classic_start = max_tokens if _lane_finished else _lane_committed
-    for step in range(_classic_start, max_tokens):
+    for step in range(max_tokens):
         if _loop_guard is not None:
             _guard_transition = _loop_guard.observe(tokens)
             if _guard_transition is not None:
@@ -8532,7 +8494,7 @@ def generate_ar(
             # both the greedy and sampled branches draw from the constrained
             # distribution (-inf survives temperature/top-p/penalties).
             logits_row = constraint.mask_logits_row(logits_row)
-        if not _ar_sync_eval and step > _classic_start:
+        if not _ar_sync_eval and step > 0:
             sync_started = time.perf_counter()
             _eval(logits_row)
             sync_elapsed = time.perf_counter() - sync_started
@@ -8639,22 +8601,17 @@ def generate_ar(
     if capture_final_state and tokens and repetition_result is None:
         # The classic loop samples its final token and breaks before
         # forwarding it, so the cache is one token short of the committed
-        # sequence and must be extended here. The pipelined lane already
-        # consumed the final token (its logits row rode the in-flight graph),
-        # so extending again would double-append its KV — reuse the row.
+        # sequence and must be extended here.
         try:
-            if _lane_cache_has_final and _lane_final_row is not None:
-                tail_logits = _lane_final_row[:, None, :]
-            else:
-                with attention_phase("ar_decode"):
-                    tail_result = rt.forward_ar(
-                        mx.array([[int(tokens[-1])]]),
-                        cache=cache,
-                        return_hidden=False,
-                    )
-                tail_logits = (
-                    tail_result[0] if isinstance(tail_result, tuple) else tail_result
+            with attention_phase("ar_decode"):
+                tail_result = rt.forward_ar(
+                    mx.array([[int(tokens[-1])]]),
+                    cache=cache,
+                    return_hidden=False,
                 )
+            tail_logits = (
+                tail_result[0] if isinstance(tail_result, tuple) else tail_result
+            )
             _eval(tail_logits)
             final_state = GenerationFinalState(
                 final_trunk_cache=cache,

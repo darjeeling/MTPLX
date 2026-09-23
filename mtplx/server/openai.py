@@ -892,10 +892,11 @@ def _server_runtime_env_overrides(
     if _served_model_type_is_qwen4_exp(args):
         # Family speed lanes, defaulted only when the launcher environment
         # left them unset (an explicit operator export wins):
-        # - Pipelined AR decode + compiled GDN runs (2026-08-27 receipts:
-        #   42.6 -> 51.9 t/s AR, GPU 57% -> 96.6% busy). The pipelined lane
-        #   needed a RAM-resident n-gram table and no longer engages (the
-        #   table streams from SSD on every Mac); the compiled GDN runs do.
+        # - Compiled GDN runs (2026-08-27 receipts, measured together with a
+        #   pipelined AR lane: 42.6 -> 51.9 t/s AR, GPU 57% -> 96.6% busy).
+        #   That lane needed a RAM-resident n-gram table, stopped engaging
+        #   once the table streamed from SSD on every Mac, and is gone with
+        #   its MTPLX_AR_PIPELINE flag; the compiled GDN runs remain.
         # - Layer-owned capture-commit (2026-08-27 receipts: verify round
         #   51.7 -> 38.8 ms, repair re-forwards 8.2 -> 0 ms/round, MTP
         #   recorder 75.25 -> 85.9 t/s record) — repair-free speculative
@@ -939,7 +940,6 @@ def _server_runtime_env_overrides(
             qwen4_raw is not None and qwen4_raw.strip().lower() not in truthy_env
         )
         for key in (
-            "MTPLX_AR_PIPELINE",
             "MTPLX_FAMILY_CAPTURE_COMMIT",
             "MTPLX_FUSED_HC_V3",
             "MTPLX_FUSED_GDN_INPROJ",
