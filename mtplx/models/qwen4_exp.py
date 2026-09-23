@@ -913,7 +913,7 @@ class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
             return y.reshape(B, S, -1)
 
         out = self.norm(out, z)
-        return self.out_proj(out.reshape(B, S, -1))
+        return _linear(self.out_proj, out.reshape(B, S, -1))
 
     def _fused_conv_norm_applies(self, B, S, mask, cache) -> bool:
         # Fused conv+silu+l2norm (MTPLX_FUSED_GDN_CONVNORM): the decode-row
@@ -1290,6 +1290,73 @@ class _FusedGateUpSwitchGLU(nn.Module):
         return x.squeeze(-2)
 
 
+#: Prefill forwards at least this wide run their dense quantized projections as
+#: one dequantize plus a dense GEMM (MTPLX_QWEN4_PREFILL_DQ_GEMM).
+_PREFILL_DQ_GEMM_MIN_ROWS = 2048
+
+
+def _prefill_dq_gemm_applies(x: mx.array) -> bool:
+    """Dequantize-then-GEMM for the wide prefill projections, on by default.
+
+    At 2,048 rows and more MLX's quantized matmul already dequantizes each
+    weight tile and accumulates the same bf16 products in the same order as a
+    dense GEMM over the dequantized matrix: the two are bit-identical on every
+    Flash-Next projection shape (4-bit g32 and 8-bit g64, 2,048 and 4,096
+    rows; tests/test_qwen4_prefill_dq_gemm.py pins it).  Taking the dense
+    GEMM lets MLX schedule the one-off dequantize apart from the matmul, which
+    measured 1-4% faster through mtplx serve.  Decode and verify widths keep
+    the quantized matmul.  ``MTPLX_QWEN4_PREFILL_DQ_GEMM=0`` turns it off.
+    """
+
+    raw = (os.environ.get("MTPLX_QWEN4_PREFILL_DQ_GEMM") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    rows = 1
+    for dim in x.shape[:-1]:
+        rows *= int(dim)
+    return rows >= _PREFILL_DQ_GEMM_MIN_ROWS and current_attention_phase() == "prefill"
+
+
+def _projection(x, weight, scales, biases, *, group_size, bits, mode):
+    """``x @ W.T`` for a quantized W, through the prefill lane when it applies."""
+
+    if _prefill_dq_gemm_applies(x):
+        dense = mx.dequantize(
+            weight, scales, biases, group_size=group_size, bits=bits, mode=mode
+        )
+        return mx.matmul(x, dense.T)
+    return mx.quantized_matmul(
+        x,
+        weight,
+        scales,
+        biases,
+        transpose=True,
+        group_size=group_size,
+        bits=bits,
+        mode=mode,
+    )
+
+
+def _linear(module, x):
+    """``module(x)``, with the prefill lane for a bias-free QuantizedLinear."""
+
+    if (
+        isinstance(module, nn.QuantizedLinear)
+        and "bias" not in module
+        and _prefill_dq_gemm_applies(x)
+    ):
+        return _projection(
+            x,
+            module.weight,
+            module.scales,
+            module.get("biases"),
+            group_size=module.group_size,
+            bits=module.bits,
+            mode=getattr(module, "mode", "affine"),
+        )
+    return module(x)
+
+
 class _FusedGateUpMLP(nn.Module):
     """Shared-expert MLP with gate_proj+up_proj as one quantized matmul
     (same fusion rationale and build-time contract as
@@ -1306,18 +1373,17 @@ class _FusedGateUpMLP(nn.Module):
         self.down_proj = down_proj
 
     def __call__(self, x) -> mx.array:
-        gu = mx.quantized_matmul(
+        gu = _projection(
             x,
             self.gu_weight,
             self.gu_scales,
             self.gu_biases,
-            transpose=True,
             group_size=self.group_size,
             bits=self.bits,
             mode=self.mode,
         )
         gate, up = mx.split(gu, 2, axis=-1)
-        return self.down_proj(nn.silu(gate) * up)
+        return _linear(self.down_proj, nn.silu(gate) * up)
 
 
 class _FusedGDNInProj(nn.Module):
@@ -1341,12 +1407,11 @@ class _FusedGDNInProj(nn.Module):
         self._splits = list(splits)  # cumulative row offsets: qkv|z|b|a
 
     def __call__(self, x):
-        y = mx.quantized_matmul(
+        y = _projection(
             x,
             self.weight,
             self.scales,
             self.biases,
-            transpose=True,
             group_size=self.group_size,
             bits=self.bits,
             mode=self.mode,
@@ -4392,7 +4457,7 @@ class Attention(nn.Module):
             )
             if out is not None:
                 out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
-                return self.o_proj(out * mx.sigmoid(gate))
+                return _linear(self.o_proj, out * mx.sigmoid(gate))
 
             # Static unsupported geometry falls back exactly.  Once the
             # supported kernel is dispatched, failures propagate instead of
@@ -4443,7 +4508,7 @@ class Attention(nn.Module):
 
         out = _verify_sdpa(q, k, v, scale=self.scale, mask=mask)
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
-        return self.o_proj(out * mx.sigmoid(gate))
+        return _linear(self.o_proj, out * mx.sigmoid(gate))
 
 
 _MASK64 = (1 << 64) - 1
