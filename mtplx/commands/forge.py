@@ -69,6 +69,26 @@ REQUANTIZE_REFUSAL = (
     "pass --allow-degraded-mtp to confirm"
 )
 ACCEPTANCE_COLLAPSE_THRESHOLD = 0.05
+# MTP contract calibration (`mtplx mtp-chain-probe`) moves a pack off the head
+# source's declared contract (or the family default) only on real evidence.
+# Each compared contract needs this many distinct prompts and drafted chains
+# ("draft rounds": one per anchor and window, each chain `depth` tokens long),
+# and the winner must accept this many more draft tokens per round than the
+# declared contract. With 48 rounds, a paired per-round difference whose
+# standard deviation is 0.7 tokens has a standard error of about 0.1, so the
+# 0.25-token margin is about 2.5 standard errors; 0.25 tokens per round is
+# about 8 percent of decode speed at a typical 2 accepted tokens per round.
+# Four prompts keep one prompt's content from deciding the contract.
+CONTRACT_CALIBRATION_MIN_PROMPTS = 4
+CONTRACT_CALIBRATION_MIN_DRAFT_ROUNDS = 48
+CONTRACT_CALIBRATION_MARGIN = 0.25
+# The default probe sample clears that bar with room for a failed variant:
+# 8 prompts x 4 non-overlapping windows x 2 anchors = 64 rounds per contract
+# (192 drafted tokens at depth 3). The old default was 1 prompt and 1 window,
+# 2 rounds, on which a single lucky token picked the contract.
+CONTRACT_CALIBRATION_DEFAULT_DEPTH = 3
+CONTRACT_CALIBRATION_DEFAULT_PROMPTS = 8
+CONTRACT_CALIBRATION_DEFAULT_WINDOWS = 4
 FORGE_VERIFY_DEFAULT_MAX_TOKENS = 2048
 FORGE_VERIFY_DEFAULT_PROMPT_SUITE = "long-code-uncapped"
 MTP_PAYLOAD_AUDIT_ZERO_SAMPLE_LIMIT = 12
@@ -2222,7 +2242,11 @@ def _calibrate_mtp_contract(
     existing: dict[str, Any] | None,
     max_fans: bool = False,
 ) -> dict[str, Any]:
-    fallback = _runtime_or_default_mtp_contract(existing)
+    # The contract the head source declares (runtime file or config), or the
+    # family default when it declares none. Calibration keeps it unless the
+    # probe clearly beats it.
+    fallback = _runtime_or_default_mtp_contract(existing, model_path)
+    fallback_source = _declared_mtp_contract_source(existing, model_path)
     allow_uncalibrated = bool(
         recipe.get("allow_uncalibrated_mtp_contract")
         or recipe.get("allow_uncalibrated_contract")
@@ -2249,6 +2273,14 @@ def _calibrate_mtp_contract(
         finished=False,
     )
     output_path = run / "contract_probe.json"
+    depth = int(recipe.get("contract_calibration_depth") or CONTRACT_CALIBRATION_DEFAULT_DEPTH)
+    # The probe must measure the declared contract itself, or it has nothing
+    # to beat. The probe spells the runtime's "cache" position mode "local".
+    reference_position = (
+        "local"
+        if _contract_position_class(fallback.get("mtp_position_mode")) == "cache"
+        else str(fallback.get("mtp_position_mode"))
+    )
     command = [
         sys.executable,
         "-P",
@@ -2260,27 +2292,40 @@ def _calibrate_mtp_contract(
         "--prompts",
         str(prompts_path),
         "--depth",
-        str(int(recipe.get("contract_calibration_depth") or 3)),
+        str(depth),
         "--limit",
-        str(int(recipe.get("contract_calibration_limit") or 1)),
+        str(int(recipe.get("contract_calibration_limit") or CONTRACT_CALIBRATION_DEFAULT_PROMPTS)),
         "--max-prompt-tokens",
         str(int(recipe.get("contract_calibration_max_prompt_tokens") or 192)),
         "--windows",
-        str(int(recipe.get("contract_calibration_windows") or 1)),
+        str(int(recipe.get("contract_calibration_windows") or CONTRACT_CALIBRATION_DEFAULT_WINDOWS)),
         "--stride",
-        str(int(recipe.get("contract_calibration_stride") or 1)),
+        # Windows a chain apart share no drafted position.
+        str(int(recipe.get("contract_calibration_stride") or depth)),
         "--top-ranks",
         str(recipe.get("contract_calibration_top_ranks") or "1,2,4,8"),
         "--base-hidden-variants",
-        str(recipe.get("base_hidden_variants") or "post_norm,pre_norm"),
+        _with_probe_candidate(
+            recipe.get("base_hidden_variants") or "post_norm,pre_norm",
+            fallback.get("base_hidden_variant"),
+        ),
         "--mtp-hidden-variants",
-        str(recipe.get("mtp_hidden_variants") or "post_norm,pre_norm,fc,prev"),
+        _with_probe_candidate(
+            recipe.get("mtp_hidden_variants") or "post_norm,pre_norm,fc,prev",
+            fallback.get("hidden_variant"),
+        ),
         "--cache-policies",
         str(recipe.get("mtp_cache_policies") or "persistent"),
         "--concat-orders",
-        str(recipe.get("concat_orders") or "embedding_hidden,hidden_embedding"),
+        _with_probe_candidate(
+            recipe.get("concat_orders") or "embedding_hidden,hidden_embedding",
+            fallback.get("concat_order"),
+        ),
         "--mtp-position-modes",
-        str(recipe.get("mtp_position_modes") or "local,absolute"),
+        _with_probe_candidate(
+            recipe.get("mtp_position_modes") or "local,absolute",
+            reference_position,
+        ),
         "--history-modes",
         str(recipe.get("mtp_history_modes") or "recursive"),
         "--anchors",
@@ -2369,7 +2414,9 @@ def _calibrate_mtp_contract(
         )
     try:
         payload = _load_json(output_path)
-        contract = _contract_from_chain_probe(payload, fallback=fallback)
+        contract = _contract_from_chain_probe(
+            payload, fallback=fallback, fallback_source=fallback_source
+        )
     except ForgeError as exc:
         payload_for_summary = payload if "payload" in locals() else None
         summary = _contract_probe_summary(
@@ -2449,9 +2496,9 @@ def _calibrate_mtp_contract(
         diagnostic=calibration_diagnostic or None,
     )
     label = (
-        "contract_calibration"
-        if calibration_status in {"", "exact_agreement"}
-        else "contract_calibration_diagnostic"
+        "contract_calibration_inconclusive"
+        if calibration_status == "inconclusive"
+        else "contract_calibration"
     )
     _write_progress(
         run,
@@ -2515,6 +2562,23 @@ def _runtime_or_default_mtp_contract(
     return _normalize_mtp_contract_for_config(None, config)
 
 
+def _declared_mtp_contract_source(
+    runtime: dict[str, Any] | None,
+    model_path: Path | None = None,
+) -> str:
+    """Where the fallback MTP contract comes from.
+
+    ``declared`` when the head source names its contract (its runtime file or
+    its config), otherwise ``family_default``: the loader's default contract.
+    """
+    if isinstance(runtime, dict) and isinstance(runtime.get("mtp_contract"), dict):
+        return "declared"
+    config = _load_model_config_for_contract(model_path)
+    if isinstance(config.get("mtplx_mtp_contract"), dict):
+        return "declared"
+    return "family_default"
+
+
 def _runtime_has_mtp_contract(
     runtime: dict[str, Any] | None,
     model_path: Path | None = None,
@@ -2562,109 +2626,270 @@ def _start_max_session_if_requested(enabled: bool) -> Any | None:
     return session
 
 
+def _contract_position_class(value: Any) -> str:
+    """The runtime reads "local" (and an unset mode) as the "cache" position
+    mode (``generation._resolve_runtime_mtp_position_mode``), so the two
+    name one contract."""
+    text = str(value or "cache").strip().lower().replace("-", "_")
+    if text in {"", "0", "off", "false", "default", "cache", "local"}:
+        return "cache"
+    return text
+
+
+def _with_probe_candidate(raw: Any, value: Any) -> str:
+    """A chain-probe candidate list that also contains ``value``."""
+    items = [item.strip() for item in str(raw).split(",") if item.strip()]
+    text = str(value or "").strip()
+    if text and text not in items:
+        items.append(text)
+    return ",".join(items)
+
+
+def _contract_key(
+    *,
+    base_hidden_variant: Any,
+    hidden_variant: Any,
+    concat_order: Any,
+    mtp_position_mode: Any,
+) -> tuple[str, str, str, str]:
+    return (
+        str(base_hidden_variant or "post_norm"),
+        str(hidden_variant or "post_norm"),
+        str(concat_order or "embedding_hidden"),
+        _contract_position_class(mtp_position_mode),
+    )
+
+
+def _add_counts(left: list[int], right: list[int]) -> list[int]:
+    size = max(len(left), len(right))
+    return [
+        (left[index] if index < len(left) else 0)
+        + (right[index] if index < len(right) else 0)
+        for index in range(size)
+    ]
+
+
+def _probe_contract_candidates(variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The chain probe's variants pooled by the contract each would stamp.
+
+    Anchors, cache policies and history modes are measurement conditions, and
+    the probe runs every contract under the same set, so a contract's evidence
+    is the sum over its variants. ``accepted_per_round`` is the mean accepted
+    draft prefix: the draft tokens verification keeps per round, which is
+    what decode speed follows. A match after a miss earns nothing.
+    """
+    pooled: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for order, variant in enumerate(variants):
+        key = _contract_key(
+            base_hidden_variant=variant.get("base_hidden_variant"),
+            hidden_variant=variant.get("mtp_hidden_variant") or variant.get("hidden_variant"),
+            concat_order=variant.get("concat_order"),
+            mtp_position_mode=variant.get("mtp_position_mode"),
+        )
+        entry = pooled.setdefault(
+            key,
+            {
+                "key": key,
+                "order": order,
+                "position_mode": str(variant.get("mtp_position_mode") or ""),
+                "prompts": set(),
+                "draft_rounds": 0,
+                "drafted_tokens": 0,
+                "accepted_tokens": 0.0,
+                "matches_by_depth": [],
+                "totals_by_depth": [],
+                "hint": False,
+            },
+        )
+        totals = [int(value) for value in _numeric_list(variant.get("totals_by_depth"))]
+        matches = [int(value) for value in _numeric_list(variant.get("matches_by_depth"))]
+        rounds = totals[0] if totals else 0
+        prefixes = _numeric_list(variant.get("prefixes"))
+        entry["draft_rounds"] += rounds
+        entry["drafted_tokens"] += sum(totals)
+        entry["accepted_tokens"] += (
+            sum(prefixes) if prefixes else float(variant.get("mean_prefix") or 0.0) * rounds
+        )
+        entry["matches_by_depth"] = _add_counts(entry["matches_by_depth"], matches)
+        entry["totals_by_depth"] = _add_counts(entry["totals_by_depth"], totals)
+        for row in variant.get("rows") or []:
+            if isinstance(row, dict) and row.get("prompt_id") is not None:
+                entry["prompts"].add(str(row["prompt_id"]))
+        topk = variant.get("topk_hits_by_depth") or variant.get("topk_rates_by_depth")
+        if sum(matches) > 0 or (
+            isinstance(topk, dict)
+            and any(value > 0 for series in topk.values() for value in _numeric_list(series))
+        ):
+            entry["hint"] = True
+    candidates = []
+    for entry in pooled.values():
+        entry["prompt_count"] = len(entry.pop("prompts"))
+        rounds = entry["draft_rounds"]
+        entry["accepted_per_round"] = entry["accepted_tokens"] / rounds if rounds else 0.0
+        candidates.append(entry)
+    return candidates
+
+
+def _probe_candidate_has_evidence(candidate: dict[str, Any] | None) -> bool:
+    return bool(
+        candidate is not None
+        and candidate["prompt_count"] >= CONTRACT_CALIBRATION_MIN_PROMPTS
+        and candidate["draft_rounds"] >= CONTRACT_CALIBRATION_MIN_DRAFT_ROUNDS
+    )
+
+
+def _probe_candidate_summary(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if candidate is None:
+        return None
+    base, hidden, concat, position = candidate["key"]
+    return {
+        "base_hidden_variant": base,
+        "hidden_variant": hidden,
+        "concat_order": concat,
+        "mtp_position_mode": candidate["position_mode"] or position,
+        "prompts": candidate["prompt_count"],
+        "draft_rounds": candidate["draft_rounds"],
+        "drafted_tokens": candidate["drafted_tokens"],
+        "accepted_per_round": round(candidate["accepted_per_round"], 4),
+        "agreement_by_depth": [
+            round(matches / total, 4) if total else None
+            for matches, total in zip(candidate["matches_by_depth"], candidate["totals_by_depth"])
+        ],
+    }
+
+
 def _contract_from_chain_probe(
     payload: dict[str, Any],
     *,
     fallback: dict[str, Any],
+    fallback_source: str = "family_default",
 ) -> dict[str, Any]:
+    """The MTP contract the chain probe supports, or ``fallback`` kept.
+
+    ``fallback`` is the head source's declared contract, or the family default
+    when nothing is declared. The probe moves a pack off it only on real
+    evidence: the declared contract and the challenger each measured on
+    CONTRACT_CALIBRATION_MIN_PROMPTS prompts and
+    CONTRACT_CALIBRATION_MIN_DRAFT_ROUNDS drafted chains, and the challenger
+    accepting CONTRACT_CALIBRATION_MARGIN more draft tokens per round. A thin
+    sample, all zeros or a tie keeps ``fallback`` and records the calibration
+    as inconclusive. The declared contract is "confirmed" when it beats every
+    alternative by the margin.
+    """
     variants = payload.get("variants") if isinstance(payload, dict) else None
-    if not isinstance(variants, list) or not variants:
-        return fallback
-    winner = max(
-        (variant for variant in variants if isinstance(variant, dict)),
-        key=_chain_probe_contract_score,
-        default=None,
+    candidates = _probe_contract_candidates(
+        [variant for variant in variants or [] if isinstance(variant, dict)]
     )
-    if not winner:
-        return fallback
-    score = _chain_probe_contract_score(winner)
-    agreement = _numeric_list(winner.get("agreement_by_depth"))
-    if score <= 0.0:
-        return _contract_from_probe_variant(
-            winner,
-            payload=payload,
-            fallback=fallback,
-            score=score,
-            status="no_agreement_signal",
-            diagnostic=(
-                "MTP contract calibration found no agreement signal; "
-                "the MTP sidecar is probably mismatched to the trunk"
+    reference_key = _contract_key(
+        base_hidden_variant=fallback.get("base_hidden_variant"),
+        hidden_variant=fallback.get("hidden_variant"),
+        concat_order=fallback.get("concat_order"),
+        mtp_position_mode=fallback.get("mtp_position_mode"),
+    )
+    reference = next((item for item in candidates if item["key"] == reference_key), None)
+    ranked = sorted(
+        (item for item in candidates if _probe_candidate_has_evidence(item)),
+        key=lambda item: (-item["accepted_per_round"], item["order"]),
+    )
+    rivals = [item for item in ranked if item["key"] != reference_key]
+    if any(item["accepted_tokens"] > 0 for item in candidates):
+        signal = "exact_agreement"
+    elif any(item["hint"] for item in candidates):
+        signal = "topk_only_no_exact_agreement"
+    else:
+        signal = "no_agreement_signal"
+    kept = "declared" if fallback_source == "declared" else "family default"
+    margin = CONTRACT_CALIBRATION_MARGIN
+    status = "inconclusive"
+    reason: str | None = None
+    diagnostic: str | None = None
+    chosen: dict[str, Any] | None = None
+    if not _probe_candidate_has_evidence(reference):
+        reason = "insufficient_evidence"
+        diagnostic = (
+            "MTP contract calibration was inconclusive: "
+            f"{reference['prompt_count'] if reference else 0} prompt(s) and "
+            f"{reference['draft_rounds'] if reference else 0} draft round(s) per "
+            f"contract are below the minimum of {CONTRACT_CALIBRATION_MIN_PROMPTS} "
+            f"prompts and {CONTRACT_CALIBRATION_MIN_DRAFT_ROUNDS} rounds, so the "
+            f"{kept} contract was kept"
+        )
+    elif ranked[0]["accepted_per_round"] <= 0.0:
+        reason = "no_signal"
+        found = (
+            "only top-k hints and no exact agreement signal"
+            if signal == "topk_only_no_exact_agreement"
+            else "no agreement signal"
+        )
+        diagnostic = (
+            f"MTP contract calibration found {found} in "
+            f"{reference['draft_rounds']} draft rounds over "
+            f"{reference['prompt_count']} prompts; the MTP sidecar is probably "
+            f"mismatched to the trunk, and the {kept} contract was kept"
+        )
+    elif rivals and rivals[0]["accepted_per_round"] - reference["accepted_per_round"] >= margin:
+        status = "switched"
+        top = rivals[0]["accepted_per_round"]
+        # Alternatives inside the margin of the best are a tie among
+        # themselves; take the one that changes the fewest declared fields.
+        chosen = min(
+            (
+                item
+                for item in rivals
+                if top - item["accepted_per_round"] < margin
+                and item["accepted_per_round"] - reference["accepted_per_round"] >= margin
+            ),
+            key=lambda item: (
+                sum(left != right for left, right in zip(item["key"], reference_key)),
+                -item["accepted_per_round"],
+                item["order"],
             ),
         )
-    if not agreement or sum(agreement) <= 0.0:
-        return _contract_from_probe_variant(
-            winner,
-            payload=payload,
-            fallback=fallback,
-            score=score,
-            status="topk_only_no_exact_agreement",
-            diagnostic=(
-                "MTP contract calibration found only top-k hints and no exact "
-                "agreement signal; the MTP sidecar is probably mismatched to the trunk"
-            ),
+    elif not rivals or reference["accepted_per_round"] - rivals[0]["accepted_per_round"] >= margin:
+        status = "confirmed"
+    else:
+        reason = "tie"
+        diagnostic = (
+            f"MTP contract calibration was inconclusive: no contract beat the {kept} "
+            f"contract by the {margin:.2f}-token margin ({kept} "
+            f"{reference['accepted_per_round']:.2f}, closest alternative "
+            f"{rivals[0]['accepted_per_round']:.2f} accepted draft tokens per "
+            f"round), so the {kept} contract was kept"
         )
-    return _contract_from_probe_variant(
-        winner,
-        payload=payload,
-        fallback=fallback,
-        score=score,
-        status="exact_agreement",
-        diagnostic=None,
+    alternatives = rivals or sorted(
+        (item for item in candidates if item["key"] != reference_key),
+        key=lambda item: (-item["accepted_per_round"], item["order"]),
     )
-
-
-def _contract_from_probe_variant(
-    winner: dict[str, Any],
-    *,
-    payload: dict[str, Any],
-    fallback: dict[str, Any],
-    score: float,
-    status: str,
-    diagnostic: str | None,
-) -> dict[str, Any]:
-    contract = dict(fallback)
-    contract.update(
-        {
-            "base_hidden_variant": str(
-                winner.get("base_hidden_variant")
-                or fallback.get("base_hidden_variant")
-                or "post_norm"
-            ),
-            "hidden_variant": str(
-                winner.get("mtp_hidden_variant")
-                or winner.get("hidden_variant")
-                or fallback.get("hidden_variant")
-                or "post_norm"
-            ),
-            "concat_order": str(
-                winner.get("concat_order")
-                or fallback.get("concat_order")
-                or "embedding_hidden"
-            ),
-            "mtp_position_mode": str(
-                winner.get("mtp_position_mode")
-                or fallback.get("mtp_position_mode")
-                or "cache"
-            ),
-            "calibration": {
-                "probe": "mtp-chain-probe",
-                "status": status,
-                "score": score,
-                "diagnostic": diagnostic,
-                "agreement_by_depth": winner.get("agreement_by_depth"),
-                "topk_rates_by_depth": winner.get("topk_rates_by_depth"),
-                "cache_policy": winner.get("cache_policy"),
-                "history_mode": winner.get("history_mode"),
-                "anchor": winner.get("anchor"),
-                "mean_prefix": winner.get("mean_prefix"),
-            },
-        }
-    )
-    for key in ("mtp_quant_bits", "mtp_quant_group_size", "mtp_quant_mode", "mtp_quant_policy"):
-        if payload.get(key) is not None:
-            contract[key] = payload[key]
+    calibration = {
+        "probe": "mtp-chain-probe",
+        "status": status,
+        "reason": reason,
+        "signal": signal,
+        "kept": None if chosen is not None else fallback_source,
+        "diagnostic": diagnostic,
+        "metric": "accepted_draft_tokens_per_round",
+        "required_margin": margin,
+        "min_prompts": CONTRACT_CALIBRATION_MIN_PROMPTS,
+        "min_draft_rounds": CONTRACT_CALIBRATION_MIN_DRAFT_ROUNDS,
+        "candidates_tested": len(candidates),
+        "reference": _probe_candidate_summary(reference),
+        "best_alternative": _probe_candidate_summary(alternatives[0] if alternatives else None),
+        "chosen": _probe_candidate_summary(chosen),
+    }
+    contract = {key: value for key, value in fallback.items() if key != "calibration"}
+    if chosen is not None:
+        base, hidden, concat, position = chosen["key"]
+        contract["base_hidden_variant"] = base
+        contract["hidden_variant"] = hidden
+        contract["concat_order"] = concat
+        if position != reference_key[3]:
+            contract["mtp_position_mode"] = chosen["position_mode"] or position
+    if isinstance(payload, dict):
+        for key in ("mtp_quant_bits", "mtp_quant_group_size", "mtp_quant_mode", "mtp_quant_policy"):
+            if payload.get(key) is not None:
+                contract[key] = payload[key]
     return MTPContract().with_metadata(contract, preserve_explicit=False).to_dict() | {
-        "calibration": contract["calibration"]
+        "calibration": calibration
     }
 
 
@@ -2695,15 +2920,6 @@ def _contract_probe_summary(
         "best_topk_hint": float(best_topk),
         "diagnostic": diagnostic,
     }
-
-
-def _chain_probe_contract_score(variant: dict[str, Any]) -> float:
-    agreement = _numeric_list(variant.get("agreement_by_depth"))
-    topk = variant.get("topk_rates_by_depth")
-    top4 = _numeric_list(topk.get("4") if isinstance(topk, dict) else None)
-    top8 = _numeric_list(topk.get("8") if isinstance(topk, dict) else None)
-    d1 = agreement[0] if agreement else 0.0
-    return (4.0 * sum(agreement)) + (1.5 * sum(top4)) + sum(top8) + (2.0 * d1)
 
 
 def _numeric_list(value: Any) -> list[float]:
@@ -3590,6 +3806,9 @@ def _stamp_runtime_metadata(
     if _runtime_evidence_has_launch_blocker(metadata.get("exactness_baseline")):
         metadata["exactness_baseline"] = {}
     config = _load_json(model_path / "config.json") if (model_path / "config.json").exists() else {}
+    # How calibration chose (or kept) the contract; the normalized contract
+    # below carries only the contract fields.
+    calibration = mtp_contract.get("calibration") if isinstance(mtp_contract, dict) else None
     mtp_contract = _normalize_mtp_contract_for_config(mtp_contract, config)
     inspection = None
     try:
@@ -3664,6 +3883,8 @@ def _stamp_runtime_metadata(
         "forged_locally": True,
         "published_to_hf": None,
     }
+    if isinstance(calibration, dict):
+        metadata["forge_provenance"]["mtp_contract_calibration"] = dict(calibration)
     return metadata
 
 

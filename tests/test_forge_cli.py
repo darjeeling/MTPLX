@@ -1371,8 +1371,11 @@ def test_contract_chain_probe_keeps_zero_agreement_as_diagnostic():
     )
 
     assert contract["hidden_variant"] == "post_norm"
-    assert contract["calibration"]["status"] == "no_agreement_signal"
-    assert "no agreement signal" in contract["calibration"]["diagnostic"]
+    # A variant with no counted draft rounds is no evidence either way.
+    assert contract["calibration"]["status"] == "inconclusive"
+    assert contract["calibration"]["reason"] == "insufficient_evidence"
+    assert contract["calibration"]["signal"] == "no_agreement_signal"
+    assert "inconclusive" in contract["calibration"]["diagnostic"]
 
 
 def test_contract_chain_probe_keeps_topk_only_signal_as_diagnostic():
@@ -1395,10 +1398,382 @@ def test_contract_chain_probe_keeps_topk_only_signal_as_diagnostic():
         },
     )
 
-    assert contract["hidden_variant"] == "fc"
+    # One top-k hint used to rewrite the contract to fc / hidden_embedding.
+    # It is recorded, and the declared contract stays.
+    assert contract["hidden_variant"] == "post_norm"
+    assert contract["concat_order"] == "embedding_hidden"
+    assert contract["calibration"]["status"] == "inconclusive"
+    assert contract["calibration"]["signal"] == "topk_only_no_exact_agreement"
+
+
+def _chain_probe_variant(
+    *,
+    base: str = "post_norm",
+    hidden: str = "post_norm",
+    concat: str = "embedding_hidden",
+    position: str = "local",
+    anchor: str = "prompt_boundary",
+    prompts: int = 8,
+    windows: int = 4,
+    depth: int = 3,
+    prefixes: tuple[int, ...] = (0,),
+) -> dict:
+    """One variant shaped like `mtplx mtp-chain-probe` output. ``prefixes``
+    cycles over the rounds: a round accepts that many draft tokens and then
+    misses."""
+    rows = []
+    accepted: list[int] = []
+    matches = [0] * depth
+    for prompt in range(prompts):
+        for window in range(windows):
+            prefix = prefixes[len(accepted) % len(prefixes)]
+            accepted.append(prefix)
+            for index in range(prefix):
+                matches[index] += 1
+            rows.append(
+                {
+                    "prompt_id": f"calib-{prompt:03d}",
+                    "window_index": window,
+                    "prefix": prefix,
+                    "drafts": [],
+                }
+            )
+    rounds = len(accepted)
+    return {
+        "base_hidden_variant": base,
+        "mtp_hidden_variant": hidden,
+        "concat_order": concat,
+        "mtp_position_mode": position,
+        "cache_policy": "persistent",
+        "history_mode": "recursive",
+        "anchor": anchor,
+        "matches_by_depth": matches,
+        "totals_by_depth": [rounds] * depth,
+        "agreement_by_depth": [value / rounds for value in matches],
+        "topk_hits_by_depth": {"8": list(matches)},
+        "topk_rates_by_depth": {"8": [value / rounds for value in matches]},
+        "mean_prefix": sum(accepted) / rounds,
+        "prefixes": accepted,
+        "rows": rows,
+        "error": None,
+    }
+
+
+def _chain_probe_payload(*contracts: dict) -> dict:
+    """Both anchors for every contract, as forge's calibration probe runs them."""
+    return {
+        "variants": [
+            _chain_probe_variant(anchor=anchor, **contract)
+            for contract in contracts
+            for anchor in ("prompt_boundary", "after_one_target")
+        ]
+    }
+
+
+def test_contract_calibration_keeps_family_default_on_an_all_zero_tie():
+    payload = _chain_probe_payload(
+        {},
+        {"hidden": "pre_norm"},
+        {"hidden": "fc"},
+        {"base": "pre_norm"},
+        {"concat": "hidden_embedding"},
+        {"position": "absolute"},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=forge._runtime_or_default_mtp_contract(None)
+    )
+
+    calibration = contract["calibration"]
+    assert contract["base_hidden_variant"] == "post_norm"
+    assert contract["hidden_variant"] == "post_norm"
+    assert contract["concat_order"] == "embedding_hidden"
+    assert contract["mtp_position_mode"] == "cache"
+    assert calibration["status"] == "inconclusive"
+    assert calibration["reason"] == "no_signal"
+    assert calibration["kept"] == "family_default"
+    assert calibration["signal"] == "no_agreement_signal"
+    assert calibration["reference"]["draft_rounds"] == 64
+    assert calibration["reference"]["prompts"] == 8
+    assert "no agreement signal" in calibration["diagnostic"]
+
+
+@pytest.mark.parametrize(
+    "prompts,windows",
+    [
+        (1, 1),  # the 09-22 MiMo probe: 2 rounds from one prompt
+        (2, 16),  # 64 rounds, but two prompts
+        (8, 2),  # eight prompts, but 32 rounds
+    ],
+)
+def test_contract_calibration_keeps_default_on_a_tiny_sample(prompts, windows):
+    payload = _chain_probe_payload(
+        {"prompts": prompts, "windows": windows},
+        {"hidden": "pre_norm", "prompts": prompts, "windows": windows, "prefixes": (3,)},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=forge._runtime_or_default_mtp_contract(None)
+    )
+
+    calibration = contract["calibration"]
+    assert contract["hidden_variant"] == "post_norm"
+    assert calibration["status"] == "inconclusive"
+    assert calibration["reason"] == "insufficient_evidence"
+    assert calibration["kept"] == "family_default"
+    assert calibration["chosen"] is None
+    assert calibration["best_alternative"]["hidden_variant"] == "pre_norm"
+    assert calibration["best_alternative"]["accepted_per_round"] == 3.0
+
+
+def test_contract_calibration_ignores_the_mimo_probe_that_picked_pre_norm():
+    # The shape of the real 09-22 MiMo contract probe: one prompt, one window,
+    # every candidate 0 at depth 1, and pre_norm "winning" on a depth-3 match
+    # after two misses plus top-k hints. The grafted Qwen3.5-9B head's
+    # contract is post_norm.
+    def variant(base, hidden, anchor, matches, topk8):
+        return {
+            "base_hidden_variant": base,
+            "mtp_hidden_variant": hidden,
+            "concat_order": "embedding_hidden",
+            "mtp_position_mode": "local",
+            "cache_policy": "persistent",
+            "history_mode": "recursive",
+            "anchor": anchor,
+            "matches_by_depth": matches,
+            "totals_by_depth": [1, 1, 1],
+            "agreement_by_depth": [float(value) for value in matches],
+            "topk_hits_by_depth": {"8": topk8},
+            "topk_rates_by_depth": {"8": [float(value) for value in topk8]},
+            "mean_prefix": 0.0,
+            "prefixes": [0],
+            "rows": [{"prompt_id": "calib_code_parser_001", "window_index": 0, "prefix": 0}],
+            "error": None,
+        }
+
+    payload = {
+        "variants": [
+            variant(base, "pre_norm", "after_one_target", [0, 0, 1], [0, 1, 1])
+            for base in ("post_norm", "pre_norm")
+        ]
+        + [
+            variant(base, "post_norm", "after_one_target", [0, 0, 0], [0, 1, 0])
+            for base in ("post_norm", "pre_norm")
+        ]
+        + [
+            variant(base, hidden, "prompt_boundary", [0, 0, 0], [0, 0, 0])
+            for base in ("post_norm", "pre_norm")
+            for hidden in ("post_norm", "pre_norm", "fc", "prev")
+        ]
+    }
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=forge._runtime_or_default_mtp_contract(None)
+    )
+
+    assert contract["hidden_variant"] == "post_norm"
+    assert contract["base_hidden_variant"] == "post_norm"
+    assert contract["calibration"]["status"] == "inconclusive"
+    assert contract["calibration"]["reason"] == "insufficient_evidence"
+    assert contract["calibration"]["reference"]["draft_rounds"] == 2
+    assert contract["calibration"]["reference"]["prompts"] == 1
+
+
+def test_contract_calibration_switches_on_a_clear_winner():
+    payload = _chain_probe_payload(
+        {"prefixes": (0, 1)},  # the default contract: 0.5 accepted tokens a round
+        {"hidden": "pre_norm", "prefixes": (2, 2, 1, 3)},  # 2.0
+        {"hidden": "fc", "prefixes": (0,)},
+        {"concat": "hidden_embedding", "prefixes": (0,)},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=forge._runtime_or_default_mtp_contract(None)
+    )
+
+    calibration = contract["calibration"]
+    assert contract["hidden_variant"] == "pre_norm"
+    assert contract["base_hidden_variant"] == "post_norm"
+    assert contract["concat_order"] == "embedding_hidden"
+    assert contract["mtp_position_mode"] == "cache"
+    assert calibration["status"] == "switched"
+    assert calibration["kept"] is None
+    assert calibration["diagnostic"] is None
+    assert calibration["reference"]["accepted_per_round"] == 0.5
+    assert calibration["chosen"]["hidden_variant"] == "pre_norm"
+    assert calibration["chosen"]["accepted_per_round"] == 2.0
+    assert calibration["chosen"]["draft_rounds"] == 64
+
+
+def test_contract_calibration_prefers_the_smallest_change_among_tied_winners():
+    # pre_norm with the absolute position mode reads 0.125 higher, inside the
+    # margin, so the winner that changes one declared field is taken.
+    payload = _chain_probe_payload(
+        {"prefixes": (0,)},
+        {"hidden": "pre_norm", "prefixes": (2,)},
+        {"hidden": "pre_norm", "position": "absolute", "prefixes": (2, 2, 2, 2, 2, 2, 2, 3)},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=forge._runtime_or_default_mtp_contract(None)
+    )
+
+    assert contract["calibration"]["status"] == "switched"
+    assert contract["hidden_variant"] == "pre_norm"
+    assert contract["mtp_position_mode"] == "cache"
+    assert contract["calibration"]["best_alternative"]["mtp_position_mode"] == "absolute"
+
+
+def test_contract_calibration_keeps_declared_contract_when_the_margin_is_too_small():
+    declared = forge._runtime_or_default_mtp_contract(
+        {
+            "mtp_contract": {
+                "base_hidden_variant": "post_norm",
+                "hidden_variant": "post_norm",
+                "concat_order": "embedding_hidden",
+                "mtp_position_mode": "local",
+            }
+        }
+    )
+    payload = _chain_probe_payload(
+        {"prefixes": (2, 1, 2, 2)},  # 1.75
+        {"hidden": "pre_norm", "prefixes": (2, 2, 2, 1, 2, 2, 2, 2)},  # 1.875
+        {"hidden": "fc", "prefixes": (1,)},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload, fallback=declared, fallback_source="declared"
+    )
+
+    calibration = contract["calibration"]
+    assert contract["hidden_variant"] == "post_norm"
+    assert contract["mtp_position_mode"] == "local"
+    assert calibration["status"] == "inconclusive"
+    assert calibration["reason"] == "tie"
+    assert calibration["kept"] == "declared"
+    assert calibration["best_alternative"]["hidden_variant"] == "pre_norm"
+    assert "0.25-token margin" in calibration["diagnostic"]
+
+
+def test_contract_calibration_confirms_a_declared_contract_that_wins_clearly():
+    payload = _chain_probe_payload(
+        {"prefixes": (2,)},
+        {"hidden": "pre_norm", "prefixes": (1, 2)},  # 1.5, 0.5 behind
+        {"concat": "hidden_embedding", "prefixes": (0,)},
+    )
+
+    contract = forge._contract_from_chain_probe(
+        payload,
+        fallback=forge._runtime_or_default_mtp_contract(None),
+        fallback_source="declared",
+    )
+
+    assert contract["hidden_variant"] == "post_norm"
+    assert contract["calibration"]["status"] == "confirmed"
+    assert contract["calibration"]["kept"] == "declared"
+    assert contract["calibration"]["diagnostic"] is None
+
+
+def test_contract_calibration_probe_samples_enough_and_measures_the_declared_contract(
+    tmp_path, monkeypatch
+):
+    from mtplx import thermal
+
+    class ForbiddenMaxSession:
+        def __init__(self, **_kwargs):
+            raise AssertionError("calibration without --max must not touch the fans")
+
+    monkeypatch.setattr(thermal, "MaxSession", ForbiddenMaxSession)
+    model = tmp_path / "model"
+    _write_json(model / "config.json", _mtp_config())
+    existing = {
+        "mtp_contract": {
+            "base_hidden_variant": "post_norm",
+            "hidden_variant": "embedding",
+            "concat_order": "hidden_embedding",
+            "mtp_position_mode": "cache",
+        }
+    }
+    captured: dict[str, list[str]] = {}
+
+    class FinishedRun:
+        returncode = 0
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output = Path(command[command.index("--output") + 1])
+        # A tiny probe in which a non-declared contract looks far better.
+        _write_json(
+            output,
+            _chain_probe_payload(
+                {
+                    "hidden": "embedding",
+                    "concat": "hidden_embedding",
+                    "prompts": 1,
+                    "windows": 1,
+                },
+                {"prompts": 1, "windows": 1, "prefixes": (3,)},
+            ),
+        )
+        return FinishedRun()
+
+    monkeypatch.setattr(forge.subprocess, "run", fake_run)
+
+    contract = forge._calibrate_mtp_contract(
+        model, tmp_path / "run", recipe={}, existing=existing, max_fans=False
+    )
+
+    command = captured["command"]
+
+    def flag(name: str) -> str:
+        return command[command.index(name) + 1]
+
+    assert flag("--limit") == "8"
+    assert flag("--windows") == "4"
+    assert flag("--depth") == "3"
+    assert flag("--stride") == "3"
+    assert "embedding" in flag("--mtp-hidden-variants").split(",")
+    assert "hidden_embedding" in flag("--concat-orders").split(",")
+    assert "local" in flag("--mtp-position-modes").split(",")
+    assert contract["hidden_variant"] == "embedding"
     assert contract["concat_order"] == "hidden_embedding"
-    assert contract["calibration"]["status"] == "topk_only_no_exact_agreement"
-    assert "top-k hints" in contract["calibration"]["diagnostic"]
+    assert contract["calibration"]["status"] == "inconclusive"
+    assert contract["calibration"]["kept"] == "declared"
+    progress = json.loads((tmp_path / "run" / "calibrate.json").read_text(encoding="utf-8"))
+    assert progress["label"] == "contract_calibration_inconclusive"
+    assert progress["calibration_status"] == "inconclusive"
+    assert progress["mtp_contract"]["calibration"]["reason"] == "insufficient_evidence"
+
+
+def test_runtime_stamp_records_contract_calibration_in_provenance(tmp_path):
+    _write_json(tmp_path / "config.json", _mtp_config())
+    contract = forge._contract_from_chain_probe(
+        _chain_probe_payload(
+            {"prompts": 1, "windows": 1},
+            {"hidden": "pre_norm", "prompts": 1, "windows": 1, "prefixes": (3,)},
+        ),
+        fallback=forge._runtime_or_default_mtp_contract(None),
+    )
+
+    runtime = forge._stamp_runtime_metadata(
+        tmp_path,
+        branded_name="Fixture-MTPLX",
+        source_repo="owner/source",
+        source_sha="abc123",
+        source_format=forge.SOURCE_BF16_NATIVE,
+        recipe={"mtp_policy": "keep_bf16"},
+        forge_inputs={"trunk_path": str(tmp_path)},
+        rows=_speed_win_rows(),
+        mtp_contract=contract,
+        existing=None,
+    )
+
+    assert "calibration" not in runtime["mtp_contract"]
+    assert runtime["mtp_contract"]["hidden_variant"] == "post_norm"
+    recorded = runtime["forge_provenance"]["mtp_contract_calibration"]
+    assert recorded["status"] == "inconclusive"
+    assert recorded["reason"] == "insufficient_evidence"
+    assert recorded["kept"] == "family_default"
 
 
 def test_discover_maps_hf_rows(monkeypatch):
