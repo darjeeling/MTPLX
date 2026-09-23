@@ -23,9 +23,16 @@ are probed whenever a Prism model loads with their switches on, whatever the
 profile: the rotation must return the MLX chain's exact bits, the GEMV must
 agree with stock ``mx.quantized_matmul`` within float16 rounding.
 
+The four Flash-Next (qwen4_exp) prefill kernels, the hyper-connection read,
+the GDN gated norm, the GDN prefill prework and the MoE prefill combine, are
+plain SIMD too and on by default on every Mac. They are probed whenever a
+Flash-Next model loads with their switches on, whatever the profile, at the
+family's geometry and production thread counts: each must return the stock
+MLX chain's exact bits.
+
 Env:
 - ``MTPLX_KERNEL_SELFCHECK=0`` disables the probe (default: runs whenever a
-  turbo kernel env is active, and for every Prism model).
+  turbo kernel env is active, and for every Prism and Flash-Next model).
 - ``MTPLX_FORCE_GPU_FAMILY_FALLBACK=1`` (handled in ``nax_verify``) forces the
   G17-gated m16 NAX lane off so newer machines can rehearse the exact
   M1-M4 code path.
@@ -35,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -61,6 +69,12 @@ _NORM_TOLERANCE = 0.02
 # both sum in float32 and round once to float16, so they differ by a float16
 # step or two (<= 1e-3); a wrong decode or index is off by the output scale.
 _TERNARY_TOLERANCE = 0.02
+# Flash-Next prefill probes: the narrowest width the call sites admit (32 rows)
+# at the family's geometry (top-10 experts of hidden 2560), so every kernel
+# runs with the thread counts production dispatches.
+_FLASH_NEXT_ROWS = 32
+_FLASH_NEXT_TOP_K = 10
+_FLASH_NEXT_HIDDEN = 2560
 
 _K = 1024  # satisfies every lane's K divisibility contract (%256 for m16)
 _N = 1024  # satisfies N%32 (m16/msg) and N%4 (ksplit)
@@ -73,11 +87,13 @@ def _env_on(name: str, *, default: bool = False) -> bool:
     return raw in {"1", "true", "on", "yes"}
 
 
-def selfcheck_enabled(*, prism_ternary: bool = False) -> bool:
+def selfcheck_enabled(*, prism_ternary: bool = False, flash_next: bool = False) -> bool:
     """Selfcheck runs by default whenever a turbo kernel lane is active.
 
     ``prism_ternary``: the model is a Prism (Ternary Bonsai) load, whose two
     kernels run under every profile, so it is checked under every profile.
+    ``flash_next``: the model is a Flash-Next (qwen4_exp) load, likewise for
+    its four prefill kernels.
     """
     raw = str(os.environ.get("MTPLX_KERNEL_SELFCHECK", "")).strip().lower()
     if raw in {"0", "false", "off", "no"}:
@@ -86,6 +102,7 @@ def selfcheck_enabled(*, prism_ternary: bool = False) -> bool:
         return True
     return (
         prism_ternary
+        or flash_next
         or _env_on("MTPLX_NAX_VERIFY")
         or _env_on("MTPLX_GQA_PACKED_SDPA")
         or _env_on("MTPLX_QWEN_ROW_OWNED_ROUTER")
@@ -549,12 +566,149 @@ def _check_bonsai_ternary_qmv(mx) -> float:
     return worst
 
 
+def _bitwise_worst(mx, got, want) -> float:
+    """0.0 when the bf16 ``got`` carries ``want``'s exact bits, else how far apart.
+
+    A shape or dtype mismatch is infinite, and so is a bit difference at zero
+    distance (a signed zero or a NaN).
+    """
+    mx.eval(got, want)
+    if tuple(got.shape) != tuple(want.shape) or got.dtype != want.dtype:
+        return float("inf")
+    if bool(mx.array_equal(got.view(mx.uint16), want.view(mx.uint16)).item()):
+        return 0.0
+    return _max_abs_diff(mx, got, want) or float("inf")
+
+
+def _check_qwen4_hc_prefill_read(mx) -> float:
+    """Bitwise: the hyper-connection read's grouped norm and sigmoid mix.
+
+    Both kernels at the family geometry (4 streams of 2560, 32 rows), so the
+    norm runs its 640-thread groups and the mix its 256-thread groups, against
+    ``mx.fast.rms_norm`` times the weight and the mean of ``sigmoid(up)``
+    times the norm. The projections between them are stock layers either way.
+    A build failure or a thread count this GPU refuses raises from the eval.
+    """
+    from .kernels import hc_prefill as hc
+
+    mx.random.seed(29)
+    rows, streams, hidden = _FLASH_NEXT_ROWS, hc._HC, hc._HIDDEN
+    grouped = (1, rows, streams, hidden)
+    x = (mx.random.normal((1, rows, streams * hidden)) * 3.0).astype(mx.bfloat16)
+    weight = (1.0 + 0.1 * mx.random.normal((streams * hidden,))).astype(mx.bfloat16)
+    up = (mx.random.normal(x.shape) * 12.0).astype(mx.bfloat16)
+    want_norm = mx.fast.rms_norm(x.reshape(grouped), None, 1e-6).reshape(x.shape) * weight
+    want_mix = mx.mean(mx.sigmoid(up).reshape(grouped) * want_norm.reshape(grouped), axis=-2)
+    return max(
+        _bitwise_worst(mx, hc._normalize(x, weight, 1e-6), want_norm),
+        _bitwise_worst(mx, hc._mix(up, want_norm), want_mix),
+    )
+
+
+def _check_qwen4_gdn_gated_norm(mx) -> float:
+    """Bitwise: the GDN norm's sigmoid output gate, for bf16 and float32 norms.
+
+    A prefill chunk's ``[1, 32, 48, 128]`` heads in 256-thread groups, the
+    gate sliced from a wider projection as in the model, against
+    ``(sigmoid(gate.astype(f32)) * x.astype(f32)).astype(bf16)``.
+    """
+    from .kernels import gdn_gated_norm as gn
+
+    mx.random.seed(31)
+    rows = _FLASH_NEXT_ROWS
+    heads = (1, rows, 48, 128)
+    out = (mx.random.normal(heads) * 2.0).astype(mx.bfloat16)
+    projection = (mx.random.normal((1, rows, 16480)) * 3.0).astype(mx.bfloat16)
+    gate = projection[..., 10240:16384].reshape(heads)
+    worst = 0.0
+    for weight_dtype in (mx.bfloat16, mx.float32):
+        weight = (1.0 + 0.1 * mx.random.normal((128,))).astype(weight_dtype)
+        x = mx.fast.rms_norm(out, weight, 1e-6)
+        want = (mx.sigmoid(gate.astype(mx.float32)) * x.astype(mx.float32)).astype(
+            mx.bfloat16
+        )
+        worst = max(worst, _bitwise_worst(mx, gn.sigmoid_gate(x, gate), want))
+    return worst
+
+
+def _check_qwen4_gdn_prefill_prework(mx) -> float:
+    """Bitwise: conv + silu + q/k l2norm against the model's staged chain.
+
+    32 rows of the family's q|k|v stream (10240 channels, a strided view of
+    the wider projection as the model passes it) after a live conv state, one
+    32-thread simdgroup per row and head as in production; q, k and v must
+    all carry the chain's exact bits.
+    """
+    import mlx.nn as nn
+
+    from .kernels import gdn_prefill_prework as pw
+
+    mx.random.seed(37)
+    rows, dim, key, head, taps = (
+        _FLASH_NEXT_ROWS,
+        pw._CONV_DIM,
+        pw._KEY_DIM,
+        pw._HEAD,
+        pw._KERNEL,
+    )
+    qkv = mx.random.normal((1, rows, 16480)).astype(mx.bfloat16)[..., :dim]
+    conv_state = mx.random.normal((1, taps - 1, dim)).astype(mx.bfloat16)
+    conv_w = (mx.random.normal((dim, taps, 1)) * 0.5).astype(mx.bfloat16)
+    inv_scale = head**-0.5
+    got = pw.gdn_prefill_prework(qkv, conv_state, conv_w, inv_scale)
+
+    conv_out = nn.silu(
+        mx.conv1d(mx.concatenate([conv_state, qkv], axis=1), conv_w, groups=dim)
+    )
+    q, k, v = (
+        t.reshape(1, rows, -1, head) for t in mx.split(conv_out, [key, 2 * key], -1)
+    )
+
+    def l2norm(t):
+        tf = t.astype(mx.float32)
+        return (tf * mx.rsqrt((tf * tf).sum(-1, keepdims=True) + 1e-6)).astype(t.dtype)
+
+    want = (inv_scale * l2norm(q), l2norm(k), v)
+    return max(_bitwise_worst(mx, g, w) for g, w in zip(got, want))
+
+
+def _check_qwen4_moe_prefill_combine(mx) -> float:
+    """Bitwise: the MoE combine against the stock unsort, weight, sum, + shared tail.
+
+    32 rows of Flash-Next's top-10 of 2560 in the kernel's production
+    256-thread groups, the expert outputs in a shuffled order as the sorted
+    gather leaves them.
+    """
+    from .kernels import qwen4_moe_prefill_combine as mc
+
+    mx.random.seed(41)
+    rows, top_k, hidden = _FLASH_NEXT_ROWS, _FLASH_NEXT_TOP_K, _FLASH_NEXT_HIDDEN
+    y_sorted = mx.random.normal((rows * top_k, hidden)).astype(mx.bfloat16)
+    inv_order = mx.argsort(mx.random.uniform(shape=(rows * top_k,))).astype(mx.uint32)
+    gates = mx.softmax(
+        (mx.random.normal((rows, top_k)) * 3.0).astype(mx.bfloat16), axis=-1, precise=True
+    )
+    scores = gates / gates.sum(axis=-1, keepdims=True)
+    shared = mx.random.normal((rows, hidden)).astype(mx.bfloat16)
+    return _bitwise_worst(
+        mx,
+        mc._launch(y_sorted, inv_order, scores, shared),
+        mc.moe_prefill_combine_reference(y_sorted, inv_order, scores, shared),
+    )
+
+
 def run_kernel_selfcheck(
-    dtype, bits: int, group_size: int, *, prism_ternary: bool = False
+    dtype,
+    bits: int,
+    group_size: int,
+    *,
+    prism_ternary: bool = False,
+    flash_next: bool = False,
 ) -> dict[str, Any]:
     """Probe every turbo lane that can engage for this model configuration.
 
-    ``prism_ternary`` adds the two Ternary Bonsai kernel lanes (a Prism load).
+    ``prism_ternary`` adds the two Ternary Bonsai kernel lanes (a Prism load),
+    ``flash_next`` the four Flash-Next prefill kernel lanes (a qwen4_exp load).
 
     Returns ``{"lanes": {lane: status}, "dmax": {lane: float}, ...}`` and
     updates the process-wide disable registry: lanes reported ``fallback``
@@ -848,6 +1002,45 @@ def run_kernel_selfcheck(
         else:
             lanes[lane] = _STATUS_SKIPPED
 
+    # Flash-Next (qwen4_exp) prefill kernels, on by default on every Mac with
+    # no GPU-family gate either. A GPU or macOS that refuses to build or
+    # dispatch one, or rounds it differently, gets the stock chain for the
+    # process instead of a failed or changed long prompt. Bitwise, and
+    # switched_on() for the same reason as above.
+    from .kernels import (
+        gdn_gated_norm,
+        gdn_prefill_prework,
+        hc_prefill,
+        qwen4_moe_prefill_combine,
+    )
+
+    for lane, switched_on, probe in (
+        (
+            hc_prefill.LANE,
+            hc_prefill.switched_on(),
+            lambda: _check_qwen4_hc_prefill_read(mx),
+        ),
+        (
+            gdn_gated_norm.LANE,
+            gdn_gated_norm.switched_on(),
+            lambda: _check_qwen4_gdn_gated_norm(mx),
+        ),
+        (
+            gdn_prefill_prework.LANE,
+            gdn_prefill_prework.switched_on(),
+            lambda: _check_qwen4_gdn_prefill_prework(mx),
+        ),
+        (
+            qwen4_moe_prefill_combine.LANE,
+            qwen4_moe_prefill_combine.switched_on(),
+            lambda: _check_qwen4_moe_prefill_combine(mx),
+        ),
+    ):
+        if flash_next and switched_on:
+            _record(lane, 0.0, probe)
+        else:
+            lanes[lane] = _STATUS_SKIPPED
+
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
     _LANE_STATUS.clear()
@@ -913,6 +1106,16 @@ def _prism_ternary_model(model: Any) -> bool:
     return isinstance(model, _PrismModel)
 
 
+def _flash_next_model(model: Any) -> bool:
+    """A Flash-Next (qwen4_exp) load, whose four prefill kernels are on by default."""
+    # Never import the model module here: if a load had not imported it, this
+    # model cannot be one of its instances.
+    module = sys.modules.get(f"{__package__}.models.qwen4_exp")
+    model_class = getattr(module, "Model", None)
+    # isinstance, not the exact class: MTP injection swaps in a subclass.
+    return isinstance(model_class, type) and isinstance(model, model_class)
+
+
 def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
     """Run the selfcheck for a freshly loaded model if turbo lanes are active.
 
@@ -920,7 +1123,8 @@ def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
     failure inside the probe itself must never break model loading.
     """
     prism_ternary = _prism_ternary_model(model)
-    if not selfcheck_enabled(prism_ternary=prism_ternary):
+    flash_next = _flash_next_model(model)
+    if not selfcheck_enabled(prism_ternary=prism_ternary, flash_next=flash_next):
         return None
     try:
         signature = _model_quant_signature(model)
@@ -935,7 +1139,11 @@ def maybe_run_model_selfcheck(model: Any) -> dict[str, Any] | None:
         else:
             dtype, bits, group_size = signature
         report = run_kernel_selfcheck(
-            dtype, bits, group_size, prism_ternary=prism_ternary
+            dtype,
+            bits,
+            group_size,
+            prism_ternary=prism_ternary,
+            flash_next=flash_next,
         )
         fallbacks = sorted(
             lane for lane, status in report["lanes"].items() if status == _STATUS_FALLBACK

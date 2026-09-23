@@ -5,6 +5,14 @@ uses a table made by the installed MLX sigmoid, avoiding JIT/metallib
 transcendental differences. Neither projection nor the injection reduction
 is replaced. Decode and verify retain their existing routes.
 
+Every GPU generation: both kernels are plain SIMD (float arithmetic,
+``simd_sum``, 640-thread norm groups, 256-thread mix groups) with no tensor
+units, so they run on M1 to M5, but only an M5 has measured them. The
+load-time self-check (``mtplx.kernel_selfcheck``, lane
+``qwen4_hc_prefill_read``) compares their bits with the stock chain on this
+GPU and turns the read off for the process on any difference, build failure
+or refused thread count; the model's call site then keeps the eager chain.
+
 Adapted from ddalcu/mlx-serve commit ea540c5560c2dbf4db36a649edb0a17a4ecab34a,
 src/kernels/hc_prefill_{norm,mix}.metal, and Apple's rms_single_row.
 
@@ -32,7 +40,11 @@ THE SOFTWARE.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+
+ENV = "MTPLX_QWEN4_HC_PREFILL_READ"
+LANE = "qwen4_hc_prefill_read"
 
 _HC = 4
 _HIDDEN = 2560
@@ -88,6 +100,26 @@ _MIX_SOURCE = r"""
     // mean() materializes its reciprocal in the input dtype before multiply.
     out[i] = T(float(total) * float(T(1.0f / float(HC))));
 """
+
+
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
+    raw = (os.environ.get(ENV) or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU.
+
+    :func:`hc_prefill_read` has no fallback of its own, so the model checks
+    this first and a lane the self-check turned off never reaches the kernels.
+    """
+
+    # Absolute and lazy: the CPU contract test loads this file on its own.
+    from mtplx.kernel_selfcheck import lane_disabled
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 def _geometry(shape, hc_count, hidden_size):

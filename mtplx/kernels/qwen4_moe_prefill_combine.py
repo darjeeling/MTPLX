@@ -20,15 +20,40 @@ order, partials combined in ascending y, all in BF16; the same order
 ``laguna_prefill_moe_combine.py`` pins), and the shared-expert add is the one
 BF16 add ``y + shared_y`` performs.  The result is bit-identical to the stock
 tail.
+
+Every GPU generation: the kernel is plain SIMD (BF16 arithmetic, 256-thread
+groups, no threadgroup memory) with no tensor units, so it runs on M1 to M5,
+but only an M5 has measured it.  The load-time self-check
+(``mtplx.kernel_selfcheck``, lane ``qwen4_moe_prefill_combine``) compares its
+bits with the stock tail on this GPU and turns it off for the process on any
+difference or a build or launch failure.
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 import mlx.core as mx
 
+from ..kernel_selfcheck import lane_disabled
+
+ENV = "MTPLX_QWEN4_MOE_PREFILL_COMBINE"
+LANE = "qwen4_moe_prefill_combine"
 _MAX_TOP_K = 32
+
+
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
+    raw = (os.environ.get(ENV) or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU."""
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 def _on_metal_device() -> bool:
@@ -117,6 +142,12 @@ def moe_prefill_combine(y_sorted, inv_order, scores, shared):
 
     if not combine_eligible(y_sorted, inv_order, scores, shared):
         return moe_prefill_combine_reference(y_sorted, inv_order, scores, shared)
+    return _launch(y_sorted, inv_order, scores, shared)
+
+
+def _launch(y_sorted, inv_order, scores, shared):
+    """The kernel itself, for inputs the caller has checked (the self-check probes this)."""
+
     rows, top_k = (int(d) for d in scores.shape)
     hidden = int(y_sorted.shape[1])
     total = rows * hidden

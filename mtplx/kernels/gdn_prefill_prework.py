@@ -25,13 +25,27 @@ is the eager chain's:
 The output is bit-identical to the eager chain (tests/test_gdn_prefill_prework.py).
 Geometry is Flash-Next's: conv_dim 10240 = q 2048 | k 2048 | v 6144, head dim
 128, kernel 4, no conv bias.
+
+Every GPU generation: the kernel is plain SIMD (float arithmetic, ``simd_sum``,
+one 32-thread simdgroup per row and head, no threadgroup memory) with no
+tensor units, so it runs on M1 to M5, but only an M5 has measured it.  The
+load-time self-check (``mtplx.kernel_selfcheck``, lane
+``qwen4_gdn_prefill_prework``) compares q, k and v with the eager chain's bits
+on this GPU and turns it off for the process on any difference or a build or
+launch failure.
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 import mlx.core as mx
+
+from ..kernel_selfcheck import lane_disabled
+
+ENV = "MTPLX_QWEN4_GDN_PREFILL_PREWORK"
+LANE = "qwen4_gdn_prefill_prework"
 
 _CONV_DIM = 10240
 _KEY_DIM = 2048
@@ -86,6 +100,19 @@ _SOURCE = """
         for (int j = 0; j < 4; ++j) dst[j] = T(vals[j] * inv);
     }
 """
+
+
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
+    raw = (os.environ.get(ENV) or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU."""
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 @lru_cache(maxsize=1)

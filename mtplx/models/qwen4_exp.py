@@ -626,12 +626,14 @@ def _hc_prefill_read_enabled() -> bool:
     """The fused hyper-connection READ at prefill width (mtplx.kernels.hc_prefill).
 
     On by default; ``MTPLX_QWEN4_HC_PREFILL_READ=0`` restores the eager chain
-    (the rollback and the A/B arm).  The kernel admits only the family's own
-    geometry and bf16 weights, so everything else keeps the eager chain.
+    (the rollback and the A/B arm), and so does a failed load-time self-check
+    on this GPU.  The kernel admits only the family's own geometry and bf16
+    weights, so everything else keeps the eager chain.
     """
 
-    raw = (os.environ.get("MTPLX_QWEN4_HC_PREFILL_READ") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    from mtplx.kernels import hc_prefill
+
+    return hc_prefill.enabled()
 
 
 @lru_cache(maxsize=None)
@@ -710,10 +712,12 @@ _GDN_GATED_NORM_MIN_ROWS = 32
 
 def _gdn_gated_norm_fused_applies(hidden_states, x, gate) -> bool:
     """The fused output gate for prefill-width GDN norms (on by default;
-    ``MTPLX_QWEN4_GDN_GATED_NORM=0`` keeps the stock expression)."""
+    ``MTPLX_QWEN4_GDN_GATED_NORM=0`` keeps the stock expression, and so does
+    a failed load-time self-check on this GPU)."""
 
-    raw = (os.environ.get("MTPLX_QWEN4_GDN_GATED_NORM") or "1").strip().lower()
-    if raw in {"0", "false", "no", "off"}:
+    from mtplx.kernels import gdn_gated_norm
+
+    if not gdn_gated_norm.enabled():
         return False
     if hidden_states.dtype != mx.bfloat16 or hidden_states.ndim < 3:
         return False
@@ -722,9 +726,7 @@ def _gdn_gated_norm_fused_applies(hidden_states, x, gate) -> bool:
         rows *= int(dim)
     if rows < _GDN_GATED_NORM_MIN_ROWS or current_attention_phase() != "prefill":
         return False
-    from mtplx.kernels.gdn_gated_norm import gated_eligible
-
-    return gated_eligible(x, gate)
+    return gdn_gated_norm.gated_eligible(x, gate)
 
 
 #: GDN forwards at least this wide run the fused prefill prework.
@@ -732,8 +734,11 @@ _GDN_PREFILL_PREWORK_MIN_ROWS = 32
 
 
 def _gdn_prefill_prework_enabled() -> bool:
-    raw = (os.environ.get("MTPLX_QWEN4_GDN_PREFILL_PREWORK") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    # On by default; MTPLX_QWEN4_GDN_PREFILL_PREWORK=0 or a failed load-time
+    # self-check on this GPU keeps the staged chain.
+    from mtplx.kernels import gdn_prefill_prework
+
+    return gdn_prefill_prework.enabled()
 
 
 class GatedDeltaNet(_Qwen3_5GatedDeltaNet):
@@ -1342,13 +1347,17 @@ _MOE_PREFILL_COMBINE_MIN_ROWS = 32
 
 
 def _moe_prefill_combine_enabled() -> bool:
-    raw = (os.environ.get("MTPLX_QWEN4_MOE_PREFILL_COMBINE") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    # On by default; MTPLX_QWEN4_MOE_PREFILL_COMBINE=0 or a failed load-time
+    # self-check on this GPU keeps the stock tail.
+    from mtplx.kernels import qwen4_moe_prefill_combine
+
+    return qwen4_moe_prefill_combine.enabled()
 
 
 def _moe_prefill_combine_applies(block, x: mx.array) -> bool:
     """The fused MoE combine for prefill-width forwards (on by default;
-    ``MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`` keeps the stock tail)."""
+    ``MTPLX_QWEN4_MOE_PREFILL_COMBINE=0`` keeps the stock tail, and so does a
+    failed load-time self-check on this GPU)."""
 
     if x.ndim < 2 or x.dtype != mx.bfloat16:
         return False

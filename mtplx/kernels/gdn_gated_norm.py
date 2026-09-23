@@ -12,13 +12,26 @@ the installed MLX computed with its own ``mx.sigmoid`` (so JIT and metallib
 transcendentals can never disagree), and the product and the bf16 round are
 the stock ones.  The result is bit-identical to the stock expression
 (tests/test_gdn_gated_norm.py).
+
+Every GPU generation: the kernel is plain SIMD (a table read, one float
+multiply, 256-thread groups) with no tensor units, so it runs on M1 to M5, but
+only an M5 has measured it.  The load-time self-check
+(``mtplx.kernel_selfcheck``, lane ``qwen4_gdn_gated_norm``) compares its bits
+with the stock expression on this GPU and turns it off for the process on any
+difference or a build or launch failure.
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 import mlx.core as mx
+
+from ..kernel_selfcheck import lane_disabled
+
+ENV = "MTPLX_QWEN4_GDN_GATED_NORM"
+LANE = "qwen4_gdn_gated_norm"
 
 _SOURCE = """
     const uint i = thread_position_in_grid.x;
@@ -45,6 +58,19 @@ def _kernel():
         output_names=["out"],
         source=_SOURCE,
     )
+
+
+def switched_on() -> bool:
+    """The user's switch alone (default on)."""
+
+    raw = (os.environ.get(ENV) or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def enabled() -> bool:
+    """Switched on, and not turned off by the load-time self-check on this GPU."""
+
+    return switched_on() and not lane_disabled(LANE)
 
 
 def gated_eligible(x: mx.array, gate: mx.array) -> bool:
