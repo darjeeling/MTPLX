@@ -6,7 +6,7 @@ import pytest
 
 from scripts import build_flash_next_quality_pack as build
 from mtplx.commands.forge_qwen4_audit import audit_pack, quality_metadata
-from mtplx.commands.forge_qwen4_exp import named_recipe, QUALITY_RECIPE
+from mtplx.commands.forge_qwen4_exp import named_recipe, QUALITY_NAME, QUALITY_RECIPE
 from test_forge_qwen4_exp_lane import _audit_fixture
 
 
@@ -42,7 +42,7 @@ def test_pipeline_only_uploads_after_full_verify_and_smoke(tmp_path, monkeypatch
     (source / "README.md").write_text("fixture upstream card")
     audit = audit_pack(source, fixture, named_recipe(QUALITY_RECIPE))
     meta = quality_metadata({"revision": "test-sha", "revision_kind": "hub-commit"}, audit)
-    output = tmp_path / build.QUALITY_NAME
+    output = tmp_path / QUALITY_NAME
     steps = []
     monkeypatch.setattr(build, "preflight", lambda plan: {"test": True})
     def step(run, label, command, **kwargs):

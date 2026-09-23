@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mtplx.commands.forge_qwen4_exp import (
-    OFFICIAL_SOURCE_REPO, QUALITY_NAME, QUALITY_RECIPE, QUALITY_REPO, QUALITY_SERVED_ID,
+    OFFICIAL_SOURCE_REPO, QUALITY_RECIPE, QUALITY_REPO, QUALITY_SERVED_ID,
 )
 from mtplx.commands.forge_qwen4_audit import checksum
 
