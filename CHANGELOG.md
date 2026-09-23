@@ -431,7 +431,9 @@ All notable user-facing changes to MTPLX. The format is based on
   record is still open, and `mtplx inspect` exited with code 3. They now show
   "Official MTPLX pack, qualification pending" while the exactness
   measurement is still to be published, the pack runs, and `mtplx inspect`
-  exits with 0.
+  exits with 0. Bonsai 2's measurement is published (mean KL 4.0e-6 against
+  Prism ML's runtime in float16, 1.1e-7 with float32 auxiliary tensors), so
+  it shows as verified.
 - **A pack that needs a newer MTPLX is refused before any weight is read.**
   When a pack's `min_engine_version` is newer than the running engine,
   `mtplx serve` and `mtplx inspect` stop with "This model needs MTPLX X or

@@ -110,10 +110,12 @@ accepted.
 The runtime contract names the trunk family `qwen3_8` and the quantization
 container `prism_hadamard_qwen35`, and it sets `min_engine_version: 2.12.0`.
 The `mtplx_version` field records the MTPLX version that first built the pack.
-Its exactness record stays open until a measured parity result is stamped with
-`--exactness-json` and `--exactness-status`. The loader parity against Prism
-ML's own runtime, a mean KL divergence of 2.6e-6 in a float16 comparison on a
-synthetic pack, tests the loader rather than the model and is not quoted on the
-card. The card's memory section shows one row per RAM class: the planner's
+Its exactness record was measured on 22 September 2026 and stamped as passed
+with `--exactness-json` and `--exactness-status`. Against Prism ML's own
+runtime, on identical tokens and image pixels over 1,920 text positions, the
+mean KL divergence is 4.0e-6 in MTPLX's float16 default, where the top token
+matches at 1,919 positions and the other is an exact tie in float16. With the
+auxiliary tensors in float32 it is 1.1e-7, and the top token matches at every
+position. The card's memory section shows one row per RAM class: the planner's
 context window, with the 8-bit KV cache window when it differs, and the highest
 peak among the runs that completed inside the budget.

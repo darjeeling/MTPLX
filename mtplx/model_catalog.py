@@ -321,7 +321,7 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
         detail="Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs.",
         hf_model_id="Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed",
         # Published Hub bytes (2026-09-22) and the measured 8K context peak.
-        size_bytes=8_847_918_468, peak_memory_gib=11.80,
+        size_bytes=8_847_919_618, peak_memory_gib=11.80,
         recommended_tiers=frozenset({MODERN_TIER}),
         aliases=(
             "mtplx-bonsai-2-27b-optimized-speed",

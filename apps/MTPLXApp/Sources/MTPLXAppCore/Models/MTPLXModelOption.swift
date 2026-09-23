@@ -768,7 +768,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
                 "mtplx-bonsai-38-27b-optimized-speed",
             ],
             // Published Hub bytes (2026-09-22) and the measured 8K context peak.
-            sizeBytes: 8_847_918_468, peakMemoryGiB: 11.80,
+            sizeBytes: 8_847_919_618, peakMemoryGiB: 11.80,
             recommendedFor: [.modernApple]
         ),
         MTPLXModelOption(
