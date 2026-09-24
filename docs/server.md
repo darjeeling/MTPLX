@@ -323,3 +323,9 @@ and OpenCode never receive it, so no flag is needed for them.
 `--no-stats-footer` still turns it off everywhere, and
 `MTPLX_STATS_FOOTER_SCOPE=all` restores the pre-2.5.3 behavior. Metrics
 remain available at `/metrics`.
+
+## Private TLS and metadata-only logging
+
+See [IP-based private certificates and Uvicorn mTLS (한국어)](private-tls.md)
+for certificate issuance, opt-in HTTPS/mTLS serving, metadata-only usage logs,
+and a Pydantic AI client example. Localhost HTTP remains the default.

@@ -70,7 +70,13 @@ from fastapi.responses import (
 )
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from mtplx import progress_heartbeat
+from mtplx import log_privacy, progress_heartbeat
+from mtplx.server_security import (
+    add_server_security_args,
+    serving_url,
+    tls_kwargs,
+    validate_tls,
+)
 from mtplx.a3b_mtp_batch import (
     A3B_MTP_BATCH_MAX_CONTEXT_TOKENS,
     A3BMTPBatchCapacityError,
@@ -2072,9 +2078,12 @@ def _laguna_fused_startup_line(runtime: Any) -> str | None:
 
 
 def _startup_server_url(args: argparse.Namespace) -> str:
-    return local_url_for_bind(
-        str(getattr(args, "host", "127.0.0.1")),
-        int(getattr(args, "port", 8000)),
+    return serving_url(
+        local_url_for_bind(
+            str(getattr(args, "host", "127.0.0.1")),
+            int(getattr(args, "port", 8000)),
+        ),
+        args,
     )
 
 
@@ -5034,6 +5043,10 @@ def _is_localhost_bind(host: str | None) -> bool:
 
 
 def validate_server_security_args(args: argparse.Namespace) -> None:
+    try:
+        validate_tls(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     if not _is_localhost_bind(getattr(args, "host", None)) and not getattr(
         args, "api_key", None
     ):
@@ -15495,6 +15508,8 @@ def _redact_request_log_record(record: dict[str, Any]) -> dict[str, Any]:
     same key so forensics can still correlate turns. MTPLX_REQUEST_LOG_CONTENT=1
     opts back into literal previews for local debugging.
     """
+    if log_privacy.metadata_only():
+        return log_privacy.usage_record(record)
     if _request_log_content_opt_in():
         return record
     redacted = record
@@ -15589,8 +15604,13 @@ def _record_request_metrics(state: "ServerState", record: dict[str, Any]) -> Non
     if not path:
         return
     try:
+        durable = (
+            log_privacy.usage_record(safe)
+            if log_privacy.metadata_only(state.args)
+            else _redact_request_log_record(safe)
+        )
         line = json.dumps(
-            {"logged_at_s": time.time(), **_redact_request_log_record(safe)},
+            {"logged_at_s": time.time(), **durable},
             ensure_ascii=False,
             default=str,
         )
@@ -16331,6 +16351,8 @@ def _stream_census_record(
     full silence (~250 ms) and the last show ~0 (2026-08-19 cache-hit
     lumps, Opus audit).
     """
+    if log_privacy.metadata_only():
+        return
     try:
         t_mono = time.perf_counter()
         t_wall = time.time()
@@ -22960,6 +22982,8 @@ def _dump_postcommit_mismatch(
     re-serialisation, a stripped preamble, a BPE seam -- is a guess.
     """
 
+    if log_privacy.metadata_only(state.args):
+        return
     directory = (os.environ.get("MTPLX_DEBUG_POSTCOMMIT_MISMATCH_DIR") or "").strip()
     if not directory:
         return
@@ -38166,6 +38190,7 @@ def _apply_backend_server_defaults(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
+    add_server_security_args(parser)
     postcommit_default = os.environ.get("MTPLX_SESSION_POSTCOMMIT_MODE", "async")
     if postcommit_default not in {"inline", "async"}:
         postcommit_default = "async"
@@ -39011,6 +39036,7 @@ def _refuse_unresolvable_retrieval_models(registry: Any) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     validate_server_security_args(args)
+    log_privacy.activate(args)
     set_stream_stall_deadline_s(getattr(args, "stream_stall_deadline_s", None))
     _start_aime_parent_watchdog_from_env()
     try:
@@ -39028,8 +39054,11 @@ def main(argv: list[str] | None = None) -> None:
         _startup_line("Listening: " + _startup_bind_label(args))
         _startup_line("Local Chat UI: " + chat_url)
         _startup_line("Local OpenAI API Base URL: " + _startup_openai_base_url(args))
-        network_url = network_url_for_bind(
-            getattr(args, "host", None), int(args.port), path="/v1"
+        network_url = serving_url(
+            network_url_for_bind(
+                getattr(args, "host", None), int(args.port), path="/v1"
+            ),
+            args,
         )
         if network_url:
             _startup_line(
@@ -39103,14 +39132,21 @@ def main(argv: list[str] | None = None) -> None:
     # uvicorn wait forever on Ctrl-C. The deadline lets in-flight requests
     # finish, then cancels lingering streams and exits normally — atexit
     # cleanup (thermal restore) still runs, unlike a hard os._exit.
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="warning",
-        access_log=False,
-        timeout_graceful_shutdown=5,
-    )
+    if log_privacy.metadata_only(args):
+        _startup_line(
+            "Log privacy: metadata-only; usage JSONL retained, "
+            "raw console/capture/trace disabled; caches unchanged."
+        )
+    with log_privacy.private_console(args):
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="warning",
+            access_log=False,
+            **tls_kwargs(args),
+            timeout_graceful_shutdown=5,
+        )
 
 
 if __name__ == "__main__":

@@ -9213,6 +9213,8 @@ def _print_serve_start_banner(args: Any) -> None:
     from mtplx.version import DISPLAY_VERSION
     from mtplx.ui import render_banner, render_startup_panel
 
+    from mtplx.server_security import serving_url
+
     host = str(getattr(args, "host", "127.0.0.1"))
     port = int(getattr(args, "port", 8000))
     profile_name = getattr(args, "profile", None) or DEFAULT_PROFILE_NAME
@@ -9225,8 +9227,8 @@ def _print_serve_start_banner(args: Any) -> None:
     )
     model_label = getattr(args, "model_id", None) or DEFAULT_PUBLIC_MODEL_ID
     runtime_model = getattr(args, "model", DEFAULT_RUNTIME_MODEL_DIR)
-    api_url = f"{_server_url(host, port)}/v1"
-    chat_url = _chat_url(host, port)
+    api_url = f"{serving_url(_server_url(host, port), args)}/v1"
+    chat_url = serving_url(_chat_url(host, port), args)
     api_key = getattr(args, "api_key", None)
     api_note = "API key required" if api_key else "API key: leave blank for localhost"
 
@@ -9251,22 +9253,24 @@ def _print_serve_start_banner(args: Any) -> None:
 
 
 def _print_serve_handoff(args: Any, runtime_model: str, profile_name: str) -> None:
+    from mtplx.server_security import serving_url
+
     if is_wildcard_bind(getattr(args, "host", None)):
         _print_serve_start_line(
             "[1/6] Server config ready: listening on "
             f"{bind_label(args.host, int(args.port))}"
         )
         _print_serve_start_line(
-            f"      Local API Base URL: {_server_url(args.host, int(args.port))}/v1"
+            f"      Local API Base URL: {serving_url(_server_url(args.host, int(args.port)), args)}/v1"
         )
-        network_url = network_url_for_bind(args.host, int(args.port), path="/v1")
+        network_url = serving_url(network_url_for_bind(args.host, int(args.port), path="/v1"), args)
         if network_url:
             _print_serve_start_line(
                 f"      Network API Base URL: {network_url} (other devices + VM guests)"
             )
     else:
         _print_serve_start_line(
-            f"[1/6] Server config ready: {_server_url(args.host, int(args.port))}/v1"
+            f"[1/6] Server config ready: {serving_url(_server_url(args.host, int(args.port)), args)}/v1"
         )
     _print_serve_start_line(f"[2/6] Model resolved: {runtime_model}")
     _print_serve_start_line(f"[3/6] Runtime contract verified — profile: {profile_name}")
@@ -9334,9 +9338,11 @@ def _serve_dry_run_payload(
     cmd: list[str],
     env: dict[str, str],
 ) -> dict[str, Any]:
+    from mtplx.server_security import serving_url
+
     host = str(getattr(args, "host", "127.0.0.1"))
     port = int(getattr(args, "port", 8000))
-    base_url = _server_url(host, port)
+    base_url = serving_url(_server_url(host, port), args)
     argv = _redact_command_tokens(cmd)
     payload: dict[str, Any] = {
         "dry_run": True,
@@ -9348,7 +9354,7 @@ def _serve_dry_run_payload(
         "host": host,
         "port": port,
         "api_base_url": f"{base_url}/v1",
-        "chat_url": _chat_url(host, port),
+        "chat_url": serving_url(_chat_url(host, port), args),
         "fan_mode": str(getattr(args, "fan_mode", "default") or "default"),
         "generation_mode": str(generation_mode),
         "depth": int(getattr(args, "depth", 3)),
@@ -9375,6 +9381,8 @@ def _serve_should_onboard(args: Any) -> bool:
     if getattr(args, "command", None) != "serve":
         return False
     if bool(getattr(args, "yes", False)):
+        return False
+    if getattr(args, "ssl_certfile", None) or getattr(args, "log_privacy", None):
         return False
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
@@ -9586,6 +9594,13 @@ def _resolve_runtime_options_on_args(
 
 
 def cmd_serve_public(args: Any) -> int:
+    from mtplx.server_security import validate_tls
+
+    try:
+        validate_tls(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     dry_run = bool(getattr(args, "dry_run", False))
     quiet_json = dry_run and bool(getattr(args, "json", False))
     agent_rewrites = getattr(args, "agent_rewrites", None)
@@ -9698,6 +9713,12 @@ def cmd_serve_public(args: Any) -> int:
     if not dry_run and _port_is_busy(
         str(getattr(args, "host", "127.0.0.1")), int(getattr(args, "port", 8000))
     ):
+        if getattr(args, "ssl_certfile", None) or getattr(args, "log_privacy", None):
+            _print_serve_start_line(
+                "error: port is in use; stop the existing server or select another port "
+                "to apply TLS/log privacy options"
+            )
+            return 2
         if bool(getattr(args, "quickstart_pi", False)):
             base = _server_url(
                 str(getattr(args, "host", "127.0.0.1")),
@@ -10241,6 +10262,9 @@ def cmd_serve_public(args: Any) -> int:
     ngram_prewarm_order = getattr(args, "ngram_prewarm_order", None)
     if ngram_prewarm_order:
         cmd.extend(["--ngram-prewarm-order", str(ngram_prewarm_order)])
+    from mtplx.server_security import server_security_argv
+
+    cmd.extend(server_security_argv(args))
     api_key_source = str(getattr(args, "api_key_source", "none") or "none")
     api_key_file = getattr(args, "api_key_file", None)
     if api_key and api_key_source == "flag":

@@ -535,6 +535,10 @@ def resolve_flight_recorder(args: Any) -> FlightRecorder:
     """Build the process recorder from --flight-recorder / MTPLX_FLIGHT_RECORDER
     (off|on|<path>; default ON at ~/.mtplx/metrics/flight-<port>.jsonl) and
     MTPLX_FLIGHT_TEXT (abnormal|always|off; default abnormal)."""
+    from mtplx.log_privacy import metadata_only
+
+    if metadata_only(args):
+        return FlightRecorder(None, text_mode="off")
     raw = getattr(args, "flight_recorder", None) or os.environ.get(
         "MTPLX_FLIGHT_RECORDER"
     )

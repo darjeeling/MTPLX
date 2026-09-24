@@ -232,7 +232,9 @@ def _eval_value_summary(value: Any) -> dict[str, Any]:
 
 
 def _eval(*values: Any, _caller_depth: int = 1) -> None:
-    audit_path = os.environ.get("MTPLX_EVAL_AUDIT")
+    from mtplx.log_privacy import metadata_only
+
+    audit_path = None if metadata_only() else os.environ.get("MTPLX_EVAL_AUDIT")
     if not audit_path:
         mx.eval(*values)
         # Every settled engine forward (prefill chunk, verify, AR step) proves
@@ -2464,7 +2466,9 @@ class _DecodeTrace:
         trace_label: str | None,
         trace_metadata: dict[str, Any] | None,
     ) -> None:
-        trace_path = os.environ.get("MTPLX_DECODE_TRACE_JSONL")
+        from mtplx.log_privacy import metadata_only
+
+        trace_path = None if metadata_only() else os.environ.get("MTPLX_DECODE_TRACE_JSONL")
         self.enabled = bool(trace_path)
         self.path = Path(trace_path).expanduser() if trace_path else None
         self.interval_s = max(

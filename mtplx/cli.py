@@ -2675,6 +2675,9 @@ def build_parser() -> argparse.ArgumentParser:
             "add --api-key-file ~/.mtplx/api-key to generate one)"
         ),
     )
+    from mtplx.server_security import add_server_security_args
+
+    add_server_security_args(quickstart_server_p)
     quickstart_server_p.add_argument("--port", type=int, default=8000)
     quickstart_server_p.add_argument("--model-id", default=DEFAULT_PUBLIC_MODEL_ID, help="Served OpenAI model id; defaults to the loaded artifact identity")
     quickstart_server_p.add_argument(
@@ -3654,6 +3657,7 @@ def build_parser() -> argparse.ArgumentParser:
             "add --api-key-file ~/.mtplx/api-key to generate one)"
         ),
     )
+    add_server_security_args(serve_p)
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument(
         "--no-auth",

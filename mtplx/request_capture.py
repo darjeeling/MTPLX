@@ -122,6 +122,10 @@ class CaptureOptions:
 
 
 def capture_dir() -> str | None:
+    from mtplx.log_privacy import metadata_only
+
+    if metadata_only():
+        return None
     raw = str(os.environ.get("MTPLX_REQUEST_CAPTURE_DIR", "")).strip()
     return raw or None
 
