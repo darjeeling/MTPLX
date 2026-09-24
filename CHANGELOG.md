@@ -4,7 +4,7 @@ All notable user-facing changes to MTPLX. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [2.12.0] - 2026-09-22
+## [2.12.0] - 2026-09-23
 
 ### Added
 
