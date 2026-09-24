@@ -118,6 +118,7 @@ The catalog lists MTPLX packs under [Youssofal](https://huggingface.co/Youssofal
 | `Qwen3.5-4B-MTPLX-Optimized-Speed` | 8 GB and up, peaks at 2.9 GiB | 4-bit. The fastest fit for smaller Macs. | Sustained, depth 3 |
 | `Qwen3.5-4B-MTPLX-Optimized-Quality` | 8 GB and up, peaks at 4.8 GiB | 8-bit. The highest-fidelity 4B. | Sustained, depth 3 |
 | `Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed` | 16 GB and up (8K window on 16 GB), peaks at 11.80 GiB | Prism ML's ternary 27B with vision and MTP, in half the memory of the 4-bit 27B. | MTP, depth 1, reasoning medium |
+| `MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed` | 16 GB and up, peaks at 10.0 GiB | 6-bit. Xiaomi's agentic coding distill of Qwen 3.5 9B, with the Qwen 3.5 9B MTP head. | Sustained, depth 2 |
 | `Qwen3.5-9B-MTPLX-Optimized-Speed` | 16 GB and up, peaks at 10.0 GiB | 6-bit. The strong small-Mac speed pick. | Turbo. Tuning this one on a 16 GB M4 Mac mini lands on depth 1 |
 | `Qwen3.8-27B-MTPLX-Bare-Speed` | 32 GB and up, peaks at 20.0 GiB | Quickest burst chat speeds. Lower quality and slower on long coding tasks. | Turbo, depth 3 |
 | `Qwen3.8-27B-MTPLX-Optimized-Speed` | 32 GB and up, peaks at 25.0 GiB | 4-bit dynamic quant. Great coding speeds and good quality. The recommended coding model. | Turbo, depth 3 |
@@ -185,7 +186,7 @@ Forge takes a Hugging Face repo and turns it into an MTPLX-ready MTP model: conv
 
 MTPLX does not support attaching a separately supplied MTP sidecar to an arbitrary MLX trunk. Matching architecture fields, tensor shapes, or provenance labels cannot prove that the head was trained against those exact trunk weights. Use a complete model that already includes its matching MTP weights, or use Forge to build and verify an artifact from its original source checkpoint.
 
-The official catalog lives on Hugging Face under [Youssofal](https://huggingface.co/Youssofal): Qwen 3.8 Flash Next (Optimized Speed, Bare Speed, Optimized Quality), Ternary Bonsai 2 27B, Qwen 3.8 27B (Bare Speed, Optimized Speed, Optimized Quality, each with an FP16 build for M1 and M2), Qwen 3.6 (27B, 35B MoE) in speed and quality builds (the 35B MoE adds a balance build), Qwen 3.5 (4B, 9B), plus Gemma 4. The app and the CLI recommend from these based on your hardware.
+The official catalog lives on Hugging Face under [Youssofal](https://huggingface.co/Youssofal): Qwen 3.8 Flash Next (Optimized Speed, Bare Speed, Optimized Quality), Ternary Bonsai 2 27B, Qwen 3.8 27B (Bare Speed, Optimized Speed, Optimized Quality, each with an FP16 build for M1 and M2), Qwen 3.6 (27B, 35B MoE) in speed and quality builds (the 35B MoE adds a balance build), Qwen 3.5 (4B, 9B), Xiaomi's MiMo V2.6 Qwen 9B, plus Gemma 4. The app and the CLI recommend from these based on your hardware.
 
 ## The server
 

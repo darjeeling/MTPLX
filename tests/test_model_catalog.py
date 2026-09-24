@@ -45,10 +45,10 @@ def _no_installed_qwen38(monkeypatch):
     monkeypatch.setattr(default_models_module, "_QWEN38_OPTIMIZED_SPEED_FP16_LOCAL_CANDIDATES", ())
 
 
-def test_catalog_has_twenty_five_unique_entries():
+def test_catalog_has_twenty_six_unique_entries():
     ids = [model.id for model in OFFICIAL_CATALOG]
-    assert len(ids) == len(set(ids)) == 25
-    assert len({model.hf_model_id for model in OFFICIAL_CATALOG}) == 25
+    assert len(ids) == len(set(ids)) == 26
+    assert len({model.hf_model_id for model in OFFICIAL_CATALOG}) == 26
 
 
 def test_qwen38_fp16_siblings_mirror_their_parents():
@@ -132,6 +132,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
     ]
     assert recommended_catalog_ids(memory_gib=24, chip_tier=MODERN_TIER) == [
         "bonsai-2-27b-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",
@@ -148,6 +149,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         *trio38,
         "optimized-speed-v2",
         "optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "gemma4-optimized-speed",
         "qwen36-35b-a3b-optimized-speed",
@@ -165,6 +167,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "qwen36-35b-a3b-optimized-speed",
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "bonsai-2-27b-optimized-speed",
         "qwen35-4b-optimized-speed",
@@ -206,6 +209,7 @@ def test_recommended_ids_mirror_app_ram_tiers():
         "qwen36-35b-a3b-optimized-speed",
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "bonsai-2-27b-optimized-speed",
     ]
@@ -223,6 +227,7 @@ def test_recommended_models_filter_by_peak_memory():
     models = recommended_models(memory_gib=24, chip_tier=MODERN_TIER)
     assert [model.id for model in models] == [
         "bonsai-2-27b-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-4b-optimized-quality",

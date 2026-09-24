@@ -33,6 +33,9 @@ sys.path.insert(0, str(REPO_ROOT))
 BLESSED = {
     "Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Quality": "2.12.0",
     "Youssofal/Ternary-Bonsai-2-27B-MTPLX-Optimized-Speed": "2.12.0",
+    # MiMo V2.6 Qwen 9B joined the catalog in 2.12.0, the engine that keys the
+    # MiMo family on the checkpoint's architecture instead of its folder name.
+    "Youssofal/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed": "2.12.0",
     # Flash-Next (qwen4_exp) needs the family backend + streamed n-gram
     # accounting that ship in 2.10.0.
     "Youssofal/Qwen3.8-Flash-Next-MTPLX-Bare-Speed": "2.10.0",

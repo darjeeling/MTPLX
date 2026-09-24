@@ -1275,7 +1275,11 @@ private enum ModelLaunchFamily {
         }
         // 9B (6-bit) family, incl. the -FP16 sibling. Promoted to turbo
         // 2026-07-07 with the 6-bit hexpack split-K kernels (live ABBA:
-        // MTP D3 110/102 vs sustained 90/69 tok/s, AR flat).
+        // MTP D3 110/102 vs sustained 90/69 tok/s, AR flat). MiMo V2.6 Qwen
+        // 9B shares the 6-bit geometry but falls through to .qwenDefault:
+        // like the CLI's turbo allowlist, it waits for a turbo measurement
+        // on its own weights, and the engine's qwen3_5 contract already
+        // serves it the 0.6/0.95/20 sampler.
         if normalized.contains("qwen3.5-9b-mtplx-optimized-speed")
             || normalized.contains("qwen35-9b-optimized-speed")
         {

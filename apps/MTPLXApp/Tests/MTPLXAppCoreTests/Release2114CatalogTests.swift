@@ -26,7 +26,7 @@ final class Release2114CatalogTests: XCTestCase {
                 XCTAssertEqual(MTPLXModelOption.option(matching: MTPLXAppConfiguration.defaultLocalModelPath(for: hardware))?.id, firstID)
             }
         }
-        XCTAssertEqual(MTPLXModelOption.officialCatalog.count, 25)
+        XCTAssertEqual(MTPLXModelOption.officialCatalog.count, 26)
     }
 
     func testBonsaiBoundCanMoveWithoutDroppingTheOption() {
@@ -34,7 +34,8 @@ final class Release2114CatalogTests: XCTestCase {
         for ram in [16, 18, 24] {
             let hardware = DetectedHardware(chipName: "Apple M5", appleSiliconGeneration: "m5", unifiedMemoryBytes: Int64(ram) * 1_073_741_824)
             let ids = MTPLXModelOption.recommendedCatalogIDs(for: hardware, bonsaiMinimumGiB: 24)
-            XCTAssertEqual(ids.first, ram < 24 ? "qwen35-9b-optimized-speed" : "bonsai-2-27b-optimized-speed")
+            // Below a moved bound Bonsai follows the 9B-class picks, led by MiMo.
+            XCTAssertEqual(ids.first, ram < 24 ? "mimo-v26-qwen-9b-optimized-speed" : "bonsai-2-27b-optimized-speed")
             XCTAssertTrue(ids.contains("bonsai-2-27b-optimized-speed"))
         }
     }

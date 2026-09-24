@@ -215,6 +215,7 @@ def _app_picker_first_small_pack(memory_gib: float, chip_tier: str) -> str:
 
     small = {
         "bonsai-2-27b-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-4b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "qwen35-9b-optimized-speed-fp16",

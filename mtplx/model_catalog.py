@@ -92,6 +92,27 @@ OFFICIAL_CATALOG: tuple[CatalogModel, ...] = (
             "Qwen 3.5 4B Quality",
         ),
     ),
+    # MiMo V2.6 Qwen 9B (2026-09-23): Xiaomi's supervised fine-tune of Qwen3.5-9B
+    # for agentic coding (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B, MIT), packed like
+    # the 6-bit 9B: 6-bit group-64 body, the Qwen3.5-9B MTP head and the vision
+    # tower in BF16. The architecture is plain Qwen 3.5, so it takes the Qwen 3.5
+    # contract, never the MiMo one. No FP16 sibling exists, so M1 and M2 are not
+    # offered it. Mirrors MTPLXModelOption.officialCatalog.
+    CatalogModel(
+        id="mimo-v26-qwen-9b-optimized-speed",
+        display_name="MiMo V2.6 Qwen 9B Optimized Speed",
+        detail="6-bit quantization. Xiaomi's agentic coding distill of Qwen 3.5 9B.",
+        hf_model_id="Youssofal/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+        # Published Hub bytes (2026-09-23). Same geometry and bytes as the 6-bit
+        # 9B, so its peak carries over; measured 8.70 GiB at 15K tokens.
+        size_bytes=8_695_116_595,
+        peak_memory_gib=10.0,
+        recommended_tiers=frozenset({MODERN_TIER}),
+        aliases=(
+            "mtplx-mimo-v26-qwen-9b-optimized-speed",
+            "MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+        ),
+    ),
     CatalogModel(
         id="qwen35-9b-optimized-speed",
         display_name="Qwen 3.5 9B Optimized Speed",
@@ -516,8 +537,18 @@ _MODERN_TOP_RECOMMENDATION_IDS = (
     "qwen36-35b-a3b-optimized-speed",
     "qwen36-35b-a3b-optimized-balance",
     "gemma4-optimized-speed",
+    "mimo-v26-qwen-9b-optimized-speed",
     "qwen35-9b-optimized-speed",
     "bonsai-2-27b-optimized-speed",
+)
+
+# The 9B-class speed picks on modern chips. MiMo V2.6 Qwen 9B rides
+# immediately ahead of the Qwen 3.5 9B wherever the 9B is offered, so it is a
+# top onboarding suggestion (founder, 2026-09-23) without replacing any tier's
+# first pick. Mirrors MTPLXModelOption.modernSmallIDs.
+_MODERN_SMALL_IDS = (
+    "mimo-v26-qwen-9b-optimized-speed",
+    "qwen35-9b-optimized-speed",
 )
 
 # Flash-Next options on modern chips; Optimized Speed and Quality lead from
@@ -585,14 +616,14 @@ def recommended_catalog_ids(
     if chip_tier == INTEL_TIER:
         return []
     if chip_tier == LEGACY_TIER:
-        small = "qwen35-9b-optimized-speed-fp16"
+        small = ["qwen35-9b-optimized-speed-fp16"]
         speed27 = "optimized-speed-fp16"
         speed27_v2 = None
         speed35 = "qwen36-35b-a3b-optimized-speed-fp16"
         balance35 = "qwen36-35b-a3b-optimized-balance-fp16"
         quality27 = "optimized-quality-fp16"
     else:
-        small = "qwen35-9b-optimized-speed"
+        small = list(_MODERN_SMALL_IDS)
         speed27 = "optimized-speed"
         speed27_v2 = "optimized-speed-v2"
         speed35 = "qwen36-35b-a3b-optimized-speed"
@@ -612,7 +643,7 @@ def recommended_catalog_ids(
         trio38 = [f"{model_id}-fp16" for model_id in trio38]
     if memory_gib is None or memory_gib <= 0:
         if chip_tier == LEGACY_TIER:
-            return [*trio38, speed27, quality27, speed35, balance35, "gemma4-optimized-speed", small]
+            return [*trio38, speed27, quality27, speed35, balance35, "gemma4-optimized-speed", *small]
         return list(_MODERN_TOP_RECOMMENDATION_IDS)
     # The rebuilt 4B pair leads the sub-16GB tiers and trails every larger
     # modern tier so it stays discoverable as the fast-small pick. No fp16 4B
@@ -623,21 +654,21 @@ def recommended_catalog_ids(
         else []
     )
     if memory_gib < 16:
-        return tiny_ids or [small]
+        return tiny_ids or small
     if memory_gib < 32:
         if chip_tier == LEGACY_TIER:
-            return [small]
+            return small
         bonsai = "bonsai-2-27b-optimized-speed"
-        leading = [bonsai, small] if memory_gib >= BONSAI_RECOMMENDATION_MIN_GIB else [small, bonsai]
+        leading = [bonsai, *small] if memory_gib >= BONSAI_RECOMMENDATION_MIN_GIB else [*small, bonsai]
         return [*leading, *tiny_ids]
     if memory_gib < 48:
         if speed27_v2 is None:
-            return [*trio38, small, speed27, "gemma4-optimized-speed", speed35, quality27]
+            return [*trio38, *small, speed27, "gemma4-optimized-speed", speed35, quality27]
         return [
             *trio38,
             speed27_v2,
             speed27,
-            small,
+            *small,
             "gemma4-optimized-speed",
             speed35,
             quality27,
@@ -665,7 +696,7 @@ def recommended_catalog_ids(
         speed35,
         balance35,
         "gemma4-optimized-speed",
-        small,
+        *small,
         *(["bonsai-2-27b-optimized-speed"] if chip_tier != LEGACY_TIER else []),
         *tiny_ids,
     ]

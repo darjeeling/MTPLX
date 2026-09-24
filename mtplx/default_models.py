@@ -36,6 +36,8 @@ from mtplx.profiles import (
     FLASH_NEXT_OPTIMIZED_SPEED_HF_MODEL_ID,
     FLASH_NEXT_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
     LEGACY_OPTIMIZED_PUBLIC_MODEL_ID,
+    MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+    MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
     OPTIMIZED_SPEED_V1_HF_MODEL_ID,
     OPTIMIZED_SPEED_V1_PUBLIC_MODEL_ID,
     OPTIMIZED_SPEED_V2_HF_MODEL_ID,
@@ -83,11 +85,19 @@ _NEWER_APPLE_SPEED_GENERATIONS = frozenset({"m3", "m4", "m5"})
 # default routes to the smaller pack the app's picker lists first (the 9B
 # and Bonsai from its named tier bound, the 4B below 16 GiB; model_catalog.recommended_catalog_ids).
 SMALL_DEFAULT_MEMORY_FLOOR_GIB = 32.0
-# The smaller speed packs, largest first. Under the 27B floor the default is
-# the first of these the app's tiers offer this machine; with unreadable
-# memory it is the last one. There is no FP16 4B build, so M1/M2 Macs stop
-# at the 9B.
-_SMALL_SPEED_CATALOG_IDS = ("bonsai-2-27b-optimized-speed", "qwen35-9b-optimized-speed", "qwen35-4b-optimized-speed")
+# The smaller speed packs, in the order the app's tiers list them. Under the
+# 27B floor the default is the first of these the app's tiers offer this
+# machine; with unreadable memory it is the last one. MiMo V2.6 Qwen 9B sits
+# where the picker puts it, ahead of the Qwen 3.5 9B: Bonsai leads every tier
+# that lists MiMo, so no default changes, and the CLI still names the app's
+# first pick if Bonsai's bound ever moves. There is no FP16 4B build, so
+# M1/M2 Macs stop at the 9B.
+_SMALL_SPEED_CATALOG_IDS = (
+    "bonsai-2-27b-optimized-speed",
+    "mimo-v26-qwen-9b-optimized-speed",
+    "qwen35-9b-optimized-speed",
+    "qwen35-4b-optimized-speed",
+)
 _SMALL_FP16_CATALOG_IDS = ("qwen35-9b-optimized-speed-fp16",)
 INTEL_REFUSAL_MESSAGE = (
     "MTPLX runs on Apple Silicon Macs (M1 and later); this Mac has an Intel "
@@ -244,7 +254,13 @@ class DefaultModelSelection:
 
     @property
     def display_name(self) -> str:
-        for model_id in ("bonsai-2-27b-optimized-speed", "flash-next-optimized-speed"):
+        # Catalog names first for packs the substring checks below would
+        # mislabel (the MiMo repo name carries "9B").
+        for model_id in (
+            "bonsai-2-27b-optimized-speed",
+            "flash-next-optimized-speed",
+            "mimo-v26-qwen-9b-optimized-speed",
+        ):
             pack = catalog_model_with_id(model_id)
             if pack and self.hf_model == pack.hf_model_id:
                 return pack.display_name
@@ -641,6 +657,8 @@ def _public_model_id_from_name(value: str) -> str | None:
          ("flash-next-optimized-quality",)),
         (BONSAI_OPTIMIZED_SPEED_PUBLIC_MODEL_ID, BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
          ("bonsai-2-27b-optimized-speed", BONSAI_LEGACY_PUBLIC_MODEL_ID, BONSAI_LEGACY_LOCAL_NAME)),
+        (MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID, MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+         ("mimo-v26-qwen-9b-optimized-speed",)),
     ):
         names = {public_id, repo_id.lower(), Path(repo_id).name.lower(), *(a.lower() for a in aliases)}
         if components & names:
@@ -863,7 +881,7 @@ def _small_pack_offered_first(variant: str, memory_gib: float) -> CatalogModel |
     """The first small speed pack the app's picker would list for this Mac.
 
     ``recommended_models`` is the catalog's RAM-tiered order with the
-    peak-memory filter applied (the 4B pair leads below 16 GiB, the 9B
+    peak-memory filter applied (the 4B pair leads below 16 GiB, Bonsai
     leads 16-31 GiB; M1/M2 have only the FP16 9B), restricted here to the
     speed ladder so the default is never a quality build.
     """
