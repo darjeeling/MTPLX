@@ -1608,3 +1608,5 @@
 "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "Cuerpo y cabezal MTP de 8 bits, tensores estructurales BF16 y tabla de n-gramas de 4 bits. Versión de Flash-Next de mayor fidelidad.";
 
 "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "Modelo ternario de 27B de Prism ML con visión y MTP. Pesos compactos para Mac con menos memoria.";
+
+"6-bit quantization. Xiaomi's agentic coding distill of Qwen 3.5 9B." = "Cuantización de 6 bits. Destilación de Qwen 3.5 9B hecha por Xiaomi para programación con agentes.";

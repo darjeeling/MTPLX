@@ -399,9 +399,16 @@ public struct OpenCodeIntegration: Sendable {
     }
 
     public static func modelID(for model: String) -> String {
-        // Exact released identities, including legacy Bonsai folder/served aliases.
+        // Exact released identities, including legacy Bonsai folder/served
+        // aliases. MiMo must match here: its names also contain "qwen" and
+        // "optimized-speed", which the generic branch below claims for the
+        // Qwen 3.6 27B.
         if let option = MTPLXModelOption.option(matching: model),
-           ["flash-next-optimized-quality", "bonsai-2-27b-optimized-speed"].contains(option.id) {
+           [
+               "flash-next-optimized-quality",
+               "bonsai-2-27b-optimized-speed",
+               "mimo-v26-qwen-9b-optimized-speed",
+           ].contains(option.id) {
             return "mtplx-\(option.id)"
         }
         let lower = model.lowercased()

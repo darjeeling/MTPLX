@@ -1158,6 +1158,13 @@ _QWEN3_8_MARKER = re.compile(r"qwen3[._-]?8(?!\d*b)")
 # descriptor until a dedicated qwen4 contract exists.
 _QWEN4_PREVIEW_MARKER = re.compile(r"flash[._-]?next|qwen[._-]?4")
 _BONSAI2_MARKERS = ("bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b")
+# The MiMo V2.6 Qwen 9B catalog pack (repo and folder names, catalog and served
+# ids) is Xiaomi's Qwen3.5-9B fine-tune. Its names carry no Qwen version token,
+# so a ref-only lookup (before the checkpoint is inspected) resolved it to
+# "unknown", or to qwen3_6 through the shared lane default. "MiMo" names the
+# publisher, not the architecture: these return qwen3_5, never the mimo family,
+# which stays keyed on the checkpoint's own architecture fields below.
+_MIMO_QWEN35_MARKERS = ("mimo-v2.6-qwen-9b", "mimo-v26-qwen-9b")
 
 
 def _explicit_qwen_family_marker(text: str) -> str | None:
@@ -1165,6 +1172,8 @@ def _explicit_qwen_family_marker(text: str) -> str | None:
         return None
     if any(marker in text for marker in _BONSAI2_MARKERS):
         return "qwen3_8"
+    if any(marker in text for marker in _MIMO_QWEN35_MARKERS):
+        return "qwen3_5"
     if _QWEN3_8_MARKER.search(text):
         return "qwen3_8"
     if "qwen3.6" in text or "qwen3_6" in text or "qwen36" in text or "qwen3-6" in text:

@@ -121,6 +121,15 @@ QWEN35_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID = (
 QWEN35_9B_OPTIMIZED_SPEED_FP16_PUBLIC_MODEL_ID = (
     "mtplx-qwen35-9b-optimized-speed-fp16"
 )
+# MiMo V2.6 Qwen 9B (2026-09-23): Xiaomi's agentic coding distill of Qwen 3.5
+# 9B (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B, a Qwen3.5-9B fine-tune) in the 6-bit
+# 9B pack layout. The public id equals the model_catalog alias.
+MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID = (
+    "Youssofal/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed"
+)
+MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID = (
+    "mtplx-mimo-v26-qwen-9b-optimized-speed"
+)
 QWEN36_35B_OPTIMIZED_SPEED_HF_MODEL_ID = (
     "Youssofal/Qwen3.6-35B-A3B-MTPLX-Optimized-Speed"
 )

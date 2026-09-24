@@ -114,7 +114,10 @@ def test_bonsai_bound_matches_swift_and_can_move_to_24(monkeypatch):
     bound = float(re.search(r"bonsaiRecommendationMinGiB: Double = ([0-9.]+)", swift)[1])
     assert bound == catalog.BONSAI_RECOMMENDATION_MIN_GIB == 16
     monkeypatch.setattr(catalog, "BONSAI_RECOMMENDATION_MIN_GIB", 24)
-    for ram, winner in [(16, "qwen35-9b-optimized-speed"), (18, "qwen35-9b-optimized-speed"), (24, "bonsai-2-27b-optimized-speed")]:
+    # Below a moved bound Bonsai follows the 9B-class picks, so MiMo (always
+    # right ahead of the Qwen 3.5 9B) is the app's first pick and the CLI
+    # default alike.
+    for ram, winner in [(16, "mimo-v26-qwen-9b-optimized-speed"), (18, "mimo-v26-qwen-9b-optimized-speed"), (24, "bonsai-2-27b-optimized-speed")]:
         offered = catalog.recommended_catalog_ids(memory_gib=ram, chip_tier="modern")
         assert offered[0] == winner
         assert "bonsai-2-27b-optimized-speed" in offered

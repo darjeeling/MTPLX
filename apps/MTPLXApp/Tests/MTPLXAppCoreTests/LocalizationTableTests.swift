@@ -348,7 +348,7 @@ final class LocalizationTableTests: XCTestCase {
     }
 
     func testNewDescriptionsExistInEveryLanguageAndResolveLive() throws {
-        for id in ["flash-next-optimized-quality", "bonsai-2-27b-optimized-speed"] {
+        for id in ["flash-next-optimized-quality", "bonsai-2-27b-optimized-speed", "mimo-v26-qwen-9b-optimized-speed"] {
             let model = try XCTUnwrap(MTPLXModelOption.officialCatalog.first { $0.id == id })
             let key = model.detail
             for language in Self.languages {
@@ -357,6 +357,11 @@ final class LocalizationTableTests: XCTestCase {
                 L10n.activate(language)
                 XCTAssertEqual(model.localizedDetail, value)
                 if id.hasPrefix("bonsai") { XCTAssertTrue(value.contains("Prism ML")) }
+                if id.hasPrefix("mimo") {
+                    // Brand and base-model names stay untranslated.
+                    XCTAssertTrue(value.contains("Xiaomi"), language.code)
+                    XCTAssertTrue(value.contains("Qwen 3.5 9B"), language.code)
+                }
             }
         }
         L10n.activate(.english)

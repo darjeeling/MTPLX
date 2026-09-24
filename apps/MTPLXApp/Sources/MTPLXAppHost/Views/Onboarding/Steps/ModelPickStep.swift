@@ -819,6 +819,8 @@ struct RecommendedModelRow: Identifiable, Sendable {
             return .bonsaiOptimizedSpeed
         case "flash-next-optimized-quality":
             return .flashNextOptimizedQuality
+        case "mimo-v26-qwen-9b-optimized-speed":
+            return .mimoQwen9BSpeed
         case "qwen35-9b-optimized-speed", "qwen35-9b-optimized-speed-fp16":
             return .qwen9B
         case "qwen38-27b-optimized-speed", "qwen38-27b-optimized-speed-fp16":
@@ -878,6 +880,16 @@ struct RecommendedModelRow: Identifiable, Sendable {
         logo: .qwen,
         title: "Qwen 3.8 Flash-Next Optimized Quality",
         detailLocalizationKey: "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build."
+    )
+
+    // Xiaomi's Qwen 3.5 9B distill: the Qwen mark, as Bonsai's Qwen-based row
+    // uses. No FP16 sibling, so model(for:hardware:) passes it through.
+    static let mimoQwen9BSpeed = RecommendedModelRow(
+        choice: .curatedMiMoQwen9BOptimizedSpeed,
+        modelID: "mimo-v26-qwen-9b-optimized-speed",
+        logo: .qwen,
+        title: "MiMo V2.6 Qwen 9B Optimized Speed",
+        detailLocalizationKey: "6-bit quantization. Xiaomi's agentic coding distill of Qwen 3.5 9B."
     )
 
     static let qwen9B = RecommendedModelRow(

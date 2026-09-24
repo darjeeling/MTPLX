@@ -495,6 +495,33 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             peakMemoryGiB: 4.75,
             recommendedFor: [.modernApple]
         ),
+        // MiMo V2.6 Qwen 9B (2026-09-23): Xiaomi's supervised fine-tune of
+        // Qwen3.5-9B for agentic coding (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B,
+        // MIT), packed like the 6-bit 9B: 6-bit group-64 body, the Qwen3.5-9B
+        // MTP head and the vision tower in BF16. The architecture is plain
+        // Qwen 3.5, so it takes the Qwen 3.5 contract, never the MiMo one. No
+        // FP16 sibling exists, so M1 and M2 are not offered it. Mirrors
+        // model_catalog.OFFICIAL_CATALOG.
+        MTPLXModelOption(
+            id: "mimo-v26-qwen-9b-optimized-speed",
+            displayName: "MiMo V2.6 Qwen 9B Optimized Speed",
+            shortName: "MiMo V2.6 Qwen 9B Optimized Speed",
+            localizedDetailKey: "6-bit quantization. Xiaomi's agentic coding distill of Qwen 3.5 9B.",
+            hfModelID: "Youssofal/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+            localCandidates: [
+                "~/.mtplx/models/Youssofal--MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+                "~/Documents/MTPLX/models/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+            ],
+            aliases: [
+                "mtplx-mimo-v26-qwen-9b-optimized-speed",
+                "MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed",
+            ],
+            // Published Hub bytes (2026-09-23). Same geometry and bytes as the
+            // 6-bit 9B, so its peak carries over; measured 8.70 GiB at 15K tokens.
+            sizeBytes: 8_695_116_595,
+            peakMemoryGiB: 10.0,
+            recommendedFor: [.modernApple]
+        ),
         MTPLXModelOption(
             id: "qwen35-9b-optimized-speed",
             displayName: "Qwen 3.5 9B Optimized Speed",
@@ -1130,7 +1157,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         case .legacyApple:
             return recommendationIDs(
                 memoryGiB: hardware.unifiedMemoryGiB,
-                small: "qwen35-9b-optimized-speed-fp16",
+                small: ["qwen35-9b-optimized-speed-fp16"],
                 speed27: "optimized-speed-fp16",
                 speed27V2: nil,
                 speed35: "qwen36-35b-a3b-optimized-speed-fp16",
@@ -1145,7 +1172,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             }
             var ids = recommendationIDs(
                 memoryGiB: hardware.unifiedMemoryGiB,
-                small: "qwen35-9b-optimized-speed",
+                small: modernSmallIDs,
                 speed27: "optimized-speed",
                 speed27V2: "optimized-speed-v2",
                 speed35: "qwen36-35b-a3b-optimized-speed",
@@ -1155,7 +1182,8 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
             )
             let bonsai = "bonsai-2-27b-optimized-speed"
             if hardware.unifiedMemoryGiB < 32 {
-                let position = hardware.unifiedMemoryGiB >= bonsaiMinimumGiB ? 0 : 1
+                // Bonsai leads from its bound and follows the 9B-class picks below it.
+                let position = hardware.unifiedMemoryGiB >= bonsaiMinimumGiB ? 0 : modernSmallIDs.count
                 ids.insert(bonsai, at: position)
             } else {
                 ids.append(bonsai)
@@ -1201,8 +1229,18 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         "qwen36-35b-a3b-optimized-speed",
         "qwen36-35b-a3b-optimized-balance",
         "gemma4-optimized-speed",
+        "mimo-v26-qwen-9b-optimized-speed",
         "qwen35-9b-optimized-speed",
         "bonsai-2-27b-optimized-speed",
+    ]
+
+    /// The 9B-class speed picks on modern chips. MiMo V2.6 Qwen 9B rides
+    /// immediately ahead of the Qwen 3.5 9B wherever the 9B is offered, so
+    /// it is a top onboarding suggestion (founder, 2026-09-23) without
+    /// replacing any tier's first pick. Mirrors model_catalog._MODERN_SMALL_IDS.
+    private static let modernSmallIDs = [
+        "mimo-v26-qwen-9b-optimized-speed",
+        "qwen35-9b-optimized-speed",
     ]
 
     /// Qwen 3.8 trio (2026-08-15 release): Optimized Speed is the
@@ -1227,7 +1265,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
 
     private static func recommendationIDs(
         memoryGiB: Double,
-        small: String,
+        small: [String],
         speed27: String,
         speed27V2: String?,
         speed35: String,
@@ -1236,16 +1274,16 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         trio38: [String] = []
     ) -> [String] {
         if memoryGiB < 32 {
-            return [small]
+            return small
         }
         if memoryGiB < 48 {
             guard let speed27V2 else {
-                return trio38 + [small, speed27, "gemma4-optimized-speed", speed35, quality27]
+                return trio38 + small + [speed27, "gemma4-optimized-speed", speed35, quality27]
             }
-            return trio38 + [speed27V2, speed27, small, "gemma4-optimized-speed", speed35, quality27]
+            return trio38 + [speed27V2, speed27] + small + ["gemma4-optimized-speed", speed35, quality27]
         }
         return trio38 + (speed27V2.map { [$0] } ?? [])
-            + [speed27, quality27, speed35, balance35, "gemma4-optimized-speed", small]
+            + [speed27, quality27, speed35, balance35, "gemma4-optimized-speed"] + small
     }
 
     private static func optionWithID(_ id: String) -> MTPLXModelOption? {
@@ -1498,6 +1536,9 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         if isBonsaiFamilyHint(normalized) || matchesQwen38VersionToken(normalized) {
             return "qwen3_8"
         }
+        if isMiMoQwen35FamilyHint(normalized) {
+            return "qwen3_5"
+        }
         if normalized.contains("qwen3.6") || normalized.contains("qwen36") || normalized.contains("qwen3-6") {
             return "qwen3_6"
         }
@@ -1639,6 +1680,16 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         ["bonsai-2-27b", "bonsai-3.8-27b", "bonsai-38-27b"].contains { text.contains($0) }
     }
 
+    /// The MiMo V2.6 Qwen 9B catalog pack (repo and folder names, catalog
+    /// and served ids) is Xiaomi's Qwen3.5-9B fine-tune, and none of its
+    /// names carries a Qwen version token. "MiMo" names the publisher, not
+    /// the architecture, so these resolve to qwen3_5 (engine twin:
+    /// descriptors._MIMO_QWEN35_MARKERS).
+    static func isMiMoQwen35FamilyHint(_ text: String) -> Bool {
+        let dashed = text.lowercased().replacingOccurrences(of: "_", with: "-")
+        return ["mimo-v2.6-qwen-9b", "mimo-v26-qwen-9b"].contains { dashed.contains($0) }
+    }
+
     /// Memoized like the engine's lru_cached `_artifact_family_texts`: the
     /// effort picker asks on every render, and a miss resolves symlinks and
     /// reads mtplx_runtime.json.
@@ -1689,6 +1740,7 @@ public struct MTPLXModelOption: Codable, Equatable, Identifiable, Sendable {
         ) != nil {
             return "qwen3_8"
         }
+        if isMiMoQwen35FamilyHint(normalized) { return "qwen3_5" }
         if normalized.contains("qwen3.5") || normalized.contains("qwen3_5")
             || normalized.contains("qwen3-5") || normalized.contains("qwen35")
         {

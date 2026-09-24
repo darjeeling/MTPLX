@@ -106,6 +106,8 @@ from mtplx.profiles import (
     FLASH_NEXT_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
     LEGACY_OPTIMIZED_HF_MODEL_ID,
     LEGACY_OPTIMIZED_PUBLIC_MODEL_ID,
+    MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+    MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
     OPTIMIZED_SPEED_V1_HF_MODEL_ID,
     OPTIMIZED_SPEED_V1_PUBLIC_MODEL_ID,
     OPTIMIZED_SPEED_V2_HF_MODEL_ID,
@@ -1159,6 +1161,9 @@ _TURBO_DEFAULT_PUBLIC_MODEL_IDS = frozenset(
         # are exactness-proven, so both promote together.
         QWEN35_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID,
         QWEN35_9B_OPTIMIZED_SPEED_FP16_PUBLIC_MODEL_ID,
+        # MiMo V2.6 Qwen 9B (2026-09-23) shares the 9B's 6-bit geometry and
+        # MTP head but stays off this list until turbo is measured on its own
+        # weights: a new pack never inherits an unmeasured promotion.
         # Qwen3.8 27B family (2026-08-14). Trunk geometry is identical to the
         # Qwen3.6 27B flagships above, so the vk/NAX verify kernels and their
         # quant-bits gates carry over; the day-one A/B on the real artifacts
@@ -9401,6 +9406,10 @@ def _model_ref_from_public_model_id(model_id: str | None) -> str | None:
         Path(BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID).name.lower(): BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
         BONSAI_LEGACY_PUBLIC_MODEL_ID: BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
         BONSAI_LEGACY_LOCAL_NAME.lower(): BONSAI_OPTIMIZED_SPEED_HF_MODEL_ID,
+        "mimo-v26-qwen-9b-optimized-speed": MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+        MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_PUBLIC_MODEL_ID: MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+        MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID.lower(): MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
+        Path(MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID).name.lower(): MIMO_V26_QWEN_9B_OPTIMIZED_SPEED_HF_MODEL_ID,
         DEFAULT_PUBLIC_MODEL_ID.lower(): DEFAULT_HF_MODEL_ID,
         DEFAULT_HF_MODEL_ID.lower(): DEFAULT_HF_MODEL_ID,
         DEFAULT_MODEL_ID.lower(): DEFAULT_HF_MODEL_ID,

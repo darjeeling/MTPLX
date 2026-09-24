@@ -4112,7 +4112,7 @@ final class MTPLXAppCoreTests: XCTestCase {
 
     func testFreshModernSmallMemoryCatalogLeadsWithBonsaiAndOffersFourBPair() throws {
         // The rebuilt 4B pair (2026-07-19) is recommendable again: the 16 GB
-        // tier leads with Bonsai, with 9B and both 4B lanes behind it.
+        // tier leads with Bonsai, with MiMo, the 9B and both 4B lanes behind it.
         let m5 = DetectedHardware(
             chipName: "Apple M5",
             appleSiliconGeneration: "m5",
@@ -4126,6 +4126,7 @@ final class MTPLXAppCoreTests: XCTestCase {
 
         XCTAssertEqual(ids, [
             "bonsai-2-27b-optimized-speed",
+            "mimo-v26-qwen-9b-optimized-speed",
             "qwen35-9b-optimized-speed",
             "qwen35-4b-optimized-speed",
             "qwen35-4b-optimized-quality",
@@ -4153,6 +4154,7 @@ final class MTPLXAppCoreTests: XCTestCase {
             "qwen38-27b-bare-speed",
             "optimized-speed-v2",
             "optimized-speed",
+            "mimo-v26-qwen-9b-optimized-speed",
             "qwen35-9b-optimized-speed",
             "gemma4-optimized-speed",
             "qwen36-35b-a3b-optimized-speed",
@@ -4214,6 +4216,7 @@ final class MTPLXAppCoreTests: XCTestCase {
             "qwen36-35b-a3b-optimized-speed",
             "qwen36-35b-a3b-optimized-balance",
             "gemma4-optimized-speed",
+            "mimo-v26-qwen-9b-optimized-speed",
             "qwen35-9b-optimized-speed",
             "bonsai-2-27b-optimized-speed",
             "qwen35-4b-optimized-speed",

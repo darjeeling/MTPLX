@@ -1608,3 +1608,5 @@
 "8-bit body and MTP head, BF16 structural tensors, and a 4-bit n-gram table. Higher-fidelity Flash-Next build." = "8비트 본체와 MTP 헤드, BF16 구조 텐서, 4비트 n-gram 테이블. 정확도를 높인 Flash-Next 빌드.";
 
 "Prism ML ternary 27B model with vision and MTP. Compact weights for smaller Macs." = "비전과 MTP를 지원하는 Prism ML의 삼진 27B 모델. 메모리가 적은 Mac을 위한 작은 가중치.";
+
+"6-bit quantization. Xiaomi's agentic coding distill of Qwen 3.5 9B." = "6비트 양자화. 에이전트 코딩을 위해 Xiaomi가 Qwen 3.5 9B를 증류한 모델.";

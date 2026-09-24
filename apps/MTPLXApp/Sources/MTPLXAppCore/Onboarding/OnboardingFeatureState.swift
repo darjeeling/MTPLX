@@ -45,6 +45,7 @@ public enum ModelPickChoice: Equatable, Sendable, Hashable {
     case curatedQwen35FourBQuality
     case curatedBonsaiOptimizedSpeed
     case curatedFlashNextOptimizedQuality
+    case curatedMiMoQwen9BOptimizedSpeed
     case curatedQwen35NineBSpeed
     case curatedQwen38OptimizedSpeed
     case curatedQwen38BareSpeed
@@ -190,6 +191,9 @@ public struct OnboardingFeatureState: Equatable, Sendable {
             return catalog.first { $0.id == "bonsai-2-27b-optimized-speed" }
         case .curatedFlashNextOptimizedQuality:
             return catalog.first { $0.id == "flash-next-optimized-quality" }
+        case .curatedMiMoQwen9BOptimizedSpeed:
+            // Modern-tier only with no FP16 sibling, so no legacy swap.
+            return catalog.first { $0.id == "mimo-v26-qwen-9b-optimized-speed" }
         case .curatedQwen35NineBSpeed:
             let useFP16 = hardware?.tier == .legacyApple
             let id = useFP16 ? "qwen35-9b-optimized-speed-fp16" : "qwen35-9b-optimized-speed"
@@ -254,6 +258,7 @@ public struct OnboardingFeatureState: Equatable, Sendable {
                  .curatedQwen35FourBQuality,
                  .curatedBonsaiOptimizedSpeed,
                  .curatedFlashNextOptimizedQuality,
+                 .curatedMiMoQwen9BOptimizedSpeed,
              .curatedQwen35NineBSpeed,
              .curatedQwen38OptimizedSpeed,
              .curatedQwen38BareSpeed,
@@ -340,6 +345,7 @@ public struct OnboardingFeatureState: Equatable, Sendable {
                  .curatedQwen35FourBQuality,
                  .curatedBonsaiOptimizedSpeed,
                  .curatedFlashNextOptimizedQuality,
+                 .curatedMiMoQwen9BOptimizedSpeed,
                  .curatedQwen35NineBSpeed,
                  .curatedQwen38OptimizedSpeed,
                  .curatedQwen38BareSpeed,
