@@ -37,6 +37,19 @@ All notable user-facing changes to MTPLX. The format is based on
   from measured evidence; `scripts/bonsai_memory_table.py` measures the
   peak memory per RAM class.
 
+- **MiMo V2.6 Qwen 9B Optimized Speed.** Xiaomi's MiMo-V2.6-Distill-Qwen-9B
+  (a Qwen3.5-9B fine-tune for coding and agents, MIT) joins the catalog as
+  `mimo-v26-qwen-9b-optimized-speed`: pack
+  `Youssofal/MiMo-V2.6-Qwen-9B-MTPLX-Optimized-Speed`, 8,695,116,595 bytes,
+  6-bit g64 body, Xiaomi's BF16 vision tower and the Qwen3.5-9B draft head
+  (the checkpoint ships none); served id
+  `mtplx-mimo-v26-qwen-9b-optimized-speed`, the Qwen 3.5 contract (sampler
+  0.6 / 0.95 / 20, depth 2 by default). KL 0.0054 and 97.3 percent top-1
+  agreement against Xiaomi's BF16 checkpoint over 19,265 tokens. The app and
+  the CLI list it right before Qwen 3.5 9B on M3, M4 and M5 Macs from 16 GB
+  (second after Bonsai 2 on 16 to 31 GB); name-only lookups resolve it to
+  `qwen3_5`, and the onboarding list has its own row.
+
 - **Flash-Next Optimized-Quality recipe.** `flash-next-optimized-quality`
   in Forge: the main model and the draft head at 8 bits, group size 64, the
   structural weights in BF16, the n-gram table at 4 bits, group size 32 (the
@@ -257,6 +270,12 @@ All notable user-facing changes to MTPLX. The format is based on
   files, so it is unaffected. Records are now `capture_version` 2.
 
 ### Fixed
+
+- **Model list icons.** Every trailing icon in the model list draws in one
+  28-point slot on the trash can's axis (the checks sat 5 to 6 points to the
+  right), and the trash of a downloaded model appears only while the pointer
+  is at the right end of the row or the button has keyboard focus; the row's
+  context menu also offers Remove downloaded files.
 
 - **The repetition stops are off by default.** In 2.11.3 and earlier the
   server ended a reply when a block of up to 96 tokens repeated four times
