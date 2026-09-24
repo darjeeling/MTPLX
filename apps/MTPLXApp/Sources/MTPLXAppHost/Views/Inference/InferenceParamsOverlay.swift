@@ -360,30 +360,39 @@ struct InferenceParamsOverlay: View, Equatable {
     @ViewBuilder
     private var connectedAppsSection: some View {
         InferenceSection(visible: rowsVisibleCount > 0) {
-            Toggle(tr("Use MTPLX settings for connected apps"), isOn: Binding(
-                get: { controlClientSettings },
-                set: { newValue in
-                    let previous = controlClientSettings
-                    controlClientSettings = newValue
-                    Task {
-                        do {
-                            try await backend.updateLiveSettings(MutableSettings(
-                                managedClientControls: newValue ? "app" : "client"
-                            ))
-                            clientControlError = nil
-                        } catch {
-                            controlClientSettings = previous
-                            clientControlError = error.localizedDescription
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(tr("Use MTPLX settings for connected apps"))
+                        .font(.system(.callout))
+                        .foregroundStyle(Brand.typeBody)
+                    Text(tr("On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings."))
+                        .font(.caption2)
+                        .foregroundStyle(Brand.typeTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Toggle(tr("Use MTPLX settings for connected apps"), isOn: Binding(
+                    get: { controlClientSettings },
+                    set: { newValue in
+                        let previous = controlClientSettings
+                        controlClientSettings = newValue
+                        Task {
+                            do {
+                                try await backend.updateLiveSettings(MutableSettings(
+                                    managedClientControls: newValue ? "app" : "client"
+                                ))
+                                clientControlError = nil
+                            } catch {
+                                controlClientSettings = previous
+                                clientControlError = error.localizedDescription
+                            }
                         }
                     }
-                }
-            ))
-                .toggleStyle(.switch)
-                .font(.caption)
-            Text(tr("On: connected apps follow MTPLX reasoning and sampling. Off: their own settings apply. Ordinary API requests keep their own settings."))
-                .font(.caption2)
-                .foregroundStyle(Brand.typeTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+                ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlHoverLift(motionEnabled: motionEnabled)
+            }
             if let clientControlError {
                 Text(clientControlError).font(.caption2).foregroundStyle(Brand.warning)
             }
