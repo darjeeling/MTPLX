@@ -126,6 +126,28 @@ All notable user-facing changes to MTPLX. The format is based on
   refuses, the app shows its reason instead of an exit code. The new
   strings are in all thirteen languages.
 
+- **`MTPLX_MLX_COMMAND_BUFFER_MB` sets MLX's command buffer limit.** MLX
+  closes a GPU command buffer once it has touched 50 MiB of buffers on a Max.
+  At 128K tokens on Flash-Next, lifting that limit took decode from 51 to 54
+  tok/s to 65.9 tok/s, but peak memory during prompt processing rose from
+  92.0 to 103.7 GB at 16K, and close to the memory limit the gain shrank to
+  45.6 against 49.4 tok/s. MTPLX keeps MLX's default. A value given to MLX
+  directly still wins, and `/health` shows the value the engine was given.
+- **Measuring tools for the Flash-Next speed work, all off by default.**
+  `MTPLX_QWEN4_PREFILL_PROFILE=1` times each part of a prompt pass,
+  `MTPLX_QWEN4_EXPERT_OVERLAP_PROBE=1` counts the distinct experts of the
+  verify rows, `MTPLX_FIXED_M4_DONATION_PROBE=1` reports a verify step that
+  copies the attention cache instead of reusing it and can name every piece
+  of state that moved, and `MTPLX_EXPERIMENT_DEPTH_CEILING` raises the draft
+  depth limit for acceptance tests only. The compiled verifier can also
+  report how its host time splits between gathering rows, preparing inputs,
+  replaying the graph and encoding.
+- **An experimental dense-band attention route for Flash-Next prompts.**
+  `MTPLX_QSA_DENSE_BAND_SDPA=1` applies the attention mask inside the score
+  matrix multiply below the sparse switch point, with bit-identical output
+  in tests and the stock call's peak memory plus one mask plane. It stays
+  off until a full-model check on real prompts confirms it.
+
 ### Changed
 
 - **Flash-Next prefill runs five more steps as single GPU kernels.** The
@@ -269,6 +291,43 @@ All notable user-facing changes to MTPLX. The format is based on
   `mtplx trace` reads the request log and the flight recorder, not these
   files, so it is unaffected. Records are now `capture_version` 2.
 
+- **The draft head writes only its cache during Flash-Next prompt
+  processing.** Its pass over each chunk ran the whole layer although only
+  the cache it writes is used. It now writes the cache and returns, with the
+  same cache bits. The full pass cost 0.09 to 0.12 s per 4,096-token chunk,
+  3.3 s of a 104 s prompt at 128K. `MTPLX_QWEN4_MTP_HISTORY_CACHE_ONLY=0`
+  restores the full pass.
+- **Less memory between Flash-Next prompt chunks.** A three-row copy of each
+  recurrent layer's state kept that layer's whole input stream alive until
+  the next chunk. The chunk's evaluation now includes those states, which
+  frees about 3.0 GB between 4,096-token chunks (85.84 GB instead of 88.86).
+  Prompt forwards of 1,024 rows or more also hand finished layers to the GPU
+  every four layers, so each layer's temporary data is freed with the layer.
+  `MTPLX_QWEN4_PREFILL_MIDLOOP_EVAL` sets the number of layers, and `0` turns
+  it off.
+- **The wide prompt chunk's memory check counts what a chunk holds.** It
+  charged a flat 8 GiB per 4,096 rows on top of the prompt's KV, which
+  refused the wide chunk at 64K and 128K on a 128 GB Mac. It now charges the
+  larger of the last dense forward and the last forward of the prompt, and
+  those two refusals became grants. A refused wide chunk now shows up on
+  `/health`, in the request log and in `mtplx doctor --explain`, and the
+  request uses 2,048-token chunks. `MTPLX_QWEN4_PREFILL_WIDE_CHUNK=0` and
+  `MTPLX_QSA_PREFILL_WIDE_MIN_CONTEXT=0` turn the wide chunk off.
+- **Model-tuned settings live in one block per model family,** each value
+  with its source and its measurement. This changed no behavior. One check
+  now decides whether a Mac's GPU has tensor units for every fast path, and
+  `MTPLX_FORCE_GPU_FAMILY_FALLBACK=1` now also covers Flash-Next prompt
+  processing, so an M5 can run MTPLX's M1 to M4 paths.
+- **The server guide covers Open WebUI's Controls** (issue #513): leave them
+  on Default, so the settings MTPLX tuned for the model apply.
+- **Release checks.** The release script refuses to publish while the notes
+  or README still carry draft wording, runs the model checks after the unit
+  suites finish, and fails when a catalog repository cannot be found. The
+  native package tests run in CI instead of being skipped. New scripts
+  compare the prompt the server builds for an agent session with the
+  model's own chat template token by token, and prove the compiled image
+  routes on the real Flash-Next and 27B packs with one command each.
+
 ### Fixed
 
 - **Model list icons.** Every trailing icon in the model list draws in one
@@ -341,13 +400,15 @@ All notable user-facing changes to MTPLX. The format is based on
   lets go of the session instead of answering 409; the request log records
   `request_session_cancel_handoff`.
 
-- **Cancelling an app start no longer aborts the app** ("freed pointer was
-  not the last allocation"). The daemon supervisor's health probe and
-  restart delay were asynchronous closure literals in default arguments of
-  a public initializer; copies emitted into different modules disagreed on
-  the asynchronous frame size and the closure overran its frame. The
-  defaults are named static functions. A start cancelled with Stop writes
-  no failed-start report.
+- **Cancelling an app start no longer corrupts the app's memory.** The
+  daemon supervisor's health probe and restart delay were asynchronous
+  closure literals in default arguments of a public initializer. Copies
+  emitted into different modules disagreed on the asynchronous frame size,
+  and the closure wrote past the end of its frame. Debug builds crashed
+  with "freed pointer was not the last allocation" in 3 of 3 runs; the
+  release build did not crash in a manual check, but the fault was in every
+  build. The defaults are named static functions. A start cancelled with
+  Stop writes no failed-start report.
 
 - **Flash-Next image positions are consistent through the whole reply**
   (since 2.10.1 only the main verification forward ran inside the image
@@ -626,6 +687,8 @@ All notable user-facing changes to MTPLX. The format is based on
 - **`mtplx inspect` reports whether a pack takes images,** and a pack that
   keeps its vision tower in one weight file with no index, like Prism ML's,
   is served with vision.
+- **`/health` no longer swallows a cancellation or an interrupt** while it
+  reads its optional counters.
 
 ## [2.11.3] - 2026-09-17
 
